@@ -1,3 +1,14 @@
+# UEVR (Patched Fork)
+
+This is a patched fork of [praydog's UEVR](https://github.com/praydog/UEVR) with the following fixes:
+
+- Fix crashes in Creatures of Ava — [technical details](docs/native-stereo-crash-handler.md)
+- Fix crashes on death in Returnal — [technical details](docs/transition-crash-handler.md)
+
+**How to use:** Download the matching [UEVR Nightly](https://github.com/praydog/UEVR-nightly/releases), then overwrite with files from [this fork's releases](https://github.com/wyerdev/UEVR/releases).
+
+---
+
 # UEVR ![build](https://github.com/praydog/UEVR/actions/workflows/dev-release.yml/badge.svg)
 
 Universal Unreal Engine VR Mod (4/5)

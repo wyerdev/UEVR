@@ -1,0 +1,98 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Configure CMake
+        run: cmake -S ${{github.workspace}} -B ${{github.workspace}}/build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+
+      - name: Build UEVR
+        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --target uevr
+
+      - name: Build Plugin Nullifier
+        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --target vr-plugin-nullifier
+
+      - name: Build Lua API
+        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --target LuaVR
+
+      - name: Read base nightly tag
+        run: |
+          $tag = (Get-Content "${{github.workspace}}/BASE_NIGHTLY" -Raw).Trim()
+          echo "NIGHTLY_TAG=$tag" >> $env:GITHUB_ENV
+          if ($tag -match "nightly-(\d+)-") {
+            $num = $Matches[1]
+          } else {
+            $num = "00000"
+          }
+          echo "NIGHTLY_NUM=$num" >> $env:GITHUB_ENV
+          echo "ZIP_NAME=uevr-patched-$num-${{github.run_number}}" >> $env:GITHUB_ENV
+        shell: powershell
+
+      - name: Compress artifacts
+        run: |
+          echo ${{github.sha}} > ${{github.workspace}}/revision.txt
+          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/uevr/*
+          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/vr-plugin-nullifier/UEVRPluginNullifier.dll
+          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/LuaVR/LuaVR.dll
+          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/revision.txt
+
+      - name: Hash zip
+        run: |
+          $ReleaseHash = Get-FileHash -Algorithm SHA256 ${{github.workspace}}/${{env.ZIP_NAME}}.zip
+          $ReleaseHash.Hash | Out-File -FilePath ${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256
+        shell: powershell
+
+      - name: Generate release notes
+        run: |
+          $tag = "${{env.NIGHTLY_TAG}}"
+          $nightlyUrl = "https://github.com/praydog/UEVR-nightly/releases/tag/$tag"
+
+          $log = git log --pretty=format:"- %s (%h)" $(git describe --tags --abbrev=0 2>$null)..HEAD 2>$null
+          if (-not $log) {
+            $log = git log --pretty=format:"- %s (%h)" -20
+          }
+
+          $body = @"
+## How to install
+
+1. Download the **base UEVR nightly** this build is patched against:
+   **[$tag]($nightlyUrl)**
+2. Extract the nightly zip to a folder.
+3. Download **${{env.ZIP_NAME}}.zip** from this release.
+4. Extract and **overwrite/replace** the files from step 2 with the files from this release.
+5. Run UEVR as normal.
+
+## Changes
+$log
+"@
+
+          $body | Out-File -FilePath ${{github.workspace}}/RELEASE_NOTES.md -Encoding utf8
+        shell: powershell
+
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}
+          name: "UEVR Patched ${{env.NIGHTLY_NUM}}-${{github.run_number}} (${{github.sha}})"
+          artifacts: "${{github.workspace}}/${{env.ZIP_NAME}}.zip,${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256"
+          bodyFile: ${{github.workspace}}/RELEASE_NOTES.md
+          makeLatest: true
+          token: ${{secrets.GITHUB_TOKEN}}
