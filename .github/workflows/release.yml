@@ -70,21 +70,20 @@ jobs:
             $log = git log --pretty=format:"- %s (%h)" -20
           }
 
-          $body = @"
-## How to install
-
-1. Download the **base UEVR nightly** this build is patched against:
-   **[$tag]($nightlyUrl)**
-2. Extract the nightly zip to a folder.
-3. Download **${{env.ZIP_NAME}}.zip** from this release.
-4. Extract and **overwrite/replace** the files from step 2 with the files from this release.
-5. Run UEVR as normal.
-
-## Changes
-$log
-"@
-
-          $body | Out-File -FilePath ${{github.workspace}}/RELEASE_NOTES.md -Encoding utf8
+          $lines = @(
+            "## How to install",
+            "",
+            "1. Download the **base UEVR nightly** this build is patched against:",
+            "   **[$tag]($nightlyUrl)**",
+            "2. Extract the nightly zip to a folder.",
+            "3. Download **${{env.ZIP_NAME}}.zip** from this release.",
+            "4. Extract and **overwrite/replace** the files from step 2 with the files from this release.",
+            "5. Run UEVR as normal.",
+            "",
+            "## Changes",
+            $log
+          )
+          $lines -join "`n" | Out-File -FilePath ${{github.workspace}}/RELEASE_NOTES.md -Encoding utf8
         shell: powershell
 
       - name: Create Release
