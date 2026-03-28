@@ -3819,126 +3819,358 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
     m_tracking_system_hook = std::make_unique<IXRTrackingSystemHook>(this, potential_hmd_device_offset);
     m_components.push_back(m_tracking_system_hook.get());
 
-    // Add a vectored exception handler that catches attempted dereferences of a null XRSystem or HMDDevice
-    // The exception handler will then patch out the instructions causing the crash and continue execution
+    // Add a vectored exception handler that catches attempted dereferences of a null XRSystem or HMDDevice.
+    // When UEVR nullifies the engine's XR/HMD device pointers, engine code that dereferences them will
+    // trigger an access violation. This handler verifies the crash is caused by our nullification (by
+    // tracing the null-producing register backward to a [engine + xr_offset] load), then:
+    //   1. Zeros the destination register in CONTEXT (so downstream null checks work correctly)
+    //   2. Advances RIP past the faulting instruction (and past any following CALL)
+    //   3. Permanently patches the instruction with xor reg,reg + NOPs (so it won't fault again)
     AddVectoredExceptionHandler(1, [](PEXCEPTION_POINTERS exception) -> LONG {
         static std::vector<Patch::Ptr> xrsystem_patches{};
-        static std::unordered_set<uintptr_t> ignored_addresses{};
+        static std::unordered_set<uintptr_t> handled_addresses{};
+        static std::atomic<bool> handler_active{false};
 
-        if (exception->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
-            const auto exception_address = exception->ContextRecord->Rip;
-
-            if (ignored_addresses.contains(exception_address)) {
-                return EXCEPTION_CONTINUE_SEARCH;
+        const auto exc_code = exception->ExceptionRecord->ExceptionCode;
+        if (exc_code != EXCEPTION_ACCESS_VIOLATION) {
+            // Log crash-like non-AV exceptions so we can diagnose unhandled terminations
+            if (exc_code == 0xC0000409 /*STACK_BUFFER_OVERRUN*/ ||
+                exc_code == 0xC00000FD /*STACK_OVERFLOW*/ ||
+                exc_code == 0xC0000374 /*HEAP_CORRUPTION*/ ||
+                exc_code == 0x80000003 /*BREAKPOINT*/) {
+                SPDLOG_WARN("Non-AV exception {:x} at {:x} — not handling",
+                            exc_code, exception->ContextRecord->Rip);
+                spdlog::default_logger()->flush();
             }
-
-            ignored_addresses.insert(exception_address);
-
-            if (exception_address == 0) {
-                SPDLOG_INFO("[Exception Handler] Exception address is null");
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-
-            if (IsBadReadPtr((void*)exception_address, sizeof(void*))) {
-                SPDLOG_INFO("[Exception Handler] Bad read pointer at {:x}", exception_address);
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-
-            const auto decoded = utility::decode_one((uint8_t*)exception_address);
-
-            if (!decoded) {
-                SPDLOG_ERROR("[Exception Handler] Failed to decode instruction at {:x}", exception_address);
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-
-            const auto& op2 = decoded->Operands[1];
-
-            if (decoded->OperandsCount != 2 || 
-                 op2.Type != ND_OP_MEM      || 
-                !op2.Info.Memory.HasBase)
-            {
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-
-            SPDLOG_INFO("Encountered attempted dereference of null pointer at {:x}", exception_address);
-
-            // Get the start of the previous instruction
-            const auto previous_instruction = utility::resolve_instruction(exception_address - 1);
-
-            if (!previous_instruction) {
-                SPDLOG_ERROR("Could not resolve previous instruction at {:x}", exception_address - 1);
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-
-            if (previous_instruction->instrux.Operands[0].Type != ND_OP_REG ||
-                previous_instruction->instrux.Operands[0].Info.Register.Reg != op2.Info.Memory.Base)
-            {
-                SPDLOG_ERROR("Previous instruction does not use the same register as the dereference");
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-
-            const auto prev_op2 = previous_instruction->instrux.Operands[1];
-
-            if (previous_instruction->instrux.OperandsCount < 2 ||
-                prev_op2.Type != ND_OP_MEM ||
-                !prev_op2.Info.Memory.HasBase)
-            {
-                SPDLOG_ERROR("Previous instruction is not a memory dereference");
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-
-            if (!prev_op2.Info.Memory.HasDisp) {
-                SPDLOG_ERROR("Previous instruction does not have a displacement");
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-
-            if (prev_op2.Info.Memory.Disp != potential_hmd_device_offset) {
-                SPDLOG_ERROR("Previous instruction is not the XRSystem or HMDDevice dereference");
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-
-            SPDLOG_INFO("Found the dereference of the XRSystem or HMDDevice at {:x}", previous_instruction->addr);
-
-            // Patch the initial instruction that caused the crash
-            SPDLOG_INFO("Creating first patch...");
-
-            std::vector<int16_t> first_patch{};
-
-            for (auto i = 0; i < decoded->Length; ++i) {
-                first_patch.push_back(0x90);
-            }
-
-            xrsystem_patches.push_back(Patch::create(exception_address, first_patch));
-
-            const auto next_instruction_addr = exception_address + decoded->Length;
-            const auto next_instruction = utility::decode_one((uint8_t*)next_instruction_addr);
-
-            if (!next_instruction) {
-                SPDLOG_ERROR("Could not decode next instruction at {:x}", exception_address + decoded->Length);
-                return EXCEPTION_CONTINUE_EXECUTION;
-            }
-
-            if (!std::string_view{next_instruction->Mnemonic}.starts_with("CALL")) {
-                SPDLOG_ERROR("Next instruction is not a call, continuing anyways since we patched the dereference");
-                return EXCEPTION_CONTINUE_EXECUTION;
-            }
-
-            // Patch the next instruction if it's a call
-            SPDLOG_INFO("Creating second patch...");
-
-            std::vector<int16_t> second_patch{};
-
-            for (auto i = 0; i < next_instruction->Length; ++i) {
-                second_patch.push_back(0x90);
-            }
-
-            xrsystem_patches.push_back(Patch::create(next_instruction_addr, second_patch));
-
-            SPDLOG_INFO("Finished creating patches, continuing execution. Hopefully we don't crash...");
-            return EXCEPTION_CONTINUE_EXECUTION;
+            return EXCEPTION_CONTINUE_SEARCH;
         }
 
-        return EXCEPTION_CONTINUE_SEARCH;
+        auto* ctx = exception->ContextRecord;
+        const auto exception_address = ctx->Rip;
+
+        // Fast early-out: already processed this address (patched or rejected)
+        if (handled_addresses.contains(exception_address)) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // Re-entrancy guard: prevent recursive exceptions during our stack walk
+        // from re-entering the expensive verification path
+        if (handler_active.exchange(true)) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // Mark address as handled IMMEDIATELY to prevent re-processing from other
+        // threads/calls while we do the expensive verification
+        handled_addresses.insert(exception_address);
+
+        // RAII guard to release the re-entrancy lock on all exit paths
+        auto cleanup = [&]() { handler_active.store(false); };
+
+        if (exception_address == 0 || IsBadReadPtr((void*)exception_address, 16)) {
+            cleanup();
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        const auto decoded = utility::decode_one((uint8_t*)exception_address);
+
+        if (!decoded) {
+            cleanup();
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // Identify if this is a REG <- MEM instruction (for register zeroing)
+        bool has_reg_dest = false;
+        uint8_t dest_reg = 0;
+
+        if (decoded->OperandsCount >= 2) {
+            const auto& op_dest = decoded->Operands[0];
+            const auto& op_src = decoded->Operands[1];
+
+            if (op_dest.Type == ND_OP_REG && op_dest.Info.Register.Type == ND_REG_GPR &&
+                op_src.Type == ND_OP_MEM && op_src.Info.Memory.HasBase)
+            {
+                has_reg_dest = true;
+                dest_reg = op_dest.Info.Register.Reg;
+            }
+        }
+
+        SPDLOG_INFO("Encountered null-pointer dereference at {:x} (len={}, has_reg_dest={})",
+                     exception_address, decoded->Length, has_reg_dest);
+
+        // Condition 1: our XR nullification must be active
+        if (*(void**)potential_hmd_device != nullptr) {
+            SPDLOG_INFO("HMD pointer at engine+{:x} is not null — not our crash",
+                        potential_hmd_device_offset);
+            cleanup();
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // Build the set of XR-related engine offsets
+        const auto stereo_device_offset = potential_hmd_device_offset - sizeof(TWeakPtr<void*>);
+        const auto secondary_offset = potential_hmd_device_offset + sizeof(void*);
+
+        auto is_xr_offset = [&](uint64_t disp) -> bool {
+            return disp == stereo_device_offset
+                || disp == potential_hmd_device_offset
+                || disp == secondary_offset;
+        };
+
+        auto null_reg = has_reg_dest ? decoded->Operands[1].Info.Memory.Base : uint8_t{0};
+        bool verified = false;
+
+        // Step A: Backward register trace within the crashing function
+        // Only applies if the faulting instruction has a MEM source with a base register
+        if (has_reg_dest) {
+            auto tracked_reg = null_reg;
+            auto probe = exception_address;
+
+            for (int i = 0; i < 20 && !verified; ++i) {
+                const auto prev = utility::resolve_instruction(probe - 1);
+                if (!prev) break;
+                probe = prev->addr;
+
+                const auto& instr = prev->instrux;
+
+                if (instr.Instruction == ND_INS_INT3 ||
+                    instr.Instruction == ND_INS_RETN ||
+                    instr.Instruction == ND_INS_RETF) {
+                    break;
+                }
+
+                if (instr.OperandsCount < 2) continue;
+                const auto& prev_dest = instr.Operands[0];
+                if (prev_dest.Type != ND_OP_REG ||
+                    prev_dest.Info.Register.Type != ND_REG_GPR ||
+                    prev_dest.Info.Register.Reg != tracked_reg) {
+                    continue;
+                }
+
+                const auto& prev_src = instr.Operands[1];
+
+                if (prev_src.Type == ND_OP_REG && prev_src.Info.Register.Type == ND_REG_GPR) {
+                    tracked_reg = prev_src.Info.Register.Reg;
+                    SPDLOG_INFO("  Trace: reg {} <- reg {} at {:x}", null_reg, tracked_reg, probe);
+                    continue;
+                }
+
+                if (prev_src.Type == ND_OP_MEM && prev_src.Info.Memory.HasDisp) {
+                    const auto disp = (uint64_t)prev_src.Info.Memory.Disp;
+                    if (is_xr_offset(disp)) {
+                        SPDLOG_INFO("  Trace: found [reg + {:x}] at {:x} — matches XR offset",
+                                    disp, probe);
+                        verified = true;
+                    } else {
+                        SPDLOG_INFO("  Trace: [reg + {:x}] at {:x} — not XR", disp, probe);
+                    }
+                    break;
+                }
+
+                break;
+            }
+        }
+
+        // Step B: Walk the stack for caller return addresses.
+        // Only consider addresses in the game module (not system DLLs).
+        // For each valid return address (preceded by a CALL), find the function
+        // start and FORWARD-scan the entire function body for XR offset loads.
+        if (!verified) {
+            static const auto game_module = utility::get_executable();
+            static const auto game_base = (uintptr_t)game_module;
+            static const auto game_size = utility::get_module_size(game_module).value_or(0);
+
+            const auto rsp = ctx->Rsp;
+            constexpr size_t STACK_SCAN_QWORDS = 48;
+            constexpr size_t MAX_FORWARD_INSTRUCTIONS = 500;
+            constexpr size_t MAX_CALLERS_TO_SCAN = 8;
+            size_t callers_scanned = 0;
+            std::unordered_set<uintptr_t> scanned_functions{};
+
+            for (size_t qi = 0; qi < STACK_SCAN_QWORDS && !verified; ++qi) {
+                const auto stack_entry_addr = rsp + qi * sizeof(uintptr_t);
+                if (IsBadReadPtr((void*)stack_entry_addr, sizeof(uintptr_t))) break;
+
+                const auto candidate = *(uintptr_t*)stack_entry_addr;
+
+                // Only consider addresses within the game executable module
+                if (candidate < game_base || candidate >= game_base + game_size) continue;
+
+                // Verify this is a real return address: instruction before it should be a CALL
+                const auto call_resolved = utility::resolve_instruction(candidate - 1);
+                if (!call_resolved) continue;
+                if (!std::string_view{call_resolved->instrux.Mnemonic}.starts_with("CALL")) continue;
+
+                // Find the function containing this CALL instruction
+                const auto func_start = utility::find_function_start(call_resolved->addr);
+                if (!func_start) continue;
+
+                // Skip already-scanned functions
+                if (scanned_functions.contains(*func_start)) continue;
+                scanned_functions.insert(*func_start);
+
+                if (++callers_scanned > MAX_CALLERS_TO_SCAN) break;
+
+                SPDLOG_INFO("  Stack qword {}: scanning caller func {:x} -> {:x}",
+                            qi, *func_start, candidate);
+
+                // Forward-scan from function start up to the call instruction
+                auto scan_addr = *func_start;
+                for (size_t fi = 0; fi < MAX_FORWARD_INSTRUCTIONS && !verified; ++fi) {
+                    if (scan_addr >= candidate) break;
+
+                    const auto instr = utility::decode_one((uint8_t*)scan_addr);
+                    if (!instr) break;
+
+                    for (uint8_t op_i = 0; op_i < instr->OperandsCount && !verified; ++op_i) {
+                        const auto& operand = instr->Operands[op_i];
+                        if (operand.Type == ND_OP_MEM &&
+                            operand.Info.Memory.HasDisp &&
+                            is_xr_offset((uint64_t)operand.Info.Memory.Disp))
+                        {
+                            SPDLOG_INFO("  Found [reg + {:x}] at {:x} (caller func {:x}, stack qword {})",
+                                        (uint64_t)operand.Info.Memory.Disp, scan_addr, *func_start, qi);
+                            verified = true;
+                        }
+                    }
+
+                    scan_addr += instr->Length;
+                }
+            }
+        }
+
+        // Step C: Heuristic fallback — when our XR nullification is active and the
+        // crash is in the game module, it's overwhelmingly likely caused by our
+        // nullification propagating through deep call chains. The null XR pointer
+        // can result in either null-page accesses OR stale/garbage pointer values
+        // derived from the null, so we don't restrict to null-page addresses.
+        if (!verified) {
+            static const auto game_module_c = utility::get_executable();
+            static const auto game_base_c = (uintptr_t)game_module_c;
+            static const auto game_size_c = utility::get_module_size(game_module_c).value_or(0);
+
+            const auto accessed_address = exception->ExceptionRecord->ExceptionInformation[1];
+            const bool is_in_game = exception_address >= game_base_c &&
+                                    exception_address < game_base_c + game_size_c;
+
+            constexpr size_t MAX_HEURISTIC_PATCHES = 128;
+
+            if (is_in_game && xrsystem_patches.size() < MAX_HEURISTIC_PATCHES) {
+                SPDLOG_INFO("  Heuristic: access violation at addr {:x}, crash in game module — "
+                            "treating as XR-related crash (patch #{})",
+                            accessed_address, xrsystem_patches.size() + 1);
+                verified = true;
+            } else if (!is_in_game) {
+                SPDLOG_INFO("  Heuristic: crash at {:x} is outside game module — not our crash",
+                            exception_address);
+            } else {
+                SPDLOG_INFO("  Heuristic: patch limit reached ({}) — not patching further",
+                            xrsystem_patches.size());
+            }
+        }
+
+        if (!verified) {
+            SPDLOG_INFO("Could not verify as XR null-deref — passing through");
+            spdlog::default_logger()->flush();
+            cleanup();
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        SPDLOG_INFO("Verified XR null-deref at {:x} — applying context fixup and permanent patch",
+                     exception_address);
+
+        // --- REMEDIATION ---
+        if (has_reg_dest) {
+            // 1. Zero the destination register in the CONTEXT so downstream null checks work
+            auto set_context_reg = [](CONTEXT* c, uint8_t reg, DWORD64 val) {
+                switch (reg) {
+                case NDR_RAX: c->Rax = val; break;
+                case NDR_RCX: c->Rcx = val; break;
+                case NDR_RDX: c->Rdx = val; break;
+                case NDR_RBX: c->Rbx = val; break;
+                case NDR_RSP: c->Rsp = val; break;
+                case NDR_RBP: c->Rbp = val; break;
+                case NDR_RSI: c->Rsi = val; break;
+                case NDR_RDI: c->Rdi = val; break;
+                case NDR_R8:  c->R8  = val; break;
+                case NDR_R9:  c->R9  = val; break;
+                case NDR_R10: c->R10 = val; break;
+                case NDR_R11: c->R11 = val; break;
+                case NDR_R12: c->R12 = val; break;
+                case NDR_R13: c->R13 = val; break;
+                case NDR_R14: c->R14 = val; break;
+                case NDR_R15: c->R15 = val; break;
+                }
+            };
+
+            set_context_reg(ctx, dest_reg, 0);
+            ctx->Rip = exception_address + decoded->Length;
+
+            SPDLOG_INFO("Zeroed register {} in context, advanced RIP to {:x}", dest_reg, ctx->Rip);
+
+            // 2. Build a permanent patch: xor dest_reg, dest_reg + NOP padding
+            {
+                const uint8_t reg_bits = dest_reg & 0x7;
+                const uint8_t modrm = 0xC0 | (reg_bits << 3) | reg_bits;
+
+                std::vector<int16_t> patch_bytes;
+
+                if (decoded->Length >= 3) {
+                    const uint8_t rex = (dest_reg >= 8) ? 0x4D : 0x48;
+                    patch_bytes.push_back(rex);
+                    patch_bytes.push_back(0x31);
+                    patch_bytes.push_back(modrm);
+                    for (size_t i = 3; i < decoded->Length; ++i) {
+                        patch_bytes.push_back(0x90);
+                    }
+                } else if (decoded->Length == 2 && dest_reg < 8) {
+                    patch_bytes.push_back(0x31);
+                    patch_bytes.push_back(modrm);
+                } else {
+                    for (size_t i = 0; i < decoded->Length; ++i) {
+                        patch_bytes.push_back(0x90);
+                    }
+                }
+
+                xrsystem_patches.push_back(Patch::create(exception_address, patch_bytes));
+
+                SPDLOG_INFO("Patched {:x} with xor r{}, r{} + {} NOP(s)",
+                            exception_address, dest_reg, dest_reg,
+                            decoded->Length > 3 ? decoded->Length - 3 : 0);
+            }
+        } else {
+            // Non REG<-MEM instruction: NOP the entire instruction and advance RIP
+            std::vector<int16_t> nop_bytes;
+            for (size_t i = 0; i < decoded->Length; ++i) {
+                nop_bytes.push_back(0x90);
+            }
+
+            xrsystem_patches.push_back(Patch::create(exception_address, nop_bytes));
+            ctx->Rip = exception_address + decoded->Length;
+
+            SPDLOG_INFO("NOP'd non-REG-dest instruction at {:x} ({} bytes), advanced RIP to {:x}",
+                        exception_address, decoded->Length, ctx->Rip);
+        }
+
+        // 3. If the next instruction is a CALL (vtable dispatch), also NOP and skip it
+        const auto next_addr = exception_address + decoded->Length;
+        const auto next_instr = utility::decode_one((uint8_t*)next_addr);
+
+        if (next_instr && std::string_view{next_instr->Mnemonic}.starts_with("CALL")) {
+            std::vector<int16_t> call_nops;
+            for (size_t i = 0; i < next_instr->Length; ++i) {
+                call_nops.push_back(0x90);
+            }
+
+            xrsystem_patches.push_back(Patch::create(next_addr, call_nops));
+            ctx->Rip = next_addr + next_instr->Length;
+
+            SPDLOG_INFO("Also NOP'd following CALL at {:x} ({} bytes), RIP now {:x}",
+                        next_addr, next_instr->Length, ctx->Rip);
+        }
+
+        SPDLOG_INFO("Crash handled successfully, continuing execution");
+        spdlog::default_logger()->flush();
+        cleanup();
+        return EXCEPTION_CONTINUE_EXECUTION;
     });
 
     // The TWeakPtr version is for >= 4.11 UE versions
