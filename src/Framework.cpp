@@ -3,6 +3,7 @@
 
 #include <windows.h>
 #include <ShlObj.h>
+#include <Psapi.h>
 
 #include <spdlog/sinks/basic_file_sink.h>
 
@@ -34,6 +35,15 @@
 
 namespace fs = std::filesystem;
 using namespace std::literals;
+
+// D3D rehook attempt counter — file-scope to avoid changing Framework class layout.
+// Only accessed from hook_monitor (monitor thread) and on_post_present callbacks (render thread).
+// Set to 0: after init, NEVER rehook. The DXGI vtable hooks persist even when Present
+// isn't called (game transitions, death screens, loading). Rehooking is destructive
+// (creates dummy devices, tears down Streamline/DLSSFG interposer hooks) and causes
+// fatal errors during game transitions that temporarily stop rendering.
+static uint32_t s_consecutive_rehook_attempts{0};
+static constexpr uint32_t MAX_POST_INIT_REHOOK_ATTEMPTS{0};
 
 std::unique_ptr<Framework> g_framework{};
 
@@ -107,21 +117,43 @@ void Framework::hook_monitor() {
             }
 
             if (!m_has_last_chance && now - m_last_chance_time > std::chrono::seconds(1)) {
-                spdlog::info("Sending rehook request for D3D");
+                // After successful initialization, limit consecutive rehook attempts.
+                // Repeated rehooking is destructive (creates dummy D3D devices, tears down
+                // existing vtable hooks) and won't help if the game is genuinely in a
+                // loading screen. The hooks are global DXGI vtable hooks — if they worked
+                // before, they'll catch Present again when the game resumes rendering.
+                if (m_initialized && s_consecutive_rehook_attempts >= MAX_POST_INIT_REHOOK_ATTEMPTS) {
+                    // Just wait — don't keep tearing down and recreating hooks.
+                    m_last_present_time = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                    m_last_chance_time = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                    m_has_last_chance = true;
 
-                // hook_d3d12 always gets called first.
-                if (m_is_d3d11) {
-                    hook_d3d11();
+                    if (s_consecutive_rehook_attempts == MAX_POST_INIT_REHOOK_ATTEMPTS) {
+                        spdlog::warn("Reached max D3D rehook attempts ({}) after init — "
+                                     "waiting for Present to resume naturally",
+                                     MAX_POST_INIT_REHOOK_ATTEMPTS);
+                        ++s_consecutive_rehook_attempts; // only log once
+                    }
                 } else {
-                    hook_d3d12();
-                }
+                    spdlog::info("Sending rehook request for D3D (attempt {})",
+                                 s_consecutive_rehook_attempts + 1);
 
-                // so we don't immediately go and hook it again
-                // add some additional time to it to give it some leeway
-                m_last_present_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-                m_last_message_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-                m_last_chance_time = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-                m_has_last_chance = true;
+                    // hook_d3d12 always gets called first.
+                    if (m_is_d3d11) {
+                        hook_d3d11();
+                    } else {
+                        hook_d3d12();
+                    }
+
+                    ++s_consecutive_rehook_attempts;
+
+                    // so we don't immediately go and hook it again
+                    // add some additional time to it to give it some leeway
+                    m_last_present_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                    m_last_message_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                    m_last_chance_time = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                    m_has_last_chance = true;
+                }
             }
         } else {
             m_last_chance_time = std::chrono::steady_clock::now();
@@ -195,6 +227,85 @@ Framework::Framework(HMODULE framework_module)
 
     spdlog::set_default_logger(m_logger);
     spdlog::flush_on(spdlog::level::info);
+
+    // Install an unhandled exception filter as a last-resort crash catcher.
+    // This fires AFTER all VEH handlers have passed (EXCEPTION_CONTINUE_SEARCH)
+    // and the OS is about to terminate the process. Writes crash info using
+    // only stack-based formatting + WriteFile (no heap, no spdlog).
+    SetUnhandledExceptionFilter([](PEXCEPTION_POINTERS exception) -> LONG {
+        char buf[1024];
+        int pos = 0;
+        const auto code = exception->ExceptionRecord->ExceptionCode;
+        const auto rip = exception->ContextRecord->Rip;
+        const auto fault_addr = (exception->ExceptionRecord->NumberParameters >= 2)
+            ? exception->ExceptionRecord->ExceptionInformation[1] : 0ULL;
+
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+            "=== UEVR Unhandled Exception Filter ===\r\n"
+            "Exception: 0x%08lX at RIP=0x%llX fault_addr=0x%llX\r\n"
+            "RAX=%llX RBX=%llX RCX=%llX RDX=%llX\r\n"
+            "RSI=%llX RDI=%llX RSP=%llX RBP=%llX\r\n"
+            "R8=%llX R9=%llX R10=%llX R11=%llX\r\n"
+            "R12=%llX R13=%llX R14=%llX R15=%llX\r\n",
+            code, (unsigned long long)rip, (unsigned long long)fault_addr,
+            (unsigned long long)exception->ContextRecord->Rax,
+            (unsigned long long)exception->ContextRecord->Rbx,
+            (unsigned long long)exception->ContextRecord->Rcx,
+            (unsigned long long)exception->ContextRecord->Rdx,
+            (unsigned long long)exception->ContextRecord->Rsi,
+            (unsigned long long)exception->ContextRecord->Rdi,
+            (unsigned long long)exception->ContextRecord->Rsp,
+            (unsigned long long)exception->ContextRecord->Rbp,
+            (unsigned long long)exception->ContextRecord->R8,
+            (unsigned long long)exception->ContextRecord->R9,
+            (unsigned long long)exception->ContextRecord->R10,
+            (unsigned long long)exception->ContextRecord->R11,
+            (unsigned long long)exception->ContextRecord->R12,
+            (unsigned long long)exception->ContextRecord->R13,
+            (unsigned long long)exception->ContextRecord->R14,
+            (unsigned long long)exception->ContextRecord->R15);
+
+        // Walk the stack (raw RSP scan for return addresses in the game module)
+        const auto game_base = (uintptr_t)GetModuleHandle(nullptr);
+        MODULEINFO mi{};
+        GetModuleInformation(GetCurrentProcess(), (HMODULE)game_base, &mi, sizeof(mi));
+        const auto game_end = game_base + mi.SizeOfImage;
+
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "Stack (game module 0x%llX-0x%llX):\r\n",
+            (unsigned long long)game_base, (unsigned long long)game_end);
+
+        const auto rsp = exception->ContextRecord->Rsp;
+        int stack_entries = 0;
+        for (size_t qi = 0; qi < 64 && stack_entries < 16 && pos < (int)sizeof(buf) - 60; ++qi) {
+            const auto addr = rsp + qi * sizeof(uintptr_t);
+            if (IsBadReadPtr((void*)addr, sizeof(uintptr_t))) break;
+            const auto val = *(uintptr_t*)addr;
+            if (val >= game_base && val < game_end) {
+                pos += snprintf(buf + pos, sizeof(buf) - pos, "  [rsp+%llX] = 0x%llX (+0x%llX)\r\n",
+                    (unsigned long long)(qi * sizeof(uintptr_t)),
+                    (unsigned long long)val,
+                    (unsigned long long)(val - game_base));
+                ++stack_entries;
+            }
+        }
+
+        const auto crash_path = get_persistent_dir() / "unhandled_crash.txt";
+        const auto path_str = crash_path.string();
+        HANDLE hFile = CreateFileA(path_str.c_str(), GENERIC_WRITE, 0, nullptr,
+                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            DWORD written = 0;
+            WriteFile(hFile, buf, (DWORD)pos, &written, nullptr);
+            CloseHandle(hFile);
+        }
+
+        // Also try to flush spdlog
+        spdlog::info("UNHANDLED EXCEPTION: 0x{:x} at RIP={:x} fault={:x}", code, rip, fault_addr);
+        spdlog::default_logger()->flush();
+
+        return EXCEPTION_CONTINUE_SEARCH; // Let the OS default handler do its thing
+    });
+
     spdlog::info("UnrealVR entry");
     spdlog::info("Commit hash: {}", UEVR_COMMIT_HASH);
     spdlog::info("Tag: {}", UEVR_TAG);
@@ -545,6 +656,7 @@ void Framework::on_post_present_d3d11() {
             m_last_present_time = std::chrono::steady_clock::now();
         }
 
+        s_consecutive_rehook_attempts = 0;
         return;
     }
 
@@ -555,6 +667,8 @@ void Framework::on_post_present_d3d11() {
     if (m_last_present_time <= std::chrono::steady_clock::now()){
         m_last_present_time = std::chrono::steady_clock::now();
     }
+
+    s_consecutive_rehook_attempts = 0;
 }
 
 // D3D12 Draw funciton
@@ -703,6 +817,7 @@ void Framework::on_post_present_d3d12() {
             m_last_present_time = std::chrono::steady_clock::now();
         }
 
+        s_consecutive_rehook_attempts = 0;
         return;
     }
     
@@ -712,6 +827,12 @@ void Framework::on_post_present_d3d12() {
 
     if (m_last_present_time <= std::chrono::steady_clock::now()){
         m_last_present_time = std::chrono::steady_clock::now();
+    }
+
+    if (s_consecutive_rehook_attempts > 0) {
+        spdlog::info("D3D12 Present resumed after {} rehook attempt(s) — counter reset",
+                     s_consecutive_rehook_attempts);
+        s_consecutive_rehook_attempts = 0;
     }
 }
 
