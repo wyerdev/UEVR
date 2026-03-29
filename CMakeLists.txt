@@ -424,6 +424,48 @@ target_link_libraries(example_plugin PUBLIC
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target fakehdr_plugin
+set(CMKR_TARGET fakehdr_plugin)
+set(fakehdr_plugin_SOURCES "")
+
+list(APPEND fakehdr_plugin_SOURCES
+	"examples/fakehdr_plugin/FakeHDRPlugin.cpp"
+)
+
+list(APPEND fakehdr_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${fakehdr_plugin_SOURCES})
+add_library(fakehdr_plugin SHARED)
+
+if(fakehdr_plugin_SOURCES)
+	target_sources(fakehdr_plugin PRIVATE ${fakehdr_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${fakehdr_plugin_SOURCES})
+
+target_compile_features(fakehdr_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(fakehdr_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(fakehdr_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(fakehdr_plugin PROPERTIES
+	OUTPUT_NAME
+		FakeHDRPlugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target sdk-test
 set(CMKR_TARGET sdk-test)
 set(sdk-test_SOURCES "")

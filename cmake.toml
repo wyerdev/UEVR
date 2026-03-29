@@ -156,6 +156,14 @@ type = "plugin"
 sources = ["examples/example_plugin/**.cpp", "examples/example_plugin/**.c"]
 headers = ["examples/example_plugin/**.hpp", "examples/example_plugin/**.h"]
 
+[target.fakehdr_plugin]
+type = "plugin"
+sources = ["examples/fakehdr_plugin/FakeHDRPlugin.cpp"]
+headers = ["examples/fakehdr_plugin/**.hpp", "examples/fakehdr_plugin/**.h"]
+
+[target.fakehdr_plugin.properties]
+OUTPUT_NAME = "FakeHDRPlugin"
+
 [target.sdk-test]
 type = "shared"
 sources = ["side-projects/sdk-test/**.cpp", "side-projects/sdk-test/**.c"]
