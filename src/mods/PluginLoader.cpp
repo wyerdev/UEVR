@@ -1880,6 +1880,7 @@ std::optional<std::string> PluginLoader::on_initialize_d3d_thread() {
         }
 
         spdlog::info("[PluginLoader] Initializing {}...", name);
+        m_current_loading_plugin = name;
         try {
             if (!init_fn(&g_plugin_initialize_param)) {
                 spdlog::error("[PluginLoader] Failed to initialize {}", name);
@@ -1893,9 +1894,11 @@ std::optional<std::string> PluginLoader::on_initialize_d3d_thread() {
             m_plugin_load_errors.emplace(name, "Exception occurred in uevr_plugin_initialize");
             FreeLibrary(mod);
             it = m_plugins.erase(it);
+            m_current_loading_plugin.clear();
             continue;
         }
 
+        m_current_loading_plugin.clear();
         ++it;
     }
 
@@ -1909,6 +1912,7 @@ void PluginLoader::attempt_unload_plugins() {
         for (auto& callbacks : m_plugin_callback_lists) {
             callbacks->clear();
         }
+        m_on_draw_ui_plugin_names.clear();
 
         {
             std::unique_lock _{m_ufunction_hooks_mtx};
@@ -1933,6 +1937,37 @@ void PluginLoader::attempt_unload_plugins() {
 void PluginLoader::reload_plugins() {
     early_init();
     on_initialize_d3d_thread();
+}
+
+std::vector<SidebarEntryInfo> PluginLoader::get_sidebar_entries() {
+    std::vector<SidebarEntryInfo> entries;
+    entries.emplace_back("PluginLoader", false);
+
+    std::shared_lock lock{m_api_cb_mtx};
+    for (size_t i = 0; i < m_on_draw_ui_cbs.size(); ++i) {
+        const auto& name = (i < m_on_draw_ui_plugin_names.size()) ? m_on_draw_ui_plugin_names[i] : std::string{"Plugin"};
+        entries.emplace_back(name, false);
+    }
+
+    return entries;
+}
+
+void PluginLoader::on_draw_sidebar_entry(std::string_view name) {
+    if (name == "PluginLoader") {
+        on_draw_ui();
+        return;
+    }
+
+    // Find and dispatch to the matching plugin's on_draw_ui callback
+    std::shared_lock lock{m_api_cb_mtx};
+    auto ctx = ImGui::GetCurrentContext();
+    for (size_t i = 0; i < m_on_draw_ui_cbs.size(); ++i) {
+        const auto& plugin_name = (i < m_on_draw_ui_plugin_names.size()) ? m_on_draw_ui_plugin_names[i] : std::string{"Plugin"};
+        if (plugin_name == name) {
+            m_on_draw_ui_cbs[i]((void*)ctx);
+            return;
+        }
+    }
 }
 
 void PluginLoader::on_draw_ui() {
@@ -1970,16 +2005,6 @@ void PluginLoader::on_draw_ui() {
         ImGui::Text("Warnings:");
         for (auto&& [name, warning] : m_plugin_load_warnings) {
             ImGui::Text("%s - %s", name.c_str(), warning.c_str());
-        }
-    }
-
-    // Dispatch on_draw_ui to plugins
-    {
-        std::shared_lock lock{m_api_cb_mtx};
-        auto ctx = ImGui::GetCurrentContext();
-        for (auto& cb : m_on_draw_ui_cbs) {
-            ImGui::Separator();
-            cb((void*)ctx);
         }
     }
 }
@@ -2321,6 +2346,7 @@ bool PluginLoader::add_on_draw_ui(UEVR_OnDrawUICb cb) {
     std::unique_lock _{m_api_cb_mtx};
 
     m_on_draw_ui_cbs.push_back(cb);
+    m_on_draw_ui_plugin_names.push_back(m_current_loading_plugin.empty() ? "Plugin" : m_current_loading_plugin);
     return true;
 }
 

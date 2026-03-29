@@ -29,7 +29,9 @@ public:
     std::string_view get_name() const override { return "PluginLoader"; }
     bool is_advanced_mod() const override { return true; }
     std::optional<std::string> on_initialize_d3d_thread() override;
+    std::vector<SidebarEntryInfo> get_sidebar_entries() override;
     void on_draw_ui() override;
+    void on_draw_sidebar_entry(std::string_view name) override;
 
     void on_present();
     void on_device_reset() override;
@@ -167,6 +169,7 @@ private:
     std::vector<UEVR_OnXInputSetStateCb> m_on_xinput_set_state_cbs{};
     std::vector<UEVR_OnCustomEventCb> m_on_custom_event_cbs{};
     std::vector<UEVR_OnDrawUICb> m_on_draw_ui_cbs{};
+    std::vector<std::string> m_on_draw_ui_plugin_names{};
 
     std::vector<UEVR_Engine_TickCb> m_on_pre_engine_tick_cbs{};
     std::vector<UEVR_Engine_TickCb> m_on_post_engine_tick_cbs{};
@@ -217,6 +220,7 @@ private:
     std::map<std::string, HMODULE> m_plugins{};
     std::map<std::string, std::string> m_plugin_load_errors{};
     std::map<std::string, std::string> m_plugin_load_warnings{};
+    std::string m_current_loading_plugin{};
 
     struct InlineHookState {
         InlineHookState(safetyhook::InlineHook&& hook)
