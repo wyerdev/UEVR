@@ -176,7 +176,15 @@ public:
     ComPtr<ID3D12Resource>       m_dx12_result_tex;  // RTV output (has ALLOW_RENDER_TARGET)
     ComPtr<ID3D12DescriptorHeap> m_dx12_srv_heap;
     ComPtr<ID3D12DescriptorHeap> m_dx12_rtv_heap;
-    ComPtr<ID3D12CommandAllocator> m_dx12_cmd_alloc;
+
+    // Triple-buffered command allocators to avoid CPU stalls.
+    // We rotate through NUM_FRAMES allocators, so we only wait on the
+    // allocator from N-2 frames ago (GPU almost always done by then).
+    static constexpr UINT NUM_FRAMES = 3;
+    ComPtr<ID3D12CommandAllocator> m_dx12_cmd_allocs[NUM_FRAMES];
+    UINT64                         m_dx12_alloc_fence_values[NUM_FRAMES]{};
+    UINT                           m_dx12_alloc_index = 0;
+
     ComPtr<ID3D12GraphicsCommandList> m_dx12_cmd_list;
     ComPtr<ID3D12Fence>          m_dx12_fence;
     HANDLE                       m_dx12_fence_event = nullptr;
@@ -377,7 +385,13 @@ private:
         m_dx12_pso.Reset(); m_dx12_root_sig.Reset(); m_dx12_cb.Reset();
         m_dx12_copy_tex.Reset(); m_dx12_result_tex.Reset();
         m_dx12_srv_heap.Reset(); m_dx12_rtv_heap.Reset();
-        m_dx12_cmd_list.Reset(); m_dx12_cmd_alloc.Reset(); m_dx12_fence.Reset();
+        m_dx12_cmd_list.Reset();
+        for (UINT i = 0; i < NUM_FRAMES; ++i) {
+            m_dx12_cmd_allocs[i].Reset();
+            m_dx12_alloc_fence_values[i] = 0;
+        }
+        m_dx12_alloc_index = 0;
+        m_dx12_fence.Reset();
         if (m_dx12_fence_event) { CloseHandle(m_dx12_fence_event); m_dx12_fence_event = nullptr; }
         m_dx12_fence_value = 0; m_dx12_copy_width = 0; m_dx12_copy_height = 0;
         m_dx12_ready = false; m_dx12_cb_mapped = nullptr; m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
@@ -581,9 +595,13 @@ private:
         D3D12_DESCRIPTOR_HEAP_DESC rhd{}; rhd.NumDescriptors = 1; rhd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         if (FAILED(device->CreateDescriptorHeap(&rhd, IID_PPV_ARGS(&m_dx12_rtv_heap)))) return false;
 
-        // Command allocator + command list
-        if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_dx12_cmd_alloc)))) return false;
-        if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_dx12_cmd_alloc.Get(), nullptr, IID_PPV_ARGS(&m_dx12_cmd_list)))) return false;
+        // Command allocators (triple-buffered) + command list
+        for (UINT i = 0; i < NUM_FRAMES; ++i) {
+            if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_dx12_cmd_allocs[i])))) return false;
+            m_dx12_alloc_fence_values[i] = 0;
+        }
+        m_dx12_alloc_index = 0;
+        if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_dx12_cmd_allocs[0].Get(), nullptr, IID_PPV_ARGS(&m_dx12_cmd_list)))) return false;
         m_dx12_cmd_list->Close();
 
         // Fence
@@ -662,9 +680,17 @@ private:
         }
         if (!ensure_dx12_copy_texture(device, target)) return;
 
-        // Wait for previous frame's GPU work to finish
-        if (m_dx12_fence->GetCompletedValue() < m_dx12_fence_value) {
-            m_dx12_fence->SetEventOnCompletion(m_dx12_fence_value, m_dx12_fence_event);
+        // Pick the next allocator in the ring buffer
+        auto alloc_idx = m_dx12_alloc_index;
+        m_dx12_alloc_index = (m_dx12_alloc_index + 1) % NUM_FRAMES;
+        auto alloc = m_dx12_cmd_allocs[alloc_idx].Get();
+
+        // Only wait if this allocator's GPU work isn't done yet.
+        // Because we rotate through NUM_FRAMES allocators, this work is
+        // from ~2 frames ago — the GPU is almost always done by now.
+        auto alloc_fence = m_dx12_alloc_fence_values[alloc_idx];
+        if (alloc_fence > 0 && m_dx12_fence->GetCompletedValue() < alloc_fence) {
+            m_dx12_fence->SetEventOnCompletion(alloc_fence, m_dx12_fence_event);
             WaitForSingleObject(m_dx12_fence_event, INFINITE);
         }
 
@@ -680,12 +706,12 @@ private:
         }
 
         // Record command list
-        auto hr1 = m_dx12_cmd_alloc->Reset();
+        auto hr1 = alloc->Reset();
         if (FAILED(hr1)) {
             API::get()->log_error("[FakeHDR DX12] cmd alloc Reset failed: 0x%x", (unsigned)hr1);
             return;
         }
-        auto hr2 = m_dx12_cmd_list->Reset(m_dx12_cmd_alloc.Get(), nullptr);
+        auto hr2 = m_dx12_cmd_list->Reset(alloc, nullptr);
         if (FAILED(hr2)) {
             API::get()->log_error("[FakeHDR DX12] cmd list Reset failed: 0x%x", (unsigned)hr2);
             return;
@@ -774,6 +800,7 @@ private:
         ID3D12CommandList* cmd_lists[] = { cmd };
         command_queue->ExecuteCommandLists(1, cmd_lists);
         m_dx12_fence_value++;
+        m_dx12_alloc_fence_values[alloc_idx] = m_dx12_fence_value;
         command_queue->Signal(m_dx12_fence.Get(), m_dx12_fence_value);
     }
 };
