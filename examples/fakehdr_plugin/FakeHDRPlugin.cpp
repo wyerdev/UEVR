@@ -168,19 +168,32 @@ public:
     UINT m_copy_height = 0;
     bool m_shader_ready = false;
 
-    // DX12 effect resources
+    // DX12 effect resources — shared across targets
     ComPtr<ID3D12RootSignature>  m_dx12_root_sig;
     ComPtr<ID3D12PipelineState>  m_dx12_pso;
     ComPtr<ID3D12Resource>       m_dx12_cb;
-    ComPtr<ID3D12Resource>       m_dx12_copy_tex;    // SRV input (scene snapshot)
-    ComPtr<ID3D12Resource>       m_dx12_result_tex;  // RTV output (has ALLOW_RENDER_TARGET)
-    ComPtr<ID3D12DescriptorHeap> m_dx12_srv_heap;
-    ComPtr<ID3D12DescriptorHeap> m_dx12_rtv_heap;
+
+    // Per-target state (main scene RT and optional scene capture RT have different sizes)
+    struct DX12TargetState {
+        ComPtr<ID3D12Resource>       copy_tex;    // SRV input (scene snapshot)
+        ComPtr<ID3D12Resource>       result_tex;  // RTV output (has ALLOW_RENDER_TARGET)
+        ComPtr<ID3D12DescriptorHeap> srv_heap;
+        ComPtr<ID3D12DescriptorHeap> rtv_heap;
+        UINT width  = 0;
+        UINT height = 0;
+
+        void reset() {
+            copy_tex.Reset(); result_tex.Reset();
+            srv_heap.Reset(); rtv_heap.Reset();
+            width = 0; height = 0;
+        }
+    };
+    DX12TargetState m_dx12_main;     // primary scene RT (double-wide)
+    DX12TargetState m_dx12_capture;  // scene capture RT (single-width, native stereo fix)
 
     // Triple-buffered command allocators to avoid CPU stalls.
-    // We rotate through NUM_FRAMES allocators, so we only wait on the
-    // allocator from N-2 frames ago (GPU almost always done by then).
-    static constexpr UINT NUM_FRAMES = 3;
+    // 4 allocators: 2 submits per frame (main + capture) × 2 frames of latency.
+    static constexpr UINT NUM_FRAMES = 4;
     ComPtr<ID3D12CommandAllocator> m_dx12_cmd_allocs[NUM_FRAMES];
     UINT64                         m_dx12_alloc_fence_values[NUM_FRAMES]{};
     UINT                           m_dx12_alloc_index = 0;
@@ -189,8 +202,6 @@ public:
     ComPtr<ID3D12Fence>          m_dx12_fence;
     HANDLE                       m_dx12_fence_event = nullptr;
     UINT64                       m_dx12_fence_value = 0;
-    UINT m_dx12_copy_width  = 0;
-    UINT m_dx12_copy_height = 0;
     bool m_dx12_ready = false;
     HDRParamsCB* m_dx12_cb_mapped = nullptr;
     DXGI_FORMAT m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
@@ -306,11 +317,28 @@ public:
         }
 
         __try {
-            apply_fakehdr_to_resource_dx12(native, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            apply_fakehdr_to_resource_dx12(native, D3D12_RESOURCE_STATE_RENDER_TARGET, m_dx12_main);
         } __except(EXCEPTION_EXECUTE_HANDLER) {
             API::get()->log_error("[FakeHDR DX12] SEH exception in apply (code 0x%x)", GetExceptionCode());
             // Disable to prevent repeated crashes
             m_enabled = false;
+        }
+
+        // Native stereo fix uses a separate scene capture texture for the right eye.
+        // Apply FakeHDR to it as well so both eyes match.
+        auto capture_rt = API::StereoHook::get_scene_capture_render_target();
+        if (capture_rt) {
+            auto capture_native = (ID3D12Resource*)capture_rt->get_native_resource();
+            if (capture_native && capture_native != native) {
+                auto cap_desc = capture_native->GetDesc();
+                if (cap_desc.Width > 0 && cap_desc.Height > 0) {
+                    __try {
+                        apply_fakehdr_to_resource_dx12(capture_native, D3D12_RESOURCE_STATE_RENDER_TARGET, m_dx12_capture);
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {
+                        API::get()->log_error("[FakeHDR DX12] SEH exception in scene capture apply (code 0x%x)", GetExceptionCode());
+                    }
+                }
+            }
         }
     }
 
@@ -383,8 +411,7 @@ private:
             }
         }
         m_dx12_pso.Reset(); m_dx12_root_sig.Reset(); m_dx12_cb.Reset();
-        m_dx12_copy_tex.Reset(); m_dx12_result_tex.Reset();
-        m_dx12_srv_heap.Reset(); m_dx12_rtv_heap.Reset();
+        m_dx12_main.reset(); m_dx12_capture.reset();
         m_dx12_cmd_list.Reset();
         for (UINT i = 0; i < NUM_FRAMES; ++i) {
             m_dx12_cmd_allocs[i].Reset();
@@ -393,7 +420,7 @@ private:
         m_dx12_alloc_index = 0;
         m_dx12_fence.Reset();
         if (m_dx12_fence_event) { CloseHandle(m_dx12_fence_event); m_dx12_fence_event = nullptr; }
-        m_dx12_fence_value = 0; m_dx12_copy_width = 0; m_dx12_copy_height = 0;
+        m_dx12_fence_value = 0;
         m_dx12_ready = false; m_dx12_cb_mapped = nullptr; m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
     }
 
@@ -586,16 +613,7 @@ private:
                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_dx12_cb)))) return false;
         m_dx12_cb->Map(0, nullptr, (void**)&m_dx12_cb_mapped);
 
-        // SRV heap
-        D3D12_DESCRIPTOR_HEAP_DESC shd{}; shd.NumDescriptors = 1;
-        shd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; shd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        if (FAILED(device->CreateDescriptorHeap(&shd, IID_PPV_ARGS(&m_dx12_srv_heap)))) return false;
-
-        // RTV heap (for the backbuffer)
-        D3D12_DESCRIPTOR_HEAP_DESC rhd{}; rhd.NumDescriptors = 1; rhd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        if (FAILED(device->CreateDescriptorHeap(&rhd, IID_PPV_ARGS(&m_dx12_rtv_heap)))) return false;
-
-        // Command allocators (triple-buffered) + command list
+        // Command allocators (ring-buffered) + command list
         for (UINT i = 0; i < NUM_FRAMES; ++i) {
             if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_dx12_cmd_allocs[i])))) return false;
             m_dx12_alloc_fence_values[i] = 0;
@@ -608,17 +626,16 @@ private:
         if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_dx12_fence)))) return false;
         m_dx12_fence_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
-        m_dx12_ready = true;
         m_dx12_rt_format = rt_format;
+        m_dx12_ready = true;
         API::get()->log_info("[FakeHDR DX12] Pipeline ready (format %u)", (unsigned)rt_format);
         return true;
     }
 
-    bool ensure_dx12_copy_texture(ID3D12Device* device, ID3D12Resource* src) {
+    bool ensure_dx12_copy_texture(ID3D12Device* device, ID3D12Resource* src, DX12TargetState& ts) {
         auto sd = src->GetDesc();
-        if (m_dx12_copy_tex && m_dx12_result_tex && m_dx12_copy_width == (UINT)sd.Width && m_dx12_copy_height == sd.Height) return true;
-        m_dx12_copy_tex.Reset();
-        m_dx12_result_tex.Reset();
+        if (ts.copy_tex && ts.result_tex && ts.width == (UINT)sd.Width && ts.height == sd.Height) return true;
+        ts.reset();
 
         const auto resolved_fmt = resolve_typeless_format(sd.Format);
 
@@ -629,7 +646,7 @@ private:
         copy_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
         copy_desc.Format = resolved_fmt;
         if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &copy_desc,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&m_dx12_copy_tex)))) {
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&ts.copy_tex)))) {
             API::get()->log_error("[FakeHDR DX12] Failed to create copy texture");
             return false;
         }
@@ -639,11 +656,20 @@ private:
         result_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         result_desc.Format = resolved_fmt;
         if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &result_desc,
-                D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&m_dx12_result_tex)))) {
+                D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&ts.result_tex)))) {
             API::get()->log_error("[FakeHDR DX12] Failed to create result texture");
-            m_dx12_copy_tex.Reset();
+            ts.reset();
             return false;
         }
+
+        // SRV heap
+        D3D12_DESCRIPTOR_HEAP_DESC shd{}; shd.NumDescriptors = 1;
+        shd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; shd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(device->CreateDescriptorHeap(&shd, IID_PPV_ARGS(&ts.srv_heap)))) { ts.reset(); return false; }
+
+        // RTV heap
+        D3D12_DESCRIPTOR_HEAP_DESC rhd{}; rhd.NumDescriptors = 1; rhd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        if (FAILED(device->CreateDescriptorHeap(&rhd, IID_PPV_ARGS(&ts.rtv_heap)))) { ts.reset(); return false; }
 
         // SRV for copy texture
         D3D12_SHADER_RESOURCE_VIEW_DESC svd{};
@@ -651,20 +677,20 @@ private:
         svd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         svd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         svd.Texture2D.MipLevels = 1;
-        device->CreateShaderResourceView(m_dx12_copy_tex.Get(), &svd, m_dx12_srv_heap->GetCPUDescriptorHandleForHeapStart());
+        device->CreateShaderResourceView(ts.copy_tex.Get(), &svd, ts.srv_heap->GetCPUDescriptorHandleForHeapStart());
 
         // RTV for result texture
         D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{};
         rtv_desc.Format = resolved_fmt;
         rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-        device->CreateRenderTargetView(m_dx12_result_tex.Get(), &rtv_desc, m_dx12_rtv_heap->GetCPUDescriptorHandleForHeapStart());
+        device->CreateRenderTargetView(ts.result_tex.Get(), &rtv_desc, ts.rtv_heap->GetCPUDescriptorHandleForHeapStart());
 
-        m_dx12_copy_width = (UINT)sd.Width; m_dx12_copy_height = sd.Height;
-        API::get()->log_info("[FakeHDR DX12] Textures ready: %ux%u fmt %u", m_dx12_copy_width, m_dx12_copy_height, (unsigned)resolved_fmt);
+        ts.width = (UINT)sd.Width; ts.height = sd.Height;
+        API::get()->log_info("[FakeHDR DX12] Target textures ready: %ux%u fmt %u", ts.width, ts.height, (unsigned)resolved_fmt);
         return true;
     }
 
-    void apply_fakehdr_to_resource_dx12(ID3D12Resource* target, D3D12_RESOURCE_STATES initial_state) {
+    void apply_fakehdr_to_resource_dx12(ID3D12Resource* target, D3D12_RESOURCE_STATES initial_state, DX12TargetState& ts) {
         const auto rd = API::get()->param()->renderer;
         auto device = (ID3D12Device*)rd->device;
         auto command_queue = (ID3D12CommandQueue*)rd->command_queue;
@@ -678,7 +704,7 @@ private:
             if (m_dx12_ready) release_effect_resources();
             if (!init_dx12_pipeline(device, bb_desc.Format)) return;
         }
-        if (!ensure_dx12_copy_texture(device, target)) return;
+        if (!ensure_dx12_copy_texture(device, target, ts)) return;
 
         // Pick the next allocator in the ring buffer
         auto alloc_idx = m_dx12_alloc_index;
@@ -700,8 +726,8 @@ private:
             m_dx12_cb_mapped->Radius1 = m_radius1;
             m_dx12_cb_mapped->Radius2 = m_radius2;
             m_dx12_cb_mapped->_pad0 = 0;
-            m_dx12_cb_mapped->PixelSizeX = 1.0f / (float)m_dx12_copy_width;
-            m_dx12_cb_mapped->PixelSizeY = 1.0f / (float)m_dx12_copy_height;
+            m_dx12_cb_mapped->PixelSizeX = 1.0f / (float)ts.width;
+            m_dx12_cb_mapped->PixelSizeY = 1.0f / (float)ts.height;
             m_dx12_cb_mapped->_pad1[0] = 0; m_dx12_cb_mapped->_pad1[1] = 0;
         }
 
@@ -728,18 +754,18 @@ private:
         barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
         barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barriers[1].Transition.pResource = m_dx12_copy_tex.Get();
+        barriers[1].Transition.pResource = ts.copy_tex.Get();
         barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
         barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         cmd->ResourceBarrier(2, barriers);
 
-        cmd->CopyResource(m_dx12_copy_tex.Get(), target);
+        cmd->CopyResource(ts.copy_tex.Get(), target);
 
         // Step 2: Render FakeHDR from copy_tex -> result_tex
         //   copy_tex: COPY_DEST -> SRV
         //   result_tex is already in RENDER_TARGET state
-        barriers[0].Transition.pResource = m_dx12_copy_tex.Get();
+        barriers[0].Transition.pResource = ts.copy_tex.Get();
         barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         cmd->ResourceBarrier(1, &barriers[0]);
@@ -748,16 +774,16 @@ private:
         cmd->SetGraphicsRootSignature(m_dx12_root_sig.Get());
         cmd->SetGraphicsRootConstantBufferView(0, m_dx12_cb->GetGPUVirtualAddress());
 
-        ID3D12DescriptorHeap* heaps[] = { m_dx12_srv_heap.Get() };
+        ID3D12DescriptorHeap* heaps[] = { ts.srv_heap.Get() };
         cmd->SetDescriptorHeaps(1, heaps);
-        cmd->SetGraphicsRootDescriptorTable(1, m_dx12_srv_heap->GetGPUDescriptorHandleForHeapStart());
+        cmd->SetGraphicsRootDescriptorTable(1, ts.srv_heap->GetGPUDescriptorHandleForHeapStart());
 
-        D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = m_dx12_rtv_heap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = ts.rtv_heap->GetCPUDescriptorHandleForHeapStart();
         cmd->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
 
-        D3D12_VIEWPORT vp{}; vp.Width = (float)m_dx12_copy_width; vp.Height = (float)m_dx12_copy_height; vp.MaxDepth = 1.0f;
+        D3D12_VIEWPORT vp{}; vp.Width = (float)ts.width; vp.Height = (float)ts.height; vp.MaxDepth = 1.0f;
         cmd->RSSetViewports(1, &vp);
-        D3D12_RECT scissor{}; scissor.right = (LONG)m_dx12_copy_width; scissor.bottom = (LONG)m_dx12_copy_height;
+        D3D12_RECT scissor{}; scissor.right = (LONG)ts.width; scissor.bottom = (LONG)ts.height;
         cmd->RSSetScissorRects(1, &scissor);
 
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -766,7 +792,7 @@ private:
         // Step 3: Copy result_tex -> target (write back)
         //   result_tex: RENDER_TARGET -> COPY_SOURCE
         //   target: COPY_SOURCE -> COPY_DEST
-        barriers[0].Transition.pResource = m_dx12_result_tex.Get();
+        barriers[0].Transition.pResource = ts.result_tex.Get();
         barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
         barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
@@ -776,12 +802,12 @@ private:
         barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         cmd->ResourceBarrier(2, barriers);
 
-        cmd->CopyResource(target, m_dx12_result_tex.Get());
+        cmd->CopyResource(target, ts.result_tex.Get());
 
         // Step 4: Restore states
         //   result_tex: COPY_SOURCE -> RENDER_TARGET (ready for next frame)
         //   target: COPY_DEST -> initial_state
-        barriers[0].Transition.pResource = m_dx12_result_tex.Get();
+        barriers[0].Transition.pResource = ts.result_tex.Get();
         barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
         barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;

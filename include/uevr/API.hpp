@@ -1693,6 +1693,11 @@ public:
             return (FRHITexture2D*)fn();
         }
 
+        static FRHITexture2D* get_scene_capture_render_target() {
+            static const auto fn = initialize()->get_scene_capture_render_target;
+            return fn != nullptr ? (FRHITexture2D*)fn() : nullptr;
+        }
+
     private:
         static inline const UEVR_FFakeStereoRenderingHookFunctions* s_functions{nullptr};
         static inline const UEVR_FFakeStereoRenderingHookFunctions* initialize() {

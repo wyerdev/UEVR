@@ -437,6 +437,7 @@ typedef struct {
 typedef struct {
     UEVR_FRHITexture2DHandle (*get_scene_render_target)();
     UEVR_FRHITexture2DHandle (*get_ui_render_target)();
+    UEVR_FRHITexture2DHandle (*get_scene_capture_render_target)();
 } UEVR_FFakeStereoRenderingHookFunctions;
 
 typedef struct {

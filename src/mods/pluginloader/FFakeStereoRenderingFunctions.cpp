@@ -28,8 +28,20 @@ UEVR_FRHITexture2DHandle stereo_hook::get_ui_render_target() {
     return nullptr;
 }
 
+UEVR_FRHITexture2DHandle stereo_hook::get_scene_capture_render_target() {
+    const auto& vr = VR::get();
+    if (auto& hook = vr->get_fake_stereo_hook(); hook != nullptr) {
+        if (auto rtm = hook->get_render_target_manager(); rtm != nullptr) {
+            return (UEVR_FRHITexture2DHandle)rtm->get_scene_capture_render_target();
+        }
+    }
+
+    return nullptr;
+}
+
 UEVR_FFakeStereoRenderingHookFunctions stereo_hook::functions {
     .get_scene_render_target = &stereo_hook::get_scene_render_target,
-    .get_ui_render_target = &stereo_hook::get_ui_render_target
+    .get_ui_render_target = &stereo_hook::get_ui_render_target,
+    .get_scene_capture_render_target = &stereo_hook::get_scene_capture_render_target
 };
 }
