@@ -186,6 +186,22 @@ bool on_post_render_vr_framework_dx12(UEVR_OnPostRenderVRFrameworkDX12Cb cb) {
     return PluginLoader::get()->add_on_post_render_vr_framework_dx12(cb);
 }
 
+bool on_pre_render_vr_framework_dx11(UEVR_OnPreRenderVRFrameworkDX11Cb cb) {
+    if (cb == nullptr) {
+        return false;
+    }
+
+    return PluginLoader::get()->add_on_pre_render_vr_framework_dx11(cb);
+}
+
+bool on_pre_render_vr_framework_dx12(UEVR_OnPreRenderVRFrameworkDX12Cb cb) {
+    if (cb == nullptr) {
+        return false;
+    }
+
+    return PluginLoader::get()->add_on_pre_render_vr_framework_dx12(cb);
+}
+
 bool on_custom_event(UEVR_OnCustomEventCb cb) {
     if (cb == nullptr) {
         return false;
@@ -201,6 +217,8 @@ UEVR_PluginCallbacks g_plugin_callbacks {
     uevr::on_message,
     uevr::on_xinput_get_state,
     uevr::on_xinput_set_state,
+    uevr::on_pre_render_vr_framework_dx11,
+    uevr::on_pre_render_vr_framework_dx12,
     uevr::on_post_render_vr_framework_dx11,
     uevr::on_post_render_vr_framework_dx12,
     uevr::on_custom_event
@@ -1986,6 +2004,32 @@ void PluginLoader::on_device_reset() {
     }
 }
 
+void PluginLoader::on_pre_render_vr_framework_dx11() {
+    std::shared_lock _{m_api_cb_mtx};
+
+    for (auto&& cb : m_on_pre_render_vr_framework_dx11_cbs) {
+        try {
+            cb();
+        } catch(...) {
+            spdlog::error("[APIProxy] Exception occurred in on_pre_render_vr_framework_dx11 callback; one of the plugins has an error.");
+            continue;
+        }
+    }
+}
+
+void PluginLoader::on_pre_render_vr_framework_dx12() {
+    std::shared_lock _{m_api_cb_mtx};
+
+    for (auto&& cb : m_on_pre_render_vr_framework_dx12_cbs) {
+        try {
+            cb();
+        } catch(...) {
+            spdlog::error("[APIProxy] Exception occurred in on_pre_render_vr_framework_dx12 callback; one of the plugins has an error.");
+            continue;
+        }
+    }
+}
+
 void PluginLoader::on_post_render_vr_framework_dx11(ID3D11DeviceContext* context, ID3D11Texture2D* tex, ID3D11RenderTargetView* rtv) {
     std::shared_lock _{m_api_cb_mtx};
 
@@ -2230,6 +2274,20 @@ bool PluginLoader::add_on_post_render_vr_framework_dx12(UEVR_OnPostRenderVRFrame
     std::unique_lock _{m_api_cb_mtx};
 
     m_on_post_render_vr_framework_dx12_cbs.push_back(cb);
+    return true;
+}
+
+bool PluginLoader::add_on_pre_render_vr_framework_dx11(UEVR_OnPreRenderVRFrameworkDX11Cb cb) {
+    std::unique_lock _{m_api_cb_mtx};
+
+    m_on_pre_render_vr_framework_dx11_cbs.push_back(cb);
+    return true;
+}
+
+bool PluginLoader::add_on_pre_render_vr_framework_dx12(UEVR_OnPreRenderVRFrameworkDX12Cb cb) {
+    std::unique_lock _{m_api_cb_mtx};
+
+    m_on_pre_render_vr_framework_dx12_cbs.push_back(cb);
     return true;
 }
 

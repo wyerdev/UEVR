@@ -4,8 +4,9 @@ FakeHDR Plugin for UEVR
 A UEVR C++ plugin that applies a FakeHDR post-processing effect to VR frames.
 Based on CeeJay.dk's FakeHDR ReShade effect.
 
-The effect is applied to the swapchain backbuffer during on_present(), BEFORE
-UEVR copies it to VR eye textures — so both eyes get the effect.
+The effect is applied to the UE4 scene render target in on_pre_render_vr_framework_dx12(),
+which fires just BEFORE UEVR copies the render target to VR eye textures.
+This ensures the effect is visible in both the VR headset and desktop mirror.
 
 Includes an ImGui settings panel with enable/disable, parameter sliders, reset.
 
@@ -122,6 +123,27 @@ struct HDRParamsCB {
 };
 
 // ============================================================================
+// Helper: resolve TYPELESS formats to typed equivalents for views/PSOs
+// ============================================================================
+static DXGI_FORMAT resolve_typeless_format(DXGI_FORMAT fmt) {
+    switch (fmt) {
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:     return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:     return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8X8_TYPELESS:     return DXGI_FORMAT_B8G8R8X8_UNORM;
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:  return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case DXGI_FORMAT_R32G32B32A32_TYPELESS: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        case DXGI_FORMAT_R32_TYPELESS:          return DXGI_FORMAT_R32_FLOAT;
+        case DXGI_FORMAT_R16_TYPELESS:          return DXGI_FORMAT_R16_FLOAT;
+        default: return fmt;
+    }
+}
+
+static bool is_typeless_format(DXGI_FORMAT fmt) {
+    return resolve_typeless_format(fmt) != fmt;
+}
+
+// ============================================================================
 // Default parameter values
 // ============================================================================
 static constexpr float DEFAULT_HDR_POWER = 1.30f;
@@ -154,7 +176,8 @@ public:
     ComPtr<ID3D12RootSignature>  m_dx12_root_sig;
     ComPtr<ID3D12PipelineState>  m_dx12_pso;
     ComPtr<ID3D12Resource>       m_dx12_cb;
-    ComPtr<ID3D12Resource>       m_dx12_copy_tex;
+    ComPtr<ID3D12Resource>       m_dx12_copy_tex;    // SRV input (scene snapshot)
+    ComPtr<ID3D12Resource>       m_dx12_result_tex;  // RTV output (has ALLOW_RENDER_TARGET)
     ComPtr<ID3D12DescriptorHeap> m_dx12_srv_heap;
     ComPtr<ID3D12DescriptorHeap> m_dx12_rtv_heap;
     ComPtr<ID3D12CommandAllocator> m_dx12_cmd_alloc;
@@ -174,6 +197,10 @@ public:
     HWND m_wnd{};
     std::recursive_mutex m_imgui_mutex{};
 
+    // Frame skip: wait for VR system to stabilize
+    uint32_t m_frame_count = 0;
+    static constexpr uint32_t SKIP_FRAMES = 60;
+
     void on_dllmain() override {}
 
     void on_initialize() override {
@@ -185,15 +212,27 @@ public:
     // ImGui: build the settings UI each frame
     // ========================================================================
     void draw_ui() {
-        ImGui::SetNextWindowSize(ImVec2(340, 200), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(400, 220), ImGuiCond_FirstUseEver);
 
         if (ImGui::Begin("FakeHDR")) {
             ImGui::Checkbox("Enabled", &m_enabled);
             ImGui::Separator();
 
-            ImGui::SliderFloat("HDR Power", &m_hdr_power, 0.0f, 8.0f, "%.2f");
-            ImGui::SliderFloat("Radius 1",  &m_radius1,   0.0f, 8.0f, "%.3f");
-            ImGui::SliderFloat("Radius 2",  &m_radius2,   0.0f, 8.0f, "%.3f");
+            constexpr float step = 0.01f;
+            auto slider_with_buttons = [&](const char* label, float* val, float mn, float mx, const char* fmt) {
+                ImGui::PushID(label);
+                if (ImGui::Button("-")) { *val = (*val - step < mn) ? mn : *val - step; }
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 40.0f);
+                ImGui::SliderFloat(label, val, mn, mx, fmt);
+                ImGui::SameLine();
+                if (ImGui::Button("+")) { *val = (*val + step > mx) ? mx : *val + step; }
+                ImGui::PopID();
+            };
+
+            slider_with_buttons("HDR Power", &m_hdr_power, 0.0f, 8.0f, "%.2f");
+            slider_with_buttons("Radius 1",  &m_radius1,   0.0f, 8.0f, "%.3f");
+            slider_with_buttons("Radius 2",  &m_radius2,   0.0f, 8.0f, "%.3f");
 
             ImGui::Spacing();
             if (ImGui::Button("Reset to Defaults")) {
@@ -206,7 +245,62 @@ public:
     }
 
     // ========================================================================
-    // on_present: apply FakeHDR to the swapchain backbuffer, then ImGui
+    // on_pre_render_vr_framework_dx12: apply FakeHDR to UE render target
+    // BEFORE UEVR copies it to VR eye textures
+    // ========================================================================
+    void on_pre_render_vr_framework_dx12() override {
+        if (!m_enabled) return;
+
+        // Skip early frames while VR/D3D12 is still initializing
+        m_frame_count++;
+        if (m_frame_count < SKIP_FRAMES) {
+            if (m_frame_count == 1) {
+                API::get()->log_info("[FakeHDR DX12] Skipping first %u frames for stability", SKIP_FRAMES);
+            }
+            return;
+        }
+
+        const auto renderer_data = API::get()->param()->renderer;
+        if (renderer_data->renderer_type != UEVR_RENDERER_D3D12) return;
+        if (!renderer_data->device || !renderer_data->command_queue) return;
+
+        // Get the UE4 scene render target that UEVR will copy to VR eyes
+        auto scene_rt = API::StereoHook::get_scene_render_target();
+        if (!scene_rt) return;
+
+        auto native = (ID3D12Resource*)scene_rt->get_native_resource();
+        if (!native) return;
+
+        // Verify the resource looks valid (has non-zero dimensions)
+        auto desc = native->GetDesc();
+        if (desc.Width == 0 || desc.Height == 0) return;
+
+        if (m_frame_count == SKIP_FRAMES) {
+            API::get()->log_info("[FakeHDR DX12] First apply: resource %llx format %u size %ux%u",
+                (unsigned long long)native, (unsigned)desc.Format, (unsigned)desc.Width, (unsigned)desc.Height);
+        }
+
+        __try {
+            apply_fakehdr_to_resource_dx12(native, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            API::get()->log_error("[FakeHDR DX12] SEH exception in apply (code 0x%x)", GetExceptionCode());
+            // Disable to prevent repeated crashes
+            m_enabled = false;
+        }
+    }
+
+    void on_pre_render_vr_framework_dx11() override {
+        if (!m_enabled) return;
+
+        const auto renderer_data = API::get()->param()->renderer;
+        if (renderer_data->renderer_type != UEVR_RENDERER_D3D11) return;
+
+        // DX11: apply to backbuffer for now (TODO: get UE RT via StereoHook)
+        apply_fakehdr_to_backbuffer_dx11();
+    }
+
+    // ========================================================================
+    // on_present: ImGui desktop rendering only (effect is on UE render target)
     // ========================================================================
     void on_present() override {
         std::scoped_lock _{m_imgui_mutex};
@@ -215,18 +309,8 @@ public:
             if (!initialize_imgui()) return;
         }
 
-        const auto renderer_data = API::get()->param()->renderer;
-
-        // Apply FakeHDR to the real swapchain backbuffer
-        if (m_enabled) {
-            if (renderer_data->renderer_type == UEVR_RENDERER_D3D11) {
-                apply_fakehdr_to_backbuffer_dx11();
-            } else if (renderer_data->renderer_type == UEVR_RENDERER_D3D12) {
-                apply_fakehdr_to_backbuffer_dx12();
-            }
-        }
-
         // Render ImGui to desktop mirror when not in VR
+        const auto renderer_data = API::get()->param()->renderer;
         if (!API::get()->param()->vr->is_hmd_active()) {
             if (!m_was_rendering_desktop) {
                 m_was_rendering_desktop = true;
@@ -368,7 +452,8 @@ private:
             }
         }
         m_dx12_pso.Reset(); m_dx12_root_sig.Reset(); m_dx12_cb.Reset();
-        m_dx12_copy_tex.Reset(); m_dx12_srv_heap.Reset(); m_dx12_rtv_heap.Reset();
+        m_dx12_copy_tex.Reset(); m_dx12_result_tex.Reset();
+        m_dx12_srv_heap.Reset(); m_dx12_rtv_heap.Reset();
         m_dx12_cmd_list.Reset(); m_dx12_cmd_alloc.Reset(); m_dx12_fence.Reset();
         if (m_dx12_fence_event) { CloseHandle(m_dx12_fence_event); m_dx12_fence_event = nullptr; }
         m_dx12_fence_value = 0; m_dx12_copy_width = 0; m_dx12_copy_height = 0;
@@ -493,6 +578,9 @@ private:
         if (m_dx12_ready) return true;
         if (!device) return false;
 
+        // Resolve TYPELESS formats — can't use them for PSO RTVFormats or view creation
+        rt_format = resolve_typeless_format(rt_format);
+
         // Root signature
         D3D12_DESCRIPTOR_RANGE1 srv_range{};
         srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -587,46 +675,71 @@ private:
 
     bool ensure_dx12_copy_texture(ID3D12Device* device, ID3D12Resource* src) {
         auto sd = src->GetDesc();
-        if (m_dx12_copy_tex && m_dx12_copy_width == (UINT)sd.Width && m_dx12_copy_height == sd.Height) return true;
+        if (m_dx12_copy_tex && m_dx12_result_tex && m_dx12_copy_width == (UINT)sd.Width && m_dx12_copy_height == sd.Height) return true;
         m_dx12_copy_tex.Reset();
+        m_dx12_result_tex.Reset();
+
+        const auto resolved_fmt = resolve_typeless_format(sd.Format);
 
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-        D3D12_RESOURCE_DESC desc = sd; desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &desc,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&m_dx12_copy_tex)))) return false;
 
-        D3D12_SHADER_RESOURCE_VIEW_DESC svd{}; svd.Format = desc.Format;
+        // Copy texture: SRV input (no render target flag needed)
+        D3D12_RESOURCE_DESC copy_desc = sd;
+        copy_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+        copy_desc.Format = resolved_fmt;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &copy_desc,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&m_dx12_copy_tex)))) {
+            API::get()->log_error("[FakeHDR DX12] Failed to create copy texture");
+            return false;
+        }
+
+        // Result texture: RTV output (MUST have ALLOW_RENDER_TARGET)
+        D3D12_RESOURCE_DESC result_desc = sd;
+        result_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        result_desc.Format = resolved_fmt;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &result_desc,
+                D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&m_dx12_result_tex)))) {
+            API::get()->log_error("[FakeHDR DX12] Failed to create result texture");
+            m_dx12_copy_tex.Reset();
+            return false;
+        }
+
+        // SRV for copy texture
+        D3D12_SHADER_RESOURCE_VIEW_DESC svd{};
+        svd.Format = resolved_fmt;
         svd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         svd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         svd.Texture2D.MipLevels = 1;
         device->CreateShaderResourceView(m_dx12_copy_tex.Get(), &svd, m_dx12_srv_heap->GetCPUDescriptorHandleForHeapStart());
 
-        m_dx12_copy_width = (UINT)desc.Width; m_dx12_copy_height = desc.Height;
+        // RTV for result texture
+        D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{};
+        rtv_desc.Format = resolved_fmt;
+        rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        device->CreateRenderTargetView(m_dx12_result_tex.Get(), &rtv_desc, m_dx12_rtv_heap->GetCPUDescriptorHandleForHeapStart());
+
+        m_dx12_copy_width = (UINT)sd.Width; m_dx12_copy_height = sd.Height;
+        API::get()->log_info("[FakeHDR DX12] Textures ready: %ux%u fmt %u", m_dx12_copy_width, m_dx12_copy_height, (unsigned)resolved_fmt);
         return true;
     }
 
-    void apply_fakehdr_to_backbuffer_dx12() {
+    void apply_fakehdr_to_resource_dx12(ID3D12Resource* target, D3D12_RESOURCE_STATES initial_state) {
         const auto rd = API::get()->param()->renderer;
         auto device = (ID3D12Device*)rd->device;
-        auto swapchain = (IDXGISwapChain3*)rd->swapchain;
         auto command_queue = (ID3D12CommandQueue*)rd->command_queue;
-        if (!device || !swapchain || !command_queue) return;
+        if (!device || !command_queue || !target) return;
 
-        // Get real swapchain backbuffer
-        UINT bb_index = swapchain->GetCurrentBackBufferIndex();
-        ComPtr<ID3D12Resource> backbuffer;
-        if (FAILED(swapchain->GetBuffer(bb_index, IID_PPV_ARGS(&backbuffer)))) return;
-
-        auto bb_desc = backbuffer->GetDesc();
+        auto bb_desc = target->GetDesc();
+        const auto resolved_format = resolve_typeless_format(bb_desc.Format);
 
         // Init or reinit if format changed
-        if (!m_dx12_ready || m_dx12_rt_format != bb_desc.Format) {
+        if (!m_dx12_ready || m_dx12_rt_format != resolved_format) {
             if (m_dx12_ready) release_effect_resources();
             if (!init_dx12_pipeline(device, bb_desc.Format)) return;
         }
-        if (!ensure_dx12_copy_texture(device, backbuffer.Get())) return;
+        if (!ensure_dx12_copy_texture(device, target)) return;
 
-        // Wait for previous frame
+        // Wait for previous frame's GPU work to finish
         if (m_dx12_fence->GetCompletedValue() < m_dx12_fence_value) {
             m_dx12_fence->SetEventOnCompletion(m_dx12_fence_value, m_dx12_fence_event);
             WaitForSingleObject(m_dx12_fence_event, INFINITE);
@@ -643,19 +756,26 @@ private:
             m_dx12_cb_mapped->_pad1[0] = 0; m_dx12_cb_mapped->_pad1[1] = 0;
         }
 
-        // Create RTV for this backbuffer
-        device->CreateRenderTargetView(backbuffer.Get(), nullptr, m_dx12_rtv_heap->GetCPUDescriptorHandleForHeapStart());
-
         // Record command list
-        m_dx12_cmd_alloc->Reset();
-        m_dx12_cmd_list->Reset(m_dx12_cmd_alloc.Get(), nullptr);
+        auto hr1 = m_dx12_cmd_alloc->Reset();
+        if (FAILED(hr1)) {
+            API::get()->log_error("[FakeHDR DX12] cmd alloc Reset failed: 0x%x", (unsigned)hr1);
+            return;
+        }
+        auto hr2 = m_dx12_cmd_list->Reset(m_dx12_cmd_alloc.Get(), nullptr);
+        if (FAILED(hr2)) {
+            API::get()->log_error("[FakeHDR DX12] cmd list Reset failed: 0x%x", (unsigned)hr2);
+            return;
+        }
         auto cmd = m_dx12_cmd_list.Get();
 
-        // BB: PRESENT -> COPY_SOURCE, copy tex: SRV -> COPY_DEST
-        D3D12_RESOURCE_BARRIER barriers[2]{};
+        // Step 1: Copy target -> copy_tex (for SRV sampling)
+        //   target: initial_state -> COPY_SOURCE
+        //   copy_tex: SRV -> COPY_DEST
+        D3D12_RESOURCE_BARRIER barriers[3]{};
         barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barriers[0].Transition.pResource = backbuffer.Get();
-        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        barriers[0].Transition.pResource = target;
+        barriers[0].Transition.StateBefore = initial_state;
         barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
         barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -665,16 +785,16 @@ private:
         barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         cmd->ResourceBarrier(2, barriers);
 
-        cmd->CopyResource(m_dx12_copy_tex.Get(), backbuffer.Get());
+        cmd->CopyResource(m_dx12_copy_tex.Get(), target);
 
-        // BB: COPY_SOURCE -> RENDER_TARGET, copy tex: COPY_DEST -> SRV
-        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        cmd->ResourceBarrier(2, barriers);
+        // Step 2: Render FakeHDR from copy_tex -> result_tex
+        //   copy_tex: COPY_DEST -> SRV
+        //   result_tex is already in RENDER_TARGET state
+        barriers[0].Transition.pResource = m_dx12_copy_tex.Get();
+        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        cmd->ResourceBarrier(1, &barriers[0]);
 
-        // Draw FakeHDR fullscreen into backbuffer
         cmd->SetPipelineState(m_dx12_pso.Get());
         cmd->SetGraphicsRootSignature(m_dx12_root_sig.Get());
         cmd->SetGraphicsRootConstantBufferView(0, m_dx12_cb->GetGPUVirtualAddress());
@@ -694,16 +814,39 @@ private:
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         cmd->DrawInstanced(3, 1, 0, 0);
 
-        // BB: RENDER_TARGET -> PRESENT
-        D3D12_RESOURCE_BARRIER final_barrier{};
-        final_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        final_barrier.Transition.pResource = backbuffer.Get();
-        final_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        final_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-        final_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        cmd->ResourceBarrier(1, &final_barrier);
+        // Step 3: Copy result_tex -> target (write back)
+        //   result_tex: RENDER_TARGET -> COPY_SOURCE
+        //   target: COPY_SOURCE -> COPY_DEST
+        barriers[0].Transition.pResource = m_dx12_result_tex.Get();
+        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barriers[1].Transition.pResource = target;
+        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        cmd->ResourceBarrier(2, barriers);
 
-        cmd->Close();
+        cmd->CopyResource(target, m_dx12_result_tex.Get());
+
+        // Step 4: Restore states
+        //   result_tex: COPY_SOURCE -> RENDER_TARGET (ready for next frame)
+        //   target: COPY_DEST -> initial_state
+        barriers[0].Transition.pResource = m_dx12_result_tex.Get();
+        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barriers[1].Transition.pResource = target;
+        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[1].Transition.StateAfter = initial_state;
+        barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        cmd->ResourceBarrier(2, barriers);
+
+        auto hr_close = cmd->Close();
+        if (FAILED(hr_close)) {
+            API::get()->log_error("[FakeHDR DX12] cmd Close failed: 0x%x", (unsigned)hr_close);
+            return;
+        }
 
         ID3D12CommandList* cmd_lists[] = { cmd };
         command_queue->ExecuteCommandLists(1, cmd_lists);

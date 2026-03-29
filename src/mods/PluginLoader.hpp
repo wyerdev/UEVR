@@ -37,6 +37,8 @@ public:
     void on_xinput_get_state(uint32_t* retval, uint32_t user_index, XINPUT_STATE* state) override;
     void on_xinput_set_state(uint32_t* retval, uint32_t user_index, XINPUT_VIBRATION* vibration) override;
 
+    void on_pre_render_vr_framework_dx11() override;
+    void on_pre_render_vr_framework_dx12() override;
     void on_post_render_vr_framework_dx11(ID3D11DeviceContext* context, ID3D11Texture2D*, ID3D11RenderTargetView* rtv) override;
     void on_post_render_vr_framework_dx12(ID3D12GraphicsCommandList* command_list, ID3D12Resource* rt, D3D12_CPU_DESCRIPTOR_HANDLE* rtv) override;
     
@@ -80,6 +82,8 @@ public:
     bool add_on_message(UEVR_OnMessageCb cb);
     bool add_on_xinput_get_state(UEVR_OnXInputGetStateCb cb);
     bool add_on_xinput_set_state(UEVR_OnXInputSetStateCb cb);
+    bool add_on_pre_render_vr_framework_dx11(UEVR_OnPreRenderVRFrameworkDX11Cb cb);
+    bool add_on_pre_render_vr_framework_dx12(UEVR_OnPreRenderVRFrameworkDX12Cb cb);
     bool add_on_post_render_vr_framework_dx11(UEVR_OnPostRenderVRFrameworkDX11Cb cb);
     bool add_on_post_render_vr_framework_dx12(UEVR_OnPostRenderVRFrameworkDX12Cb cb);
     bool add_on_custom_event(UEVR_OnCustomEventCb cb);
@@ -153,6 +157,8 @@ private:
     std::shared_mutex m_api_cb_mtx;
     std::vector<UEVR_OnPresentCb> m_on_present_cbs{};
     std::vector<UEVR_OnDeviceResetCb> m_on_device_reset_cbs{};
+    std::vector<UEVR_OnPreRenderVRFrameworkDX11Cb> m_on_pre_render_vr_framework_dx11_cbs{};
+    std::vector<UEVR_OnPreRenderVRFrameworkDX12Cb> m_on_pre_render_vr_framework_dx12_cbs{};
     std::vector<UEVR_OnPostRenderVRFrameworkDX11Cb> m_on_post_render_vr_framework_dx11_cbs{};
     std::vector<UEVR_OnPostRenderVRFrameworkDX12Cb> m_on_post_render_vr_framework_dx12_cbs{};
     std::vector<UEVR_OnMessageCb> m_on_message_cbs{};
@@ -178,6 +184,8 @@ private:
         (std::vector<generic_std_function>*)&m_on_device_reset_cbs,
 
         // VR Renderer
+        (std::vector<generic_std_function>*)&m_on_pre_render_vr_framework_dx11_cbs,
+        (std::vector<generic_std_function>*)&m_on_pre_render_vr_framework_dx12_cbs,
         (std::vector<generic_std_function>*)&m_on_post_render_vr_framework_dx11_cbs,
         (std::vector<generic_std_function>*)&m_on_post_render_vr_framework_dx12_cbs,
 

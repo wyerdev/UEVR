@@ -156,6 +156,8 @@ typedef void (*UEVR_OnPresentCb)();
 typedef void (*UEVR_OnDeviceResetCb)();
 
 /* VR Specific renderer callbacks */
+typedef void (*UEVR_OnPreRenderVRFrameworkDX11Cb)(); /* called before VR eye textures are copied/submitted */
+typedef void (*UEVR_OnPreRenderVRFrameworkDX12Cb)(); /* called before VR eye textures are copied/submitted */
 typedef void (*UEVR_OnPostRenderVRFrameworkDX11Cb)(void*, void*, void*); /* immediate_context, ID3D11Texture2D* resource, ID3D11RenderTargetView* rtv */
 /* On DX12 the resource state is D3D12_RESOURCE_STATE_RENDER_TARGET */
 typedef void (*UEVR_OnPostRenderVRFrameworkDX12Cb)(void*, void*, void*); /* command_list, ID3D12Resource* resource, D3D12_CPU_DESCRIPTOR_HANDLE* rtv */
@@ -179,6 +181,8 @@ typedef bool (*UEVR_OnPresentFn)(UEVR_OnPresentCb);
 typedef bool (*UEVR_OnDeviceResetFn)(UEVR_OnDeviceResetCb);
 
 /* VR Renderer */
+typedef bool (*UEVR_OnPreRenderVRFrameworkDX11Fn)(UEVR_OnPreRenderVRFrameworkDX11Cb);
+typedef bool (*UEVR_OnPreRenderVRFrameworkDX12Fn)(UEVR_OnPreRenderVRFrameworkDX12Cb);
 typedef bool (*UEVR_OnPostRenderVRFrameworkDX11Fn)(UEVR_OnPostRenderVRFrameworkDX11Cb);
 typedef bool (*UEVR_OnPostRenderVRFrameworkDX12Fn)(UEVR_OnPostRenderVRFrameworkDX12Cb);
 
@@ -208,6 +212,8 @@ typedef struct {
     UEVR_OnMessageFn on_message;
     UEVR_OnXInputGetStateFn on_xinput_get_state;
     UEVR_OnXInputSetStateFn on_xinput_set_state;
+    UEVR_OnPreRenderVRFrameworkDX11Fn on_pre_render_vr_framework_dx11;
+    UEVR_OnPreRenderVRFrameworkDX12Fn on_pre_render_vr_framework_dx12;
     UEVR_OnPostRenderVRFrameworkDX11Fn on_post_render_vr_framework_dx11;
     UEVR_OnPostRenderVRFrameworkDX12Fn on_post_render_vr_framework_dx12;
     UEVR_OnCustomEventFn on_custom_event;

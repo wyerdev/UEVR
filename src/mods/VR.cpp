@@ -19,6 +19,7 @@
 #include <tracy/Tracy.hpp>
 
 #include "Framework.hpp"
+#include "Mods.hpp"
 #include "frameworkConfig.hpp"
 
 #include "utility/Logging.hpp"
@@ -2148,9 +2149,19 @@ void VR::on_present() {
             update_hmd_state();
         }
 
+        // Dispatch pre-render callbacks before VR eye texture copy/submit
+        for (auto& mod : g_framework->get_mods()->get_mods()) {
+            mod->on_pre_render_vr_framework_dx11();
+        }
+
         m_is_d3d12 = false;
         e = m_d3d11.on_frame(this);
     } else if (renderer == Framework::RendererType::D3D12) {
+        // Dispatch pre-render callbacks before VR eye texture copy/submit
+        for (auto& mod : g_framework->get_mods()->get_mods()) {
+            mod->on_pre_render_vr_framework_dx12();
+        }
+
         m_is_d3d12 = true;
         e = m_d3d12.on_frame(this);
     }
