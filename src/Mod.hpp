@@ -621,8 +621,6 @@ public:
     virtual void on_xinput_get_state(uint32_t* retval, uint32_t user_index, XINPUT_STATE* state) {};
     virtual void on_xinput_set_state(uint32_t* retval, uint32_t user_index, XINPUT_VIBRATION* vibration) {};
 
-    virtual void on_pre_render_vr_framework_dx11() {};
-    virtual void on_pre_render_vr_framework_dx12() {};
     virtual void on_post_render_vr_framework_dx11(ID3D11DeviceContext* context, ID3D11Texture2D* tex, ID3D11RenderTargetView* rtv) {};
     virtual void on_post_render_vr_framework_dx12(ID3D12GraphicsCommandList* command_list, ID3D12Resource* tex, D3D12_CPU_DESCRIPTOR_HANDLE* rtv) {};
     

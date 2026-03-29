@@ -195,6 +195,9 @@ typedef bool (*UEVR_OnXInputSetStateFn)(UEVR_OnXInputSetStateCb);
 typedef void (*UEVR_OnCustomEventCb)(const char* evt, const char* evt_data);
 typedef bool (*UEVR_OnCustomEventFn)(UEVR_OnCustomEventCb);
 
+typedef void (*UEVR_OnDrawUICb)(void* imgui_context);
+typedef bool (*UEVR_OnDrawUIFn)(UEVR_OnDrawUICb);
+
 /* Engine */
 typedef bool (*UEVR_Engine_TickFn)(UEVR_Engine_TickCb);
 typedef bool (*UEVR_Slate_DrawWindow_RenderThreadFn)(UEVR_Slate_DrawWindow_RenderThreadCb);
@@ -212,11 +215,13 @@ typedef struct {
     UEVR_OnMessageFn on_message;
     UEVR_OnXInputGetStateFn on_xinput_get_state;
     UEVR_OnXInputSetStateFn on_xinput_set_state;
-    UEVR_OnPreRenderVRFrameworkDX11Fn on_pre_render_vr_framework_dx11;
-    UEVR_OnPreRenderVRFrameworkDX12Fn on_pre_render_vr_framework_dx12;
     UEVR_OnPostRenderVRFrameworkDX11Fn on_post_render_vr_framework_dx11;
     UEVR_OnPostRenderVRFrameworkDX12Fn on_post_render_vr_framework_dx12;
     UEVR_OnCustomEventFn on_custom_event;
+    /* New entries appended at end for ABI compatibility with existing plugins */
+    UEVR_OnPreRenderVRFrameworkDX11Fn on_pre_render_vr_framework_dx11;
+    UEVR_OnPreRenderVRFrameworkDX12Fn on_pre_render_vr_framework_dx12;
+    UEVR_OnDrawUIFn on_draw_ui;
 } UEVR_PluginCallbacks;
 
 typedef struct {

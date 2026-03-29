@@ -13,8 +13,9 @@ Includes an ImGui settings panel with enable/disable, parameter sliders, reset.
 License: MIT (same as UEVR example plugins)
 */
 
-#include <mutex>
 #include <memory>
+#include <fstream>
+#include <string>
 
 #include <Windows.h>
 #include <d3d11.h>
@@ -27,12 +28,7 @@ License: MIT (same as UEVR example plugins)
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 
-#include "imgui/imgui_impl_dx11.h"
-#include "imgui/imgui_impl_dx12.h"
 #include "imgui/imgui_impl_win32.h"
-
-#include "rendering/d3d11.hpp"
-#include "rendering/d3d12.hpp"
 
 #include "uevr/Plugin.hpp"
 
@@ -191,12 +187,6 @@ public:
     HDRParamsCB* m_dx12_cb_mapped = nullptr;
     DXGI_FORMAT m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
 
-    // ImGui state
-    bool m_imgui_initialized = false;
-    bool m_was_rendering_desktop = false;
-    HWND m_wnd{};
-    std::recursive_mutex m_imgui_mutex{};
-
     // Frame skip: wait for VR system to stabilize
     uint32_t m_frame_count = 0;
     static constexpr uint32_t SKIP_FRAMES = 60;
@@ -204,44 +194,71 @@ public:
     void on_dllmain() override {}
 
     void on_initialize() override {
-        ImGui::CreateContext();
         API::get()->log_info("[FakeHDR] Plugin initialized");
+        load_settings();
     }
 
     // ========================================================================
-    // ImGui: build the settings UI each frame
+    // Settings persistence
     // ========================================================================
-    void draw_ui() {
-        ImGui::SetNextWindowSize(ImVec2(400, 220), ImGuiCond_FirstUseEver);
+    std::filesystem::path get_settings_path() {
+        return API::get()->get_persistent_dir(L"fakehdr_settings.txt");
+    }
 
-        if (ImGui::Begin("FakeHDR")) {
-            ImGui::Checkbox("Enabled", &m_enabled);
-            ImGui::Separator();
+    void save_settings() {
+        try {
+            std::ofstream f(get_settings_path());
+            if (f.is_open()) {
+                f << m_enabled << "\n" << m_hdr_power << "\n" << m_radius1 << "\n" << m_radius2 << "\n";
+            }
+        } catch (...) {}
+    }
+
+    void load_settings() {
+        try {
+            std::ifstream f(get_settings_path());
+            if (f.is_open()) {
+                int enabled_int;
+                if (f >> enabled_int >> m_hdr_power >> m_radius1 >> m_radius2) {
+                    m_enabled = (enabled_int != 0);
+                    API::get()->log_info("[FakeHDR] Loaded settings: enabled=%d power=%.2f r1=%.3f r2=%.3f",
+                        m_enabled, m_hdr_power, m_radius1, m_radius2);
+                }
+            }
+        } catch (...) {}
+    }
+
+    // ========================================================================
+    // on_draw_ui: draw settings inside the UEVR menu (Plugins page)
+    // ========================================================================
+    void on_draw_ui() override {
+        if (ImGui::CollapsingHeader("FakeHDR Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            bool changed = false;
+
+            changed |= ImGui::Checkbox("Enabled", &m_enabled);
 
             constexpr float step = 0.01f;
-            auto slider_with_buttons = [&](const char* label, float* val, float mn, float mx, const char* fmt) {
-                ImGui::PushID(label);
-                if (ImGui::Button("-")) { *val = (*val - step < mn) ? mn : *val - step; }
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 40.0f);
-                ImGui::SliderFloat(label, val, mn, mx, fmt);
-                ImGui::SameLine();
-                if (ImGui::Button("+")) { *val = (*val + step > mx) ? mx : *val + step; }
-                ImGui::PopID();
-            };
+            constexpr float step_fast = 0.1f;
+            changed |= ImGui::InputFloat("HDR Power", &m_hdr_power, step, step_fast, "%.2f");
+            changed |= ImGui::InputFloat("Radius 1",  &m_radius1,   step, step_fast, "%.3f");
+            changed |= ImGui::InputFloat("Radius 2",  &m_radius2,   step, step_fast, "%.3f");
 
-            slider_with_buttons("HDR Power", &m_hdr_power, 0.0f, 8.0f, "%.2f");
-            slider_with_buttons("Radius 1",  &m_radius1,   0.0f, 8.0f, "%.3f");
-            slider_with_buttons("Radius 2",  &m_radius2,   0.0f, 8.0f, "%.3f");
+            // Clamp values
+            m_hdr_power = (m_hdr_power < 0.0f) ? 0.0f : (m_hdr_power > 8.0f) ? 8.0f : m_hdr_power;
+            m_radius1   = (m_radius1   < 0.0f) ? 0.0f : (m_radius1   > 8.0f) ? 8.0f : m_radius1;
+            m_radius2   = (m_radius2   < 0.0f) ? 0.0f : (m_radius2   > 8.0f) ? 8.0f : m_radius2;
 
-            ImGui::Spacing();
             if (ImGui::Button("Reset to Defaults")) {
                 m_hdr_power = DEFAULT_HDR_POWER;
                 m_radius1   = DEFAULT_RADIUS1;
                 m_radius2   = DEFAULT_RADIUS2;
+                changed = true;
+            }
+
+            if (changed) {
+                save_settings();
             }
         }
-        ImGui::End();
     }
 
     // ========================================================================
@@ -300,66 +317,19 @@ public:
     }
 
     // ========================================================================
-    // on_present: ImGui desktop rendering only (effect is on UE render target)
+    // on_present: no longer needed (UI is in UEVR menu now)
     // ========================================================================
     void on_present() override {
-        std::scoped_lock _{m_imgui_mutex};
-
-        if (!m_imgui_initialized) {
-            if (!initialize_imgui()) return;
-        }
-
-        // Render ImGui to desktop mirror when not in VR
-        const auto renderer_data = API::get()->param()->renderer;
-        if (!API::get()->param()->vr->is_hmd_active()) {
-            if (!m_was_rendering_desktop) {
-                m_was_rendering_desktop = true;
-                on_device_reset();
-                return;
-            }
-            m_was_rendering_desktop = true;
-
-            if (renderer_data->renderer_type == UEVR_RENDERER_D3D11) {
-                ImGui_ImplDX11_NewFrame();
-                g_d3d11.render_imgui();
-            } else if (renderer_data->renderer_type == UEVR_RENDERER_D3D12) {
-                auto command_queue = (ID3D12CommandQueue*)renderer_data->command_queue;
-                if (command_queue == nullptr) return;
-                ImGui_ImplDX12_NewFrame();
-                g_d3d12.render_imgui();
-            }
-        }
     }
 
     // ========================================================================
-    // on_pre_engine_tick: build the ImGui frame
+    // on_pre_engine_tick: nothing to do (UI drawn by UEVR menu)
     // ========================================================================
     void on_pre_engine_tick(API::UGameEngine* engine, float delta) override {
-        if (m_imgui_initialized) {
-            std::scoped_lock _{m_imgui_mutex};
-            ImGui_ImplWin32_NewFrame();
-            ImGui::NewFrame();
-            draw_ui();
-            ImGui::EndFrame();
-            ImGui::Render();
-        }
     }
 
     void on_device_reset() override {
         API::get()->log_info("[FakeHDR] Device reset");
-        std::scoped_lock _{m_imgui_mutex};
-
-        const auto renderer_data = API::get()->param()->renderer;
-        if (renderer_data->renderer_type == UEVR_RENDERER_D3D11) {
-            ImGui_ImplDX11_Shutdown();
-            g_d3d11 = {};
-        }
-        if (renderer_data->renderer_type == UEVR_RENDERER_D3D12) {
-            g_d3d12.reset();
-            ImGui_ImplDX12_Shutdown();
-            g_d3d12 = {};
-        }
-        m_imgui_initialized = false;
         release_effect_resources();
     }
 
@@ -371,11 +341,6 @@ public:
         ID3D11Texture2D* texture,
         ID3D11RenderTargetView* rtv) override
     {
-        if (!m_imgui_initialized || context == nullptr) return;
-        if (m_was_rendering_desktop) { m_was_rendering_desktop = false; on_device_reset(); return; }
-        std::scoped_lock _{m_imgui_mutex};
-        ImGui_ImplDX11_NewFrame();
-        g_d3d11.render_imgui_vr(context, rtv);
     }
 
     void on_post_render_vr_framework_dx12(
@@ -383,51 +348,9 @@ public:
         ID3D12Resource* rt,
         D3D12_CPU_DESCRIPTOR_HANDLE* rtv) override
     {
-        if (!m_imgui_initialized || command_list == nullptr) return;
-        if (m_was_rendering_desktop) { m_was_rendering_desktop = false; on_device_reset(); return; }
-        std::scoped_lock _{m_imgui_mutex};
-        ImGui_ImplDX12_NewFrame();
-        g_d3d12.render_imgui_vr(command_list, rtv);
-    }
-
-    bool on_message(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) override {
-        ImGui_ImplWin32_WndProcHandler(hwnd, msg, wparam, lparam);
-        return !ImGui::GetIO().WantCaptureMouse && !ImGui::GetIO().WantCaptureKeyboard;
     }
 
 private:
-    // ========================================================================
-    // ImGui initialization
-    // ========================================================================
-    bool initialize_imgui() {
-        if (m_imgui_initialized) return true;
-        std::scoped_lock _{m_imgui_mutex};
-
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-
-        static const auto ini_path = API::get()->get_persistent_dir(L"imgui_fakehdr.ini").string();
-        ImGui::GetIO().IniFilename = ini_path.c_str();
-
-        const auto renderer_data = API::get()->param()->renderer;
-
-        DXGI_SWAP_CHAIN_DESC swap_desc{};
-        auto swapchain = (IDXGISwapChain*)renderer_data->swapchain;
-        swapchain->GetDesc(&swap_desc);
-        m_wnd = swap_desc.OutputWindow;
-
-        if (!ImGui_ImplWin32_Init(m_wnd)) return false;
-
-        if (renderer_data->renderer_type == UEVR_RENDERER_D3D11) {
-            if (!g_d3d11.initialize()) return false;
-        } else if (renderer_data->renderer_type == UEVR_RENDERER_D3D12) {
-            if (!g_d3d12.initialize()) return false;
-        }
-
-        m_imgui_initialized = true;
-        API::get()->log_info("[FakeHDR] ImGui initialized");
-        return true;
-    }
 
     // ========================================================================
     // Resource cleanup

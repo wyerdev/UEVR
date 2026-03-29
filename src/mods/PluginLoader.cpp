@@ -209,6 +209,14 @@ bool on_custom_event(UEVR_OnCustomEventCb cb) {
 
     return PluginLoader::get()->add_on_custom_event(cb);
 }
+
+bool on_draw_ui(UEVR_OnDrawUICb cb) {
+    if (cb == nullptr) {
+        return false;
+    }
+
+    return PluginLoader::get()->add_on_draw_ui(cb);
+}
 }
 
 UEVR_PluginCallbacks g_plugin_callbacks {
@@ -217,11 +225,12 @@ UEVR_PluginCallbacks g_plugin_callbacks {
     uevr::on_message,
     uevr::on_xinput_get_state,
     uevr::on_xinput_set_state,
-    uevr::on_pre_render_vr_framework_dx11,
-    uevr::on_pre_render_vr_framework_dx12,
     uevr::on_post_render_vr_framework_dx11,
     uevr::on_post_render_vr_framework_dx12,
-    uevr::on_custom_event
+    uevr::on_custom_event,
+    uevr::on_pre_render_vr_framework_dx11,
+    uevr::on_pre_render_vr_framework_dx12,
+    uevr::on_draw_ui
 };
 
 UEVR_PluginFunctions g_plugin_functions {
@@ -1963,6 +1972,16 @@ void PluginLoader::on_draw_ui() {
             ImGui::Text("%s - %s", name.c_str(), warning.c_str());
         }
     }
+
+    // Dispatch on_draw_ui to plugins
+    {
+        std::shared_lock lock{m_api_cb_mtx};
+        auto ctx = ImGui::GetCurrentContext();
+        for (auto& cb : m_on_draw_ui_cbs) {
+            ImGui::Separator();
+            cb((void*)ctx);
+        }
+    }
 }
 
 void PluginLoader::on_present() {
@@ -2295,6 +2314,13 @@ bool PluginLoader::add_on_custom_event(UEVR_OnCustomEventCb cb) {
     std::unique_lock _{m_api_cb_mtx};
 
     m_on_custom_event_cbs.push_back(cb);
+    return true;
+}
+
+bool PluginLoader::add_on_draw_ui(UEVR_OnDrawUICb cb) {
+    std::unique_lock _{m_api_cb_mtx};
+
+    m_on_draw_ui_cbs.push_back(cb);
     return true;
 }
 

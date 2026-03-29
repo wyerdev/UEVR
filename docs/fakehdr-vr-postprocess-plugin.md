@@ -2,7 +2,7 @@
 
 A UEVR C++ plugin that applies CeeJay.dk's FakeHDR post-processing effect directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), this plugin modifies the UE render target **before** UEVR copies it to VR, so the effect is visible in-headset.
 
-Required a new UEVR core API callback (`on_pre_render_vr_framework_dx11/dx12`) and several DX12 workarounds for UE's TYPELESS render targets and missing `ALLOW_RENDER_TARGET` flag.
+Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and `on_draw_ui`) and several DX12 workarounds for UE's TYPELESS render targets and missing `ALLOW_RENDER_TARGET` flag.
 
 ## Problem Statement
 
@@ -60,11 +60,11 @@ VR::on_present()
 
 | File | Change |
 |------|--------|
-| `include/uevr/API.h` | Added `UEVR_OnPreRenderVRFrameworkDX11Cb` / `DX12Cb` typedefs, function pointer types, and entries in `UEVR_PluginCallbacks` struct |
-| `include/uevr/Plugin.hpp` | Added `on_pre_render_vr_framework_dx11()` / `dx12()` virtual methods and callback registration in `uevr_plugin_initialize` |
+| `include/uevr/API.h` | Added `UEVR_OnPreRenderVRFrameworkDX11Cb` / `DX12Cb` and `UEVR_OnDrawUICb` typedefs, function pointer types, and entries in `UEVR_PluginCallbacks` struct |
+| `include/uevr/Plugin.hpp` | Added `on_pre_render_vr_framework_dx11()` / `dx12()` and `on_draw_ui()` virtual methods and callback registration in `uevr_plugin_initialize` |
 | `src/Mod.hpp` | Added virtual method stubs for `on_pre_render_vr_framework_dx11()` / `dx12()` |
-| `src/mods/PluginLoader.hpp` | Added storage vectors, `add_` methods, dispatch method declarations, callback list entries |
-| `src/mods/PluginLoader.cpp` | Added namespace functions, `g_plugin_callbacks` entries, dispatch implementations, `add_` implementations |
+| `src/mods/PluginLoader.hpp` | Added storage vectors, `add_` methods, dispatch method declarations, callback list entries for pre-render and draw_ui |
+| `src/mods/PluginLoader.cpp` | Added namespace functions, `g_plugin_callbacks` entries, dispatch implementations, `add_` implementations; `on_draw_ui()` now dispatches `on_draw_ui` to all registered plugins after its own UI |
 | `src/mods/VR.cpp` | Added dispatch loop iterating `g_framework->get_mods()->get_mods()` right before `m_d3d11.on_frame(this)` / `m_d3d12.on_frame(this)` |
 
 ### DX12 Rendering Pipeline
@@ -185,14 +185,25 @@ Shaders are compiled at runtime via `D3DCompile` (shader model 5.0). The HLSL so
 
 ## ImGui Settings Panel
 
-The plugin renders an ImGui window with:
+The plugin draws its settings directly inside the **UEVR menu** via the new `on_draw_ui` plugin callback. Settings appear under a **"FakeHDR Settings"** collapsing header on the **Plugins** sidebar page (accessible via `Insert` key → Plugins).
+
+Widgets:
 - **Enable/Disable** checkbox (toggles effect without unloading)
-- **HDR Power**, **Radius 1**, **Radius 2** sliders
+- **HDR Power**, **Radius 1**, **Radius 2** `InputFloat` fields with **-/+** step buttons (step = 0.01, fast step = 0.1)
 - **Reset to Defaults** button
 
-The ImGui frame is built in `on_pre_engine_tick` (game thread), then rendered:
-- **Desktop**: via `on_present()` using the plugin_renderlib `g_d3d12` helpers
-- **VR overlay**: via `on_post_render_vr_framework_dx12()` using UEVR's shared command list
+Because the UI is part of UEVR's own ImGui frame, the plugin does not manage its own ImGui context, window, or rendering pipeline. The settings are visible on both the desktop and the VR overlay automatically.
+
+### New UEVR Core API: `on_draw_ui`
+
+Added alongside the pre-render callbacks. `PluginLoader::on_draw_ui()` (called when the user opens the Plugins page in the UEVR sidebar) now iterates all registered `on_draw_ui` callbacks after rendering its own plugin list. This lets any C++ plugin inject ImGui widgets into the UEVR menu without managing a separate ImGui context.
+
+| File | Change |
+|------|--------|
+| `include/uevr/API.h` | Added `UEVR_OnDrawUICb` / `UEVR_OnDrawUIFn` typedefs and entry in `UEVR_PluginCallbacks` |
+| `include/uevr/Plugin.hpp` | Added `on_draw_ui()` virtual method and registration lambda |
+| `src/mods/PluginLoader.hpp` | Added `m_on_draw_ui_cbs` vector, `add_on_draw_ui()` method, callback list entry |
+| `src/mods/PluginLoader.cpp` | Added `uevr::on_draw_ui` namespace function, `g_plugin_callbacks` entry, `add_on_draw_ui` impl, dispatch loop in `on_draw_ui()` |
 
 ## Performance Cost
 
@@ -233,7 +244,7 @@ The visual result is **identical** at the same parameter values. The shader math
 | Shader compile | ReShade effect file parser | `D3DCompile` at runtime |
 | Per-frame cost | ~0.2ms | ~0.3–0.5ms (extra copy for ALLOW_RENDER_TARGET workaround) |
 | TYPELESS handling | Handled by ReShade | Manual `resolve_typeless_format()` |
-| Settings UI | ReShade overlay | ImGui (VR + desktop) |
+| Settings UI | ReShade overlay | UEVR menu (Plugins page) |
 
 ## Stability
 
@@ -260,22 +271,23 @@ All command list operations (`Reset`, `Close`) check return values and bail earl
 | 5 | Render directly into UE RT | Crash: format 90 (`B8G8R8A8_TYPELESS`) — can't create PSO/SRV/RTV with TYPELESS |
 | 6 | Added `resolve_typeless_format()` helper | Crash persisted: UE RT lacks `ALLOW_RENDER_TARGET` flag — can't create RTV |
 | 7 | **Three-texture pipeline** with own `result_tex` (ALLOW_RENDER_TARGET) | **Working in VR** |
+| 8 | Integrated UI into UEVR menu via new `on_draw_ui` plugin callback | Settings in Plugins sidebar page, no separate window |
 
 ## File Layout
 
 ```
 examples/fakehdr_plugin/
-    FakeHDRPlugin.cpp        — Complete plugin (~820 lines)
+    FakeHDRPlugin.cpp        — Complete plugin (~720 lines)
 
 include/uevr/
-    API.h                    — Pre-render callback types added to C API
-    Plugin.hpp               — Pre-render virtual methods + registration
+    API.h                    — Pre-render + draw_ui callback types added to C API
+    Plugin.hpp               — Pre-render + draw_ui virtual methods + registration
 
 src/
     Mod.hpp                  — Virtual method stubs
     mods/
         PluginLoader.hpp     — Storage + dispatch declarations
-        PluginLoader.cpp     — Namespace functions + dispatch + add_ implementations
+        PluginLoader.cpp     — Namespace functions + dispatch + add_ implementations + on_draw_ui dispatch
         VR.cpp               — Dispatch loop before D3D11/D3D12 on_frame()
 
 cmake.toml                   — [target.fakehdr_plugin] with type = "plugin"

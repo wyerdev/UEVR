@@ -37,8 +37,8 @@ public:
     void on_xinput_get_state(uint32_t* retval, uint32_t user_index, XINPUT_STATE* state) override;
     void on_xinput_set_state(uint32_t* retval, uint32_t user_index, XINPUT_VIBRATION* vibration) override;
 
-    void on_pre_render_vr_framework_dx11() override;
-    void on_pre_render_vr_framework_dx12() override;
+    void on_pre_render_vr_framework_dx11();
+    void on_pre_render_vr_framework_dx12();
     void on_post_render_vr_framework_dx11(ID3D11DeviceContext* context, ID3D11Texture2D*, ID3D11RenderTargetView* rtv) override;
     void on_post_render_vr_framework_dx12(ID3D12GraphicsCommandList* command_list, ID3D12Resource* rt, D3D12_CPU_DESCRIPTOR_HANDLE* rtv) override;
     
@@ -87,6 +87,7 @@ public:
     bool add_on_post_render_vr_framework_dx11(UEVR_OnPostRenderVRFrameworkDX11Cb cb);
     bool add_on_post_render_vr_framework_dx12(UEVR_OnPostRenderVRFrameworkDX12Cb cb);
     bool add_on_custom_event(UEVR_OnCustomEventCb cb);
+    bool add_on_draw_ui(UEVR_OnDrawUICb cb);
 
     bool add_on_pre_engine_tick(UEVR_Engine_TickCb cb);
     bool add_on_post_engine_tick(UEVR_Engine_TickCb cb);
@@ -165,6 +166,7 @@ private:
     std::vector<UEVR_OnXInputGetStateCb> m_on_xinput_get_state_cbs{};
     std::vector<UEVR_OnXInputSetStateCb> m_on_xinput_set_state_cbs{};
     std::vector<UEVR_OnCustomEventCb> m_on_custom_event_cbs{};
+    std::vector<UEVR_OnDrawUICb> m_on_draw_ui_cbs{};
 
     std::vector<UEVR_Engine_TickCb> m_on_pre_engine_tick_cbs{};
     std::vector<UEVR_Engine_TickCb> m_on_post_engine_tick_cbs{};
@@ -196,6 +198,7 @@ private:
 
         // Custom
         (std::vector<generic_std_function>*)&m_on_custom_event_cbs,
+        (std::vector<generic_std_function>*)&m_on_draw_ui_cbs,
 
         // SDK
         (std::vector<generic_std_function>*)&m_on_pre_engine_tick_cbs,

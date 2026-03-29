@@ -76,6 +76,12 @@ public:
     virtual void on_post_viewport_client_draw(UEVR_UGameViewportClientHandle viewport_client, UEVR_FViewportHandle viewport, UEVR_FCanvasHandle) {}
 
     virtual void on_custom_event(const char* event_name, const char* event_data) {}
+    virtual void on_draw_ui() {}
+
+    // Access the UEVR ImGui context (set during on_draw_ui dispatch)
+    ImGuiContext* get_uevr_imgui_context() const { return m_uevr_imgui_context; }
+
+    ImGuiContext* m_uevr_imgui_context{nullptr};
 
 protected:
 };
@@ -132,6 +138,14 @@ extern "C" __declspec(dllexport) bool uevr_plugin_initialize(const UEVR_PluginIn
 
     callbacks->on_custom_event([](const char* event_name, const char* event_data) {
         uevr::detail::g_plugin->on_custom_event(event_name, event_data);
+    });
+
+    callbacks->on_draw_ui([](void* imgui_context) {
+        uevr::detail::g_plugin->m_uevr_imgui_context = (ImGuiContext*)imgui_context;
+        auto prev_ctx = ImGui::GetCurrentContext();
+        ImGui::SetCurrentContext((ImGuiContext*)imgui_context);
+        uevr::detail::g_plugin->on_draw_ui();
+        ImGui::SetCurrentContext(prev_ctx);
     });
 
     sdk_callbacks->on_pre_engine_tick([](UEVR_UGameEngineHandle engine, float delta) {
