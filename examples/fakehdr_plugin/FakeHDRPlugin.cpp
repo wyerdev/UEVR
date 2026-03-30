@@ -4,16 +4,20 @@ FakeHDR Plugin for UEVR
 A UEVR C++ plugin that applies a FakeHDR post-processing effect to VR frames.
 Based on CeeJay.dk's FakeHDR ReShade effect.
 
-The effect is applied to the UE4 scene render target in on_pre_render_vr_framework_dx12(),
-which fires just BEFORE UEVR copies the render target to VR eye textures.
-This ensures the effect is visible in both the VR headset and desktop mirror.
+The effect is applied to the UE4 scene render target in on_pre_render_vr_framework
+(both DX11 and DX12), which fires just BEFORE UEVR copies the render target to
+VR eye textures.  This ensures the effect is visible in both the VR headset and
+desktop mirror.
 
 Includes an ImGui settings panel with enable/disable, parameter sliders, reset.
 
-v1.0.8: Inlined GPU work to avoid redundant device/GetDesc lookups that
-         caused crashes during UEVR transitions (meditate, level load, etc.).
-         Removed GetDeviceRemovedReason (can throw C++ exceptions during transitions).
-         Added SEH guard around GPU command recording.
+v1.1.0: DX11 path now applies effect to the UE4 scene render target (via
+         StereoHook API) instead of the swapchain backbuffer.  Handles typeless
+         texture formats for RTV/SRV creation.
+v1.0.9: UEVR core now handles resource state management (ENGINE_SRC_COLOR ↔ RENDER_TARGET
+         bracketing), SEH crash protection, RT validation, and command list lifecycle.
+         The plugin just records GPU commands on UEVR's command list — no crash protection
+         or synchronisation code needed on the plugin side.
 
 License: MIT (same as UEVR example plugins)
 */
@@ -150,7 +154,7 @@ static bool is_typeless_format(DXGI_FORMAT fmt) {
 static constexpr float DEFAULT_HDR_POWER = 1.30f;
 static constexpr float DEFAULT_RADIUS1   = 0.793f;
 static constexpr float DEFAULT_RADIUS2   = 0.87f;
-static constexpr const char* FAKEHDR_VERSION = "1.0.8";
+static constexpr const char* FAKEHDR_VERSION = "1.1.0";
 
 // ============================================================================
 // FakeHDR Plugin
@@ -399,8 +403,13 @@ public:
         const auto renderer_data = API::get()->param()->renderer;
         if (renderer_data->renderer_type != UEVR_RENDERER_D3D11) return;
 
-        // DX11: apply to backbuffer for now (TODO: get UE RT via StereoHook)
-        apply_fakehdr_to_backbuffer_dx11();
+        auto scene_rt = API::StereoHook::get_scene_render_target();
+        if (!scene_rt) return;
+
+        auto native = (ID3D11Texture2D*)scene_rt->get_native_resource();
+        if (!native) return;
+
+        apply_fakehdr_to_resource_dx11(native);
     }
 
     // ========================================================================
@@ -421,7 +430,7 @@ public:
     }
 
     // ========================================================================
-    // VR eye overlay: only ImGui rendering (effect is on backbuffer)
+    // VR eye overlay: not used (effect is applied in pre-render)
     // ========================================================================
     void on_post_render_vr_framework_dx11(
         ID3D11DeviceContext* context,
@@ -456,7 +465,7 @@ private:
     }
 
     // ========================================================================
-    // DX11: Apply FakeHDR to swapchain backbuffer
+    // DX11: Apply FakeHDR to UE4 scene render target
     // ========================================================================
     bool init_shaders_dx11(ID3D11Device* device) {
         if (!device) return false;
@@ -485,14 +494,16 @@ private:
 
     bool ensure_copy_texture_dx11(ID3D11Device* device, ID3D11Texture2D* src) {
         D3D11_TEXTURE2D_DESC src_desc{}; src->GetDesc(&src_desc);
+        const auto resolved_fmt = resolve_typeless_format(src_desc.Format);
         if (m_copy_tex && m_copy_width == src_desc.Width && m_copy_height == src_desc.Height) return true;
         m_copy_tex.Reset(); m_copy_srv.Reset();
 
         D3D11_TEXTURE2D_DESC cd = src_desc;
+        cd.Format = resolved_fmt;
         cd.BindFlags = D3D11_BIND_SHADER_RESOURCE; cd.MiscFlags = 0; cd.Usage = D3D11_USAGE_DEFAULT; cd.CPUAccessFlags = 0;
         if (FAILED(device->CreateTexture2D(&cd, nullptr, &m_copy_tex))) return false;
 
-        D3D11_SHADER_RESOURCE_VIEW_DESC svd{}; svd.Format = src_desc.Format;
+        D3D11_SHADER_RESOURCE_VIEW_DESC svd{}; svd.Format = resolved_fmt;
         svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; svd.Texture2D.MipLevels = 1;
         if (FAILED(device->CreateShaderResourceView(m_copy_tex.Get(), &svd, &m_copy_srv))) { m_copy_tex.Reset(); return false; }
 
@@ -500,23 +511,29 @@ private:
         return true;
     }
 
-    void apply_fakehdr_to_backbuffer_dx11() {
+    void apply_fakehdr_to_resource_dx11(ID3D11Texture2D* target) {
         const auto rd = API::get()->param()->renderer;
         auto device = (ID3D11Device*)rd->device;
-        auto swapchain = (IDXGISwapChain*)rd->swapchain;
-        if (!device || !swapchain) return;
+        if (!device || !target) return;
 
-        ComPtr<ID3D11Texture2D> backbuffer;
-        if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer)))) return;
+        D3D11_TEXTURE2D_DESC target_desc{};
+        target->GetDesc(&target_desc);
+        if (target_desc.Width == 0 || target_desc.Height == 0) return;
 
         ComPtr<ID3D11DeviceContext> ctx;
         device->GetImmediateContext(&ctx);
 
         if (!m_shader_ready && !init_shaders_dx11(device)) return;
-        if (!ensure_copy_texture_dx11(device, backbuffer.Get())) return;
+        if (!ensure_copy_texture_dx11(device, target)) return;
 
-        ComPtr<ID3D11RenderTargetView> bb_rtv;
-        if (FAILED(device->CreateRenderTargetView(backbuffer.Get(), nullptr, &bb_rtv))) return;
+        // Create RTV on the target — use resolved format for typeless textures
+        const auto resolved_fmt = resolve_typeless_format(target_desc.Format);
+        D3D11_RENDER_TARGET_VIEW_DESC rtv_desc{};
+        rtv_desc.Format = resolved_fmt;
+        rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        rtv_desc.Texture2D.MipSlice = 0;
+        ComPtr<ID3D11RenderTargetView> target_rtv;
+        if (FAILED(device->CreateRenderTargetView(target, &rtv_desc, &target_rtv))) return;
 
         // Save state
         ComPtr<ID3D11RenderTargetView> old_rtv; ComPtr<ID3D11DepthStencilView> old_dsv;
@@ -530,7 +547,7 @@ private:
         ctx->PSGetShaderResources(0, 1, &osrv); ctx->PSGetSamplers(0, 1, &osmp);
         ctx->IAGetPrimitiveTopology(&otopo);
 
-        ctx->CopyResource(m_copy_tex.Get(), backbuffer.Get());
+        ctx->CopyResource(m_copy_tex.Get(), target);
 
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (SUCCEEDED(ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
@@ -543,7 +560,7 @@ private:
 
         D3D11_VIEWPORT vp{}; vp.Width = (float)m_copy_width; vp.Height = (float)m_copy_height; vp.MaxDepth = 1.0f;
         ctx->RSSetViewports(1, &vp);
-        ID3D11RenderTargetView* rtv_raw = bb_rtv.Get();
+        ID3D11RenderTargetView* rtv_raw = target_rtv.Get();
         ctx->OMSetRenderTargets(1, &rtv_raw, nullptr);
         ctx->IASetInputLayout(nullptr);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -567,7 +584,7 @@ private:
     }
 
     // ========================================================================
-    // DX12: Apply FakeHDR to swapchain backbuffer
+    // DX12: Apply FakeHDR to UE4 scene render target
     // ========================================================================
     bool init_dx12_pipeline(ID3D12Device* device, DXGI_FORMAT rt_format) {
         if (m_dx12_ready) return true;
@@ -710,10 +727,6 @@ private:
         API::get()->log_info("[FakeHDR DX12] Target textures ready: %ux%u fmt %u", ts.width, ts.height, (unsigned)resolved_fmt);
         return true;
     }
-
-    // apply_fakehdr_to_resource_dx12 removed in v1.0.8 — GPU work is now
-    // inlined in on_pre_render_vr_framework_dx12 to avoid redundant
-    // device/GetDesc lookups that caused crashes during UEVR transitions.
 };
 
 // ============================================================================

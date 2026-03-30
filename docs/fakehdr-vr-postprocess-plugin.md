@@ -37,7 +37,13 @@ VR submission happens **before** any plugin `on_present` callback or ReShade hoo
 
 ### New UEVR Core API: `on_pre_render_vr_framework`
 
-Added a new callback pair that fires **before** `D3D12Component::on_frame()` / `D3D11Component::on_frame()`:
+Added a new callback pair that fires **before** `D3D12Component::on_frame()` / `D3D11Component::on_frame()`.
+
+The DX11 and DX12 paths have different complexity levels:
+- **DX11**: No resource state management needed — D3D11 tracks states implicitly. Plugin gets the immediate context, copies, draws, and restores pipeline state.
+- **DX12**: UEVR core brackets each dispatch with explicit resource state transitions. Plugin records commands on UEVR's command list.
+
+#### DX11 Pipeline
 
 ```
 UE renders scene → UE render target
@@ -45,9 +51,39 @@ UE renders scene → UE render target
          ▼
 VR::on_present()
     │
-    ├─ on_pre_render_vr_framework_dx12()  ← NEW: plugin modifies UE RT
+    ├─ on_pre_render_vr_framework_dx11()  ← plugin modifies UE RT
     │       │
-    │       └─ FakeHDR processes the render target in-place
+    │       └─ [if native stereo: dispatched again for capture RT]
+    │
+    ├─ D3D11Component::on_frame()          ← copies MODIFIED RT to VR eyes
+    │
+    ├─ on_post_render_vr_framework_dx11()  ← existing: ImGui overlay
+    │
+    └─ PluginLoader::on_present()          ← desktop ImGui
+```
+
+#### DX12 Pipeline
+
+```
+UE renders scene → UE render target
+         │
+         ▼
+VR::on_present()
+    │
+    ├─ begin_plugin_pre_render()           ← open command list + fence wait
+    │       │
+    │       ├─ prepare_plugin_rt(main_rt)  ← ENGINE_SRC_COLOR → RENDER_TARGET
+    │       │
+    │       ├─ on_pre_render_vr_framework_dx12()  ← plugin modifies UE RT
+    │       │
+    │       ├─ restore_plugin_rt(main_rt)  ← RENDER_TARGET → ENGINE_SRC_COLOR
+    │       │
+    │       ├─ [if native stereo:]
+    │       │   ├─ prepare_plugin_rt(capture_rt) ← state transition
+    │       │   ├─ on_pre_render_vr_framework_dx12()  ← plugin processes second eye
+    │       │   └─ restore_plugin_rt(capture_rt) ← state transition
+    │       │
+    │       └─ end_plugin_pre_render()     ← submit + validate RT still exists
     │
     ├─ D3D12Component::on_frame()          ← copies MODIFIED RT to VR eyes
     │
@@ -64,12 +100,16 @@ VR::on_present()
 | `include/uevr/Plugin.hpp` | Added `on_pre_render_vr_framework_dx11()` / `dx12()` and `on_draw_ui()` virtual methods and callback registration in `uevr_plugin_initialize` |
 | `src/Mod.hpp` | Added virtual method stubs for `on_pre_render_vr_framework_dx11()` / `dx12()` |
 | `src/mods/PluginLoader.hpp` | Added storage vectors, `add_` methods, dispatch method declarations, callback list entries for pre-render and draw_ui |
-| `src/mods/PluginLoader.cpp` | Added namespace functions, `g_plugin_callbacks` entries, dispatch implementations, `add_` implementations; `on_draw_ui()` now dispatches `on_draw_ui` to all registered plugins after its own UI |
-| `src/mods/VR.cpp` | Added dispatch loop iterating `g_framework->get_mods()->get_mods()` right before `m_d3d11.on_frame(this)` / `m_d3d12.on_frame(this)` |
+| `src/mods/PluginLoader.cpp` | Added namespace functions, `g_plugin_callbacks` entries, dispatch implementations, `add_` implementations; SEH wrapper (`invoke_dx12_pre_render_callback_seh`) isolates each plugin callback so a single AV doesn't crash the frame |
+| `src/mods/VR.cpp` | Resource state bracketing around plugin dispatch (`prepare_plugin_rt` / `restore_plugin_rt`), RT validation gate, native stereo dispatch on single command list |
+| `src/mods/vr/D3D12Component.hpp` | `prepare_plugin_rt()` / `restore_plugin_rt()` API, `begin/end_plugin_pre_render()`, `get_plugin_command_list()`, `m_plugin_pre_render_ctx` command context |
+| `src/mods/vr/D3D12Component.cpp` | Resource state barrier implementations, `PluginLoader::on_device_reset()` call in `setup()` to notify plugins on pipeline rebuild, plugin command list lifecycle |
+| `src/mods/vr/d3d12/CommandContext.cpp` | SEH-wrapped `execute()`, `recover_from_failed_execute()`, `discard()` for stale command list cleanup |
+| `src/mods/vr/d3d12/TextureContext.cpp` | `update_texture()` for in-place descriptor heap reuse (avoids heap thrashing during backbuffer swaps) |
 
 ### DX12 Rendering Pipeline
 
-The plugin cannot render directly into the UE render target because:
+The plugin cannot render directly into the UE render target on DX12 because:
 
 1. **TYPELESS format**: UE5 creates render targets as `DXGI_FORMAT_B8G8R8A8_TYPELESS` — D3D12 does not allow creating RTVs, SRVs, or PSOs with TYPELESS formats
 2. **Missing ALLOW_RENDER_TARGET flag**: The UE render target's `D3D12_RESOURCE_DESC::Flags` does not include `D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET` — creating an RTV for it causes a D3D12 runtime exception
@@ -94,6 +134,15 @@ UE Render Target (restored to original state)
 
 #### Resource State Transitions per Frame
 
+UEVR core ensures the UE render target is in `RENDER_TARGET` state when plugins are called
+(via `prepare_plugin_rt()`) and restores it to `ENGINE_SRC_COLOR` afterwards (via `restore_plugin_rt()`).
+This means:
+- **Plugins can safely assume the RT starts in `RENDER_TARGET` state**
+- UEVR's `on_frame()` copy always sees the RT in `ENGINE_SRC_COLOR` (shader resource) state
+- There is no resource state mismatch — the D3D12 spec requirement that "before and after states of consecutive ResourceBarrier calls must agree" is always satisfied
+
+The FakeHDR plugin's internal transitions (within the RENDER_TARGET → RENDER_TARGET bracket):
+
 ```
 Step 1: Copy UE RT → copy_tex
     UE RT:     RENDER_TARGET → COPY_SOURCE
@@ -112,7 +161,7 @@ Step 3: Copy result_tex → UE RT
 
 Step 4: Restore states
     result_tex: COPY_SOURCE → RENDER_TARGET
-    UE RT:      COPY_DEST → RENDER_TARGET (initial_state)
+    UE RT:      COPY_DEST → RENDER_TARGET (returned to UEVR bracket state)
 ```
 
 #### DX12 Resources Created
@@ -124,11 +173,32 @@ Step 4: Restore states
 | `m_dx12_cb` | Buffer (256B) | Unknown | Upload heap | Persistently-mapped constant buffer |
 | `m_dx12_srv_heap` | Descriptor heap | CBV_SRV_UAV | Shader-visible | SRV for copy_tex |
 | `m_dx12_rtv_heap` | Descriptor heap | RTV | — | RTV for result_tex |
-| `m_dx12_cmd_alloc` | Command allocator | Direct | — | Own allocator (not shared with UE) |
-| `m_dx12_cmd_list` | Graphics command list | Direct | — | Records all barriers + draw |
-| `m_dx12_fence` | Fence | — | — | CPU-GPU sync between frames |
 | `m_dx12_root_sig` | Root signature | — | — | CBV(b0) + SRV table(t0) + static sampler |
 | `m_dx12_pso` | Pipeline state | — | — | VS + PS, TRIANGLE, 1 RT |
+
+The plugin does **not** own any command infrastructure (allocator, command list, fence, queue). UEVR provides the command list via `get_pre_render_command_list()` and manages its full lifecycle (open, submit, fence, reset).
+
+### DX11 Rendering Pipeline
+
+The DX11 path is simpler than DX12:
+- **No explicit resource state management** — D3D11 handles state tracking internally
+- **No TYPELESS format issues for the draw** — D3D11 allows creating RTVs/SRVs with explicit format on a typeless resource (the plugin uses `resolve_typeless_format()` to supply the correct typed format)
+- **No `ALLOW_RENDER_TARGET` issue** — D3D11 render target creation is more permissive
+- **Two-texture pipeline** — no intermediate `result_tex` needed; the FakeHDR shader draws directly back to the target via a typed RTV
+
+```
+UE Render Target (may be TYPELESS)
+    │
+    │  CopyResource
+    ▼
+copy_tex (typed UNORM, SRV input)
+    │
+    │  Fullscreen triangle draw (FakeHDR shader)
+    ▼
+UE Render Target (typed RTV, drawn in-place)
+```
+
+The plugin saves and restores all D3D11 pipeline state (render targets, viewport, shaders, samplers, SRVs, constant buffers, topology, input layout) around the draw to avoid corrupting UEVR or UE's rendering state.
 
 ### TYPELESS Format Resolution
 
@@ -211,54 +281,96 @@ Added alongside the pre-render callbacks. `PluginLoader::on_draw_ui()` (called w
 
 | Operation | Cost |
 |-----------|------|
+| 2× `ResourceBarrier` (UEVR state bracketing: ENGINE_SRC_COLOR ↔ RENDER_TARGET) | Negligible (GPU state metadata, no pipeline stall) |
 | 2× `CopyResource` (full-resolution texture copies) | Bandwidth-bound, ~0.1ms each at 3400×2000 |
 | 1× Fullscreen triangle draw, 16 bilinear samples | ALU-trivial, bandwidth-bound, ~0.1ms |
-| 4× `ResourceBarrier` transitions | Negligible |
-| **Total** | **~0.3–0.5ms GPU time** at typical VR resolution |
+| 4× `ResourceBarrier` (plugin internal transitions) | Negligible |
+| **Total (DX12)** | **~0.3–0.5ms GPU time** at typical VR resolution |
+
+The DX11 path is slightly cheaper:
+
+| Operation | Cost |
+|-----------|------|
+| 1× `CopyResource` (scene snapshot to copy_tex) | ~0.1ms |
+| 1× Fullscreen triangle draw | ~0.1ms |
+| Pipeline state save/restore | Negligible |
+| **Total (DX11)** | **~0.2–0.3ms GPU time** |
 
 ### Per-Frame CPU Work
 
 | Operation | Cost |
 |-----------|------|
-| Fence wait (`WaitForSingleObject`) | Blocks until previous frame's GPU commands complete |
-| Command list record (Reset + barriers + draw + Close) | ~0.01ms |
+| Fence wait (`WaitForSingleObject` in `begin_plugin_pre_render`) | Blocks until previous frame's plugin GPU commands complete |
+| RT validation (pointer dereferences in `end_plugin_pre_render`) | Negligible |
+| SEH wrappers (`invoke_dx12_pre_render_callback_seh`, `execute_command_list_seh`) | **Zero cost on success path** — x64 Windows uses table-based unwinding, no frame setup or teardown in the non-exception path |
+| Command list record (barriers + draw, no Reset/Close — UEVR manages lifecycle) | ~0.01ms |
 | CB update (write 32 bytes to mapped upload buffer) | Negligible |
 
 ### Why It's Cheap
 
-- The effect runs **once per frame**, not per-eye. It modifies the single UE render target before UEVR splits it into left/right copies
+- The effect runs **once per frame** per eye RT (twice with native stereo). It modifies the UE render target before UEVR copies it to VR eyes
 - The desktop mirror reads the same already-modified render target — no additional work
 - No compute shaders, no UAVs, no multi-pass — single fullscreen triangle
 - The constant buffer is persistently mapped (no `Map`/`Unmap` per frame)
+- SEH exception handling on x64 Windows is truly zero-overhead in the success path (unlike x86 SEH which pushes/pops frame records)
+- All safety infrastructure (RT validation, SEH, discard path) involves no GPU work and no allocations — only pointer checks and state flags
+
+### No Memory Leaks
+
+- `recover_from_failed_execute()` resets the command allocator+list back to an open state after SEH catches a failure — no orphaned GPU objects
+- `discard()` resets without submitting — recorded commands (barriers, draws) are freed with the allocator reset; referenced resources (copy_tex, result_tex) stay alive in plugin ComPtrs
+- `prepare_plugin_rt()` / `restore_plugin_rt()` allocate nothing — they record barriers on the existing command list
+- `on_device_reset()` triggers `release_effect_resources()` → `.Reset()` on all ComPtrs and target states
+- `TextureContext::update_texture()` does `texture.Reset()` before assigning the new resource — no leaked reference count
 
 ### Comparison to ReShade FakeHDR
 
 The visual result is **identical** at the same parameter values. The shader math is an exact port.
 
-| | ReShade FakeHDR | UEVR FakeHDR Plugin |
-|---|---|---|
-| Injection point | Post-present (swapchain backbuffer) | Pre-VR-submit (UE render target) |
-| Visible in VR? | No (desktop only) | Yes (both eyes + desktop) |
-| Extra textures | 1 (backbuffer copy) | 2 (copy_tex + result_tex) |
-| Command submission | ReShade framework | Own command allocator + list + fence |
-| Shader compile | ReShade effect file parser | `D3DCompile` at runtime |
-| Per-frame cost | ~0.2ms | ~0.3–0.5ms (extra copy for ALLOW_RENDER_TARGET workaround) |
-| TYPELESS handling | Handled by ReShade | Manual `resolve_typeless_format()` |
-| Settings UI | ReShade overlay | UEVR menu (Plugins page) |
+| | ReShade FakeHDR | UEVR FakeHDR Plugin (DX12) | UEVR FakeHDR Plugin (DX11) |
+|---|---|---|---|
+| Injection point | Post-present (swapchain backbuffer) | Pre-VR-submit (UE render target) | Pre-VR-submit (UE render target) |
+| Visible in VR? | No (desktop only) | Yes (both eyes + desktop) | Yes (both eyes + desktop) |
+| Extra textures | 1 (backbuffer copy) | 2 (copy_tex + result_tex) | 1 (copy_tex) |
+| Command submission | ReShade framework | UEVR-managed command list | Immediate context |
+| Shader compile | ReShade effect file parser | `D3DCompile` at runtime | `D3DCompile` at runtime |
+| Per-frame cost | ~0.2ms | ~0.3–0.5ms (extra copy for ALLOW_RENDER_TARGET workaround) | ~0.2–0.3ms |
+| TYPELESS handling | Handled by ReShade | Manual `resolve_typeless_format()` | Manual `resolve_typeless_format()` |
+| Settings UI | ReShade overlay | UEVR menu (Plugins page) | UEVR menu (Plugins page) |
 
 ## Stability
 
-### Frame Skip
+### UEVR Core Safety Nets
 
-The plugin skips the first 60 frames (`SKIP_FRAMES = 60`) after the pre-render callback starts firing. This avoids crashes during VR/D3D12 initialization when `D3D12Component::setup()` hasn't completed and the render target may be in an inconsistent state.
+The following protections are built into UEVR's plugin dispatch pipeline:
 
-### SEH Protection
+| Layer | Mechanism | What it prevents |
+|-------|-----------|-----------------|
+| **Resource state management** | `prepare_plugin_rt()` / `restore_plugin_rt()` bracket each dispatch with `ENGINE_SRC_COLOR ↔ RENDER_TARGET` transitions | GPU hangs / TDR from resource state mismatch (plugins hardcoding RENDER_TARGET as "before" state) |
+| **RT validation gate** | `VR.cpp` checks `is_using_2d_screen()` and resolves the native RT pointer before dispatch | Plugin dispatch with stale/null RT during 2D mode or level loads |
+| **RT validation on submit** | `end_plugin_pre_render()` re-validates the RT before `execute()` — calls `discard()` if RT was destroyed between callback and submission | Submitting D3D12 commands referencing freed resources |
+| **Plugin dispatch gate** | `is_plugin_dispatch_allowed()` returns false while `m_force_reset` is set (pipeline being rebuilt) | Plugin dispatch before D3D12 pipeline is ready |
+| **Plugin reset notification** | `D3D12Component::setup()` calls `PluginLoader::on_device_reset()` after pipeline rebuild | Stale plugin-side resources (cached textures, descriptor heaps) after renderer reset |
+| **SEH on callbacks** | `invoke_dx12_pre_render_callback_seh()` wraps each plugin callback in `__try/__except` | One crashing plugin taking down the entire frame |
+| **SEH on command submit** | `CommandContext::execute()` wraps Close+ExecuteCommandLists+Signal in `__try/__except` | D3D12 runtime exceptions during GPU submission |
+| **Command list recovery** | `recover_from_failed_execute()` resets allocator+list to clean open state after a failed submit | Permanently broken command context after a single failure |
+| **Command list discard** | `discard()` cleans up without submitting when the RT was invalidated mid-frame | Stale GPU commands after scene transitions |
 
-The `on_pre_render_vr_framework_dx12()` callback wraps the apply function in `__try/__except(EXCEPTION_EXECUTE_HANDLER)`. If a D3D12 runtime exception occurs, the plugin logs the exception code and **auto-disables** to prevent crash loops.
+### Plugin-Side Protection
 
-### HRESULT Checks
+The plugin itself is deliberately simple — all crash protection and lifecycle management lives in UEVR core. The plugin only implements:
 
-All command list operations (`Reset`, `Close`) check return values and bail early on failure.
+#### Null Checks
+
+Standard API contract validation — null checks on `scene_rt`, `native`, `device`, `cmd` return values before proceeding.
+
+#### HRESULT Checks
+
+All D3D12 resource creation (`CreateCommittedResource`, `CreateDescriptorHeap`, etc.) and pipeline init (`CreateGraphicsPipelineState`, `CreateRootSignature`) check return values and bail early on failure.
+
+#### Device Reset Handling
+
+The plugin implements `on_device_reset()` which calls `release_effect_resources()` — clearing the PSO, root signature, constant buffer, and all per-target-state cached textures/heaps. This is triggered both by the original Framework reset path and by `D3D12Component::setup()` pipeline rebuilds.
 
 ## Evolution of the Fix
 
@@ -272,6 +384,11 @@ All command list operations (`Reset`, `Close`) check return values and bail earl
 | 6 | Added `resolve_typeless_format()` helper | Crash persisted: UE RT lacks `ALLOW_RENDER_TARGET` flag — can't create RTV |
 | 7 | **Three-texture pipeline** with own `result_tex` (ALLOW_RENDER_TARGET) | **Working in VR** |
 | 8 | Integrated UI into UEVR menu via new `on_draw_ui` plugin callback | Settings in Plugins sidebar page, no separate window |
+| 9 | SEH wrappers + RT validation gate for 2D mode/transition crashes | Prevented AVs during meditation/level loads in Jedi Survivor |
+| 10 | `TextureContext::update_texture()` for in-place heap reuse | Eliminated descriptor heap thrashing during backbuffer changes |
+| 11 | **Resource state bracketing** (`prepare/restore_plugin_rt`) | **Fixed TDR/system reboot** — root cause was `ENGINE_SRC_COLOR` vs `RENDER_TARGET` state mismatch between UEVR and plugins |
+| 12 | `PluginLoader::on_device_reset()` from `D3D12Component::setup()` | Plugins clear stale caches when UEVR rebuilds the D3D12 pipeline |
+| 13 | **DX11: scene render target** via `StereoHook::get_scene_render_target()` | DX11 path now applies to UE RT instead of swapchain backbuffer — **working in VR on DX11 games** |
 
 ## File Layout
 
@@ -287,8 +404,14 @@ src/
     Mod.hpp                  — Virtual method stubs
     mods/
         PluginLoader.hpp     — Storage + dispatch declarations
-        PluginLoader.cpp     — Namespace functions + dispatch + add_ implementations + on_draw_ui dispatch
-        VR.cpp               — Dispatch loop before D3D11/D3D12 on_frame()
+        PluginLoader.cpp     — Namespace functions + dispatch + add_ implementations + on_draw_ui dispatch + SEH wrapper
+        VR.cpp               — Resource state bracketing + RT validation gate + dispatch loop
+        vr/
+            D3D12Component.hpp — prepare/restore_plugin_rt API + plugin command context
+            D3D12Component.cpp — Barrier implementations + on_device_reset notification in setup()
+            d3d12/
+                CommandContext.cpp  — SEH-wrapped execute + recover + discard
+                TextureContext.cpp  — update_texture() for in-place heap reuse
 
 cmake.toml                   — [target.fakehdr_plugin] with type = "plugin"
 ```
