@@ -334,4 +334,4 @@ The VEH handler monitors non-AV exceptions (`STACK_BUFFER_OVERRUN`, `STACK_OVERF
 
 ## See Also
 
-- [native-stereo-crash-handler.md](native-stereo-crash-handler.md) — The XR null-deref permanent patch handler that this extends
+- [native-stereo-crash-handler.md](native-stereo-crash-handler.md) — The XR null-deref permanent patch handler that this extends (includes the rejected address caching fix that prevents infinite re-analysis of unhandled crash addresses)
