@@ -4140,6 +4140,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
         auto cleanup = [&]() { handler_active.store(false); };
 
         if (exception_address == 0 || IsBadReadPtr((void*)exception_address, 16)) {
+            handled_addresses.insert(exception_address);
             cleanup();
             return EXCEPTION_CONTINUE_SEARCH;
         }
@@ -4147,6 +4148,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
         const auto decoded = utility::decode_one((uint8_t*)exception_address);
 
         if (!decoded) {
+            handled_addresses.insert(exception_address);
             cleanup();
             return EXCEPTION_CONTINUE_SEARCH;
         }
@@ -4337,6 +4339,10 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             // Write crash dump since this is a real AV we're not handling
             veh_stats::write_crash_dump(EXCEPTION_ACCESS_VIOLATION, exception_address,
                 exception->ExceptionRecord->ExceptionInformation[1]);
+            // Cache rejected addresses so we don't re-analyze them on every fault.
+            // Without this, the same unhandled crash loops through deep analysis
+            // indefinitely (praydog's original cached all addresses up front).
+            handled_addresses.insert(exception_address);
             cleanup();
             return EXCEPTION_CONTINUE_SEARCH;
         }
