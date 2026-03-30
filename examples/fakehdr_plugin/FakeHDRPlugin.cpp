@@ -145,6 +145,7 @@ static bool is_typeless_format(DXGI_FORMAT fmt) {
 static constexpr float DEFAULT_HDR_POWER = 1.30f;
 static constexpr float DEFAULT_RADIUS1   = 0.793f;
 static constexpr float DEFAULT_RADIUS2   = 0.87f;
+static constexpr const char* FAKEHDR_VERSION = "1.0.6";
 
 // ============================================================================
 // FakeHDR Plugin
@@ -173,7 +174,9 @@ public:
     ComPtr<ID3D12PipelineState>  m_dx12_pso;
     ComPtr<ID3D12Resource>       m_dx12_cb;
 
-    // Per-target state (main scene RT and optional scene capture RT have different sizes)
+    // Per-target state — cached by texture dimensions so the plugin can be
+    // called multiple times per frame (e.g. UEVR dispatches once per eye source)
+    // without recreating GPU resources every time.
     struct DX12TargetState {
         ComPtr<ID3D12Resource>       copy_tex;    // SRV input (scene snapshot)
         ComPtr<ID3D12Resource>       result_tex;  // RTV output (has ALLOW_RENDER_TARGET)
@@ -188,20 +191,22 @@ public:
             width = 0; height = 0;
         }
     };
-    DX12TargetState m_dx12_main;     // primary scene RT (double-wide)
-    DX12TargetState m_dx12_capture;  // scene capture RT (single-width, native stereo fix)
+    static constexpr size_t MAX_TARGET_STATES = 2;
+    DX12TargetState m_dx12_targets[MAX_TARGET_STATES];
 
-    // Triple-buffered command allocators to avoid CPU stalls.
-    // 4 allocators: 2 submits per frame (main + capture) × 2 frames of latency.
-    static constexpr UINT NUM_FRAMES = 4;
-    ComPtr<ID3D12CommandAllocator> m_dx12_cmd_allocs[NUM_FRAMES];
-    UINT64                         m_dx12_alloc_fence_values[NUM_FRAMES]{};
-    UINT                           m_dx12_alloc_index = 0;
+    DX12TargetState& find_target_state(UINT w, UINT h) {
+        // Exact size match?
+        for (auto& ts : m_dx12_targets)
+            if (ts.width == w && ts.height == h) return ts;
+        // Empty slot?
+        for (auto& ts : m_dx12_targets)
+            if (ts.width == 0) return ts;
+        // Evict second slot
+        m_dx12_targets[1].reset();
+        return m_dx12_targets[1];
+    }
 
-    ComPtr<ID3D12GraphicsCommandList> m_dx12_cmd_list;
-    ComPtr<ID3D12Fence>          m_dx12_fence;
-    HANDLE                       m_dx12_fence_event = nullptr;
-    UINT64                       m_dx12_fence_value = 0;
+    // DX12 pipeline state (device-level, created once)
     bool m_dx12_ready = false;
     HDRParamsCB* m_dx12_cb_mapped = nullptr;
     DXGI_FORMAT m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
@@ -252,6 +257,7 @@ public:
     // ========================================================================
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("FakeHDR Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextDisabled("v%s", FAKEHDR_VERSION);
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);
@@ -298,7 +304,7 @@ public:
 
         const auto renderer_data = API::get()->param()->renderer;
         if (renderer_data->renderer_type != UEVR_RENDERER_D3D12) return;
-        if (!renderer_data->device || !renderer_data->command_queue) return;
+        if (!renderer_data->device) return;
 
         // Get the UE4 scene render target that UEVR will copy to VR eyes
         auto scene_rt = API::StereoHook::get_scene_render_target();
@@ -317,28 +323,12 @@ public:
         }
 
         __try {
-            apply_fakehdr_to_resource_dx12(native, D3D12_RESOURCE_STATE_RENDER_TARGET, m_dx12_main);
+            auto& ts = find_target_state((UINT)desc.Width, desc.Height);
+            apply_fakehdr_to_resource_dx12(native, D3D12_RESOURCE_STATE_RENDER_TARGET, ts);
         } __except(EXCEPTION_EXECUTE_HANDLER) {
             API::get()->log_error("[FakeHDR DX12] SEH exception in apply (code 0x%x)", GetExceptionCode());
             // Disable to prevent repeated crashes
             m_enabled = false;
-        }
-
-        // Native stereo fix uses a separate scene capture texture for the right eye.
-        // Apply FakeHDR to it as well so both eyes match.
-        auto capture_rt = API::StereoHook::get_scene_capture_render_target();
-        if (capture_rt) {
-            auto capture_native = (ID3D12Resource*)capture_rt->get_native_resource();
-            if (capture_native && capture_native != native) {
-                auto cap_desc = capture_native->GetDesc();
-                if (cap_desc.Width > 0 && cap_desc.Height > 0) {
-                    __try {
-                        apply_fakehdr_to_resource_dx12(capture_native, D3D12_RESOURCE_STATE_RENDER_TARGET, m_dx12_capture);
-                    } __except(EXCEPTION_EXECUTE_HANDLER) {
-                        API::get()->log_error("[FakeHDR DX12] SEH exception in scene capture apply (code 0x%x)", GetExceptionCode());
-                    }
-                }
-            }
         }
     }
 
@@ -397,30 +387,10 @@ private:
         m_copy_tex.Reset(); m_copy_srv.Reset();
         m_copy_width = 0; m_copy_height = 0; m_shader_ready = false;
 
-        // DX12 - wait for GPU
-        if (m_dx12_fence && m_dx12_fence_event) {
-            const auto renderer_data = API::get()->param()->renderer;
-            auto cq = (ID3D12CommandQueue*)renderer_data->command_queue;
-            if (cq) {
-                m_dx12_fence_value++;
-                cq->Signal(m_dx12_fence.Get(), m_dx12_fence_value);
-                if (m_dx12_fence->GetCompletedValue() < m_dx12_fence_value) {
-                    m_dx12_fence->SetEventOnCompletion(m_dx12_fence_value, m_dx12_fence_event);
-                    WaitForSingleObject(m_dx12_fence_event, 5000);
-                }
-            }
-        }
+        // DX12 — only device-level resources to release.
+        // No command infrastructure to drain (UEVR owns the command list).
         m_dx12_pso.Reset(); m_dx12_root_sig.Reset(); m_dx12_cb.Reset();
-        m_dx12_main.reset(); m_dx12_capture.reset();
-        m_dx12_cmd_list.Reset();
-        for (UINT i = 0; i < NUM_FRAMES; ++i) {
-            m_dx12_cmd_allocs[i].Reset();
-            m_dx12_alloc_fence_values[i] = 0;
-        }
-        m_dx12_alloc_index = 0;
-        m_dx12_fence.Reset();
-        if (m_dx12_fence_event) { CloseHandle(m_dx12_fence_event); m_dx12_fence_event = nullptr; }
-        m_dx12_fence_value = 0;
+        for (auto& ts : m_dx12_targets) ts.reset();
         m_dx12_ready = false; m_dx12_cb_mapped = nullptr; m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
     }
 
@@ -613,18 +583,8 @@ private:
                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_dx12_cb)))) return false;
         m_dx12_cb->Map(0, nullptr, (void**)&m_dx12_cb_mapped);
 
-        // Command allocators (ring-buffered) + command list
-        for (UINT i = 0; i < NUM_FRAMES; ++i) {
-            if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_dx12_cmd_allocs[i])))) return false;
-            m_dx12_alloc_fence_values[i] = 0;
-        }
-        m_dx12_alloc_index = 0;
-        if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_dx12_cmd_allocs[0].Get(), nullptr, IID_PPV_ARGS(&m_dx12_cmd_list)))) return false;
-        m_dx12_cmd_list->Close();
-
-        // Fence
-        if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_dx12_fence)))) return false;
-        m_dx12_fence_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        // No command allocators, command list, fence, or queue needed —
+        // UEVR provides the command list via get_pre_render_command_list().
 
         m_dx12_rt_format = rt_format;
         m_dx12_ready = true;
@@ -693,8 +653,7 @@ private:
     void apply_fakehdr_to_resource_dx12(ID3D12Resource* target, D3D12_RESOURCE_STATES initial_state, DX12TargetState& ts) {
         const auto rd = API::get()->param()->renderer;
         auto device = (ID3D12Device*)rd->device;
-        auto command_queue = (ID3D12CommandQueue*)rd->command_queue;
-        if (!device || !command_queue || !target) return;
+        if (!device || !target) return;
 
         auto bb_desc = target->GetDesc();
         const auto resolved_format = resolve_typeless_format(bb_desc.Format);
@@ -706,18 +665,12 @@ private:
         }
         if (!ensure_dx12_copy_texture(device, target, ts)) return;
 
-        // Pick the next allocator in the ring buffer
-        auto alloc_idx = m_dx12_alloc_index;
-        m_dx12_alloc_index = (m_dx12_alloc_index + 1) % NUM_FRAMES;
-        auto alloc = m_dx12_cmd_allocs[alloc_idx].Get();
-
-        // Only wait if this allocator's GPU work isn't done yet.
-        // Because we rotate through NUM_FRAMES allocators, this work is
-        // from ~2 frames ago — the GPU is almost always done by now.
-        auto alloc_fence = m_dx12_alloc_fence_values[alloc_idx];
-        if (alloc_fence > 0 && m_dx12_fence->GetCompletedValue() < alloc_fence) {
-            m_dx12_fence->SetEventOnCompletion(alloc_fence, m_dx12_fence_event);
-            WaitForSingleObject(m_dx12_fence_event, INFINITE);
+        // Get the command list UEVR provides for pre-render recording.
+        // UEVR handles allocator, submission, fence — plugin just records.
+        auto cmd = (ID3D12GraphicsCommandList*)API::StereoHook::get_pre_render_command_list();
+        if (!cmd) {
+            API::get()->log_error("[FakeHDR DX12] No pre-render command list available");
+            return;
         }
 
         // Update CB
@@ -731,22 +684,9 @@ private:
             m_dx12_cb_mapped->_pad1[0] = 0; m_dx12_cb_mapped->_pad1[1] = 0;
         }
 
-        // Record command list
-        auto hr1 = alloc->Reset();
-        if (FAILED(hr1)) {
-            API::get()->log_error("[FakeHDR DX12] cmd alloc Reset failed: 0x%x", (unsigned)hr1);
-            return;
-        }
-        auto hr2 = m_dx12_cmd_list->Reset(alloc, nullptr);
-        if (FAILED(hr2)) {
-            API::get()->log_error("[FakeHDR DX12] cmd list Reset failed: 0x%x", (unsigned)hr2);
-            return;
-        }
-        auto cmd = m_dx12_cmd_list.Get();
+        // Record into UEVR's command list (no allocator reset, no close, no submit)
 
         // Step 1: Copy target -> copy_tex (for SRV sampling)
-        //   target: initial_state -> COPY_SOURCE
-        //   copy_tex: SRV -> COPY_DEST
         D3D12_RESOURCE_BARRIER barriers[3]{};
         barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barriers[0].Transition.pResource = target;
@@ -763,8 +703,6 @@ private:
         cmd->CopyResource(ts.copy_tex.Get(), target);
 
         // Step 2: Render FakeHDR from copy_tex -> result_tex
-        //   copy_tex: COPY_DEST -> SRV
-        //   result_tex is already in RENDER_TARGET state
         barriers[0].Transition.pResource = ts.copy_tex.Get();
         barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -790,8 +728,6 @@ private:
         cmd->DrawInstanced(3, 1, 0, 0);
 
         // Step 3: Copy result_tex -> target (write back)
-        //   result_tex: RENDER_TARGET -> COPY_SOURCE
-        //   target: COPY_SOURCE -> COPY_DEST
         barriers[0].Transition.pResource = ts.result_tex.Get();
         barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
@@ -805,8 +741,6 @@ private:
         cmd->CopyResource(target, ts.result_tex.Get());
 
         // Step 4: Restore states
-        //   result_tex: COPY_SOURCE -> RENDER_TARGET (ready for next frame)
-        //   target: COPY_DEST -> initial_state
         barriers[0].Transition.pResource = ts.result_tex.Get();
         barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
         barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -817,17 +751,7 @@ private:
         barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         cmd->ResourceBarrier(2, barriers);
 
-        auto hr_close = cmd->Close();
-        if (FAILED(hr_close)) {
-            API::get()->log_error("[FakeHDR DX12] cmd Close failed: 0x%x", (unsigned)hr_close);
-            return;
-        }
-
-        ID3D12CommandList* cmd_lists[] = { cmd };
-        command_queue->ExecuteCommandLists(1, cmd_lists);
-        m_dx12_fence_value++;
-        m_dx12_alloc_fence_values[alloc_idx] = m_dx12_fence_value;
-        command_queue->Signal(m_dx12_fence.Get(), m_dx12_fence_value);
+        // No close, no submit, no fence — UEVR handles all of that.
     }
 };
 

@@ -44,6 +44,12 @@ public:
     auto& openxr() { return m_openxr; }
     auto& get_openvr_ui_tex() { return m_openvr.ui_tex; }
 
+    // Plugin pre-render command list management.
+    // Called by VR.cpp around the pre_render callback dispatch.
+    void begin_plugin_pre_render();
+    void end_plugin_pre_render();
+    ID3D12GraphicsCommandList* get_plugin_command_list();
+
 private:
     bool setup();
     std::unique_ptr<DirectX::DX12::SpriteBatch> setup_sprite_batch_pso(
@@ -59,6 +65,12 @@ private:
 
     ComPtr<ID3D12Resource> m_prev_backbuffer{};
     std::array<d3d12::CommandContext, 3> m_generic_commands{};
+
+    // Dedicated CommandContext for plugin pre-render work.
+    // Opened before dispatching on_pre_render_vr_framework_dx12,
+    // executed after all callbacks return.
+    d3d12::CommandContext m_plugin_pre_render_ctx{};
+    bool m_plugin_pre_render_active{false};
 
     d3d12::TextureContext m_backbuffer_copy{};
 

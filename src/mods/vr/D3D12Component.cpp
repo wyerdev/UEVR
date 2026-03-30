@@ -1034,8 +1034,48 @@ void D3D12Component::on_post_present(VR* vr) {
     }
 }
 
+void D3D12Component::begin_plugin_pre_render() {
+    // Lazy setup — CommandContext::setup() only needs the device which is
+    // available via g_framework before D3D12Component::setup() runs.
+    if (!m_plugin_pre_render_ctx.ready()) {
+        if (!m_plugin_pre_render_ctx.setup(L"Plugin Pre-Render")) {
+            return;
+        }
+    }
+
+    // Wait for previous frame's GPU work on this context, then reset allocator+list.
+    m_plugin_pre_render_ctx.wait(INFINITE);
+    m_plugin_pre_render_active = true;
+}
+
+void D3D12Component::end_plugin_pre_render() {
+    if (!m_plugin_pre_render_active) {
+        return;
+    }
+
+    m_plugin_pre_render_active = false;
+
+    // If any plugin recorded commands, close and submit on the game's queue.
+    // CommandContext::execute() handles has_commands check internally.
+    m_plugin_pre_render_ctx.execute();
+}
+
+ID3D12GraphicsCommandList* D3D12Component::get_plugin_command_list() {
+    if (!m_plugin_pre_render_active || !m_plugin_pre_render_ctx.ready()) {
+        return nullptr;
+    }
+
+    // Mark that commands have been recorded so execute() will submit.
+    m_plugin_pre_render_ctx.has_commands = true;
+    return m_plugin_pre_render_ctx.cmd_list.Get();
+}
+
 void D3D12Component::on_reset(VR* vr) {
     m_force_reset = true;
+
+    // Drain plugin pre-render work before destroying resources.
+    m_plugin_pre_render_ctx.reset();
+    m_plugin_pre_render_active = false;
 
     auto runtime = vr->get_runtime();
 

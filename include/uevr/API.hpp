@@ -1698,6 +1698,14 @@ public:
             return fn != nullptr ? (FRHITexture2D*)fn() : nullptr;
         }
 
+        // Returns the open command list for recording during on_pre_render_vr_framework_dx12.
+        // Returns nullptr outside that callback or when not using DX12.
+        // Cast to ID3D12GraphicsCommandList* in DX12 plugins.
+        static void* get_pre_render_command_list() {
+            static const auto fn = initialize()->get_pre_render_command_list;
+            return fn != nullptr ? fn() : nullptr;
+        }
+
     private:
         static inline const UEVR_FFakeStereoRenderingHookFunctions* s_functions{nullptr};
         static inline const UEVR_FFakeStereoRenderingHookFunctions* initialize() {

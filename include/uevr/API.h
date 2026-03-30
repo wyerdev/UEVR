@@ -438,6 +438,10 @@ typedef struct {
     UEVR_FRHITexture2DHandle (*get_scene_render_target)();
     UEVR_FRHITexture2DHandle (*get_ui_render_target)();
     UEVR_FRHITexture2DHandle (*get_scene_capture_render_target)();
+    /* Returns the open ID3D12GraphicsCommandList* for recording during on_pre_render_vr_framework_dx12.
+       Returns NULL outside of that callback or when not using DX12.
+       Plugin records commands into this list; UEVR handles submission on the game's queue. */
+    void* (*get_pre_render_command_list)();
 } UEVR_FFakeStereoRenderingHookFunctions;
 
 typedef struct {

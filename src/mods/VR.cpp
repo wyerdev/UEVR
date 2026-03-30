@@ -25,6 +25,7 @@
 
 #include "VR.hpp"
 #include "PluginLoader.hpp"
+#include "pluginloader/FFakeStereoRenderingFunctions.hpp"
 
 std::shared_ptr<VR>& VR::get() {
     //static std::shared_ptr<VR> instance = std::make_shared<VR>();
@@ -2151,10 +2152,40 @@ void VR::on_present() {
 
         m_is_d3d12 = false;
         PluginLoader::get()->on_pre_render_vr_framework_dx11();
+
+        // Native stereo fix: also dispatch for scene capture RT so plugins
+        // process both eyes without needing native-stereo awareness.
+        if (is_native_stereo_fix_enabled()) {
+            if (auto capture = uevr::stereo_hook::get_scene_capture_render_target(); capture != nullptr) {
+                uevr::stereo_hook::set_scene_render_target_override(capture);
+                PluginLoader::get()->on_pre_render_vr_framework_dx11();
+                uevr::stereo_hook::set_scene_render_target_override(nullptr);
+            }
+        }
+
         e = m_d3d11.on_frame(this);
     } else if (renderer == Framework::RendererType::D3D12) {
         m_is_d3d12 = true;
+
+        // Open a CommandContext for plugins to record into.
+        // Submitted on the game's queue after all callbacks return.
+        m_d3d12.begin_plugin_pre_render();
+
         PluginLoader::get()->on_pre_render_vr_framework_dx12();
+
+        // Native stereo fix: also dispatch for scene capture RT so plugins
+        // process both eyes without needing native-stereo awareness.
+        if (is_native_stereo_fix_enabled()) {
+            if (auto capture = uevr::stereo_hook::get_scene_capture_render_target(); capture != nullptr) {
+                uevr::stereo_hook::set_scene_render_target_override(capture);
+                PluginLoader::get()->on_pre_render_vr_framework_dx12();
+                uevr::stereo_hook::set_scene_render_target_override(nullptr);
+            }
+        }
+
+        // Close and execute the plugin command list on the game's queue.
+        m_d3d12.end_plugin_pre_render();
+
         e = m_d3d12.on_frame(this);
     }
 
