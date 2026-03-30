@@ -60,6 +60,7 @@ Exception occurs
 ┌─────────────────────────────────────────┐
 │ Gate 3: Basic Validation                │
 │   Null RIP? IsBadReadPtr? Can decode?   │
+│   Failures cached in handled_addresses  │
 └────────────────┬────────────────────────┘
                  │
                  ▼
@@ -151,7 +152,7 @@ If the instruction immediately after the patched one is a `CALL` (common pattern
 2. **Game module check:** Only patches crashes in the game executable, never in system DLLs or the OS
 3. **Steps A & B:** Provide high-confidence causal verification when they succeed
 4. **128-patch cap on heuristic:** Limits exposure from Step C
-5. **One-shot semantics:** Each address is processed exactly once (`handled_addresses` set)
+5. **One-shot semantics:** Each address is processed exactly once — all exit paths (successful patch, rejected by deep analysis, validation failure) insert into `handled_addresses` before returning
 
 ### What About Real Crashes?
 
@@ -191,6 +192,23 @@ When loading a new save file, the game crashes after approximately 27 patches. T
 2. **Different thread** where the handler's re-entrancy guard is blocking processing
 3. **State corruption** from NOP'd instructions that only manifests during save/load (different code path uses the same patched functions but expects non-null return values)
 4. **Windows Error Reporting** or the CRT terminating the process before VEH runs
+
+## Bug Fixes
+
+### Rejected Address Caching (Calisto Protocol Fix)
+
+**Problem:** The deep analysis rejection path and Gate 3 validation failures returned `EXCEPTION_CONTINUE_SEARCH` without inserting the exception address into `handled_addresses`. When a crash address was repeatedly rejected (e.g., a crash in a system DLL outside the game directory), the VEH handler would re-analyze the same address on every fault — an infinite loop that hung the game.
+
+This was discovered because **The Callisto Protocol** crashed on startup: 108 AVs with the same RIP (`0x7ffd5ea42a96`, outside the game directory) hitting the handler repeatedly, with `rejected_not_xr` climbing and the game frozen.
+
+Praydog's original handler cached addresses at the top (`ignored_addresses.insert(exception_address)` before any analysis), giving one-shot semantics. Our rewritten handler only inserted on the success/patch path.
+
+**Fix:** Added `handled_addresses.insert(exception_address)` in three rejection paths:
+1. Gate 3: `IsBadReadPtr` or null RIP → cache and `CONTINUE_SEARCH`
+2. Gate 3: Instruction decode failure → cache and `CONTINUE_SEARCH`
+3. Deep analysis rejection (`!verified`) → cache and `CONTINUE_SEARCH`
+
+This ensures every address is processed at most once, matching the documented one-shot safety property.
 
 ## File Location
 
