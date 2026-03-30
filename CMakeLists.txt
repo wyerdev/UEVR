@@ -508,6 +508,48 @@ set_target_properties(curves_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target technicolor_plugin
+set(CMKR_TARGET technicolor_plugin)
+set(technicolor_plugin_SOURCES "")
+
+list(APPEND technicolor_plugin_SOURCES
+	"examples/technicolor_plugin/TechnicolorPlugin.cpp"
+)
+
+list(APPEND technicolor_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${technicolor_plugin_SOURCES})
+add_library(technicolor_plugin SHARED)
+
+if(technicolor_plugin_SOURCES)
+	target_sources(technicolor_plugin PRIVATE ${technicolor_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${technicolor_plugin_SOURCES})
+
+target_compile_features(technicolor_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(technicolor_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(technicolor_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(technicolor_plugin PROPERTIES
+	OUTPUT_NAME
+		TechnicolorPlugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target sdk-test
 set(CMKR_TARGET sdk-test)
 set(sdk-test_SOURCES "")

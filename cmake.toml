@@ -172,6 +172,14 @@ headers = ["examples/curves_plugin/**.hpp", "examples/curves_plugin/**.h"]
 [target.curves_plugin.properties]
 OUTPUT_NAME = "CurvesPlugin"
 
+[target.technicolor_plugin]
+type = "plugin"
+sources = ["examples/technicolor_plugin/TechnicolorPlugin.cpp"]
+headers = ["examples/technicolor_plugin/**.hpp", "examples/technicolor_plugin/**.h"]
+
+[target.technicolor_plugin.properties]
+OUTPUT_NAME = "TechnicolorPlugin"
+
 [target.sdk-test]
 type = "shared"
 sources = ["side-projects/sdk-test/**.cpp", "side-projects/sdk-test/**.c"]
