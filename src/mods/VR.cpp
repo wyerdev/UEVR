@@ -2167,24 +2167,65 @@ void VR::on_present() {
     } else if (renderer == Framework::RendererType::D3D12) {
         m_is_d3d12 = true;
 
-        // Open a CommandContext for plugins to record into.
-        // Submitted on the game's queue after all callbacks return.
-        m_d3d12.begin_plugin_pre_render();
+        // Skip plugin VR pre-render dispatch when the scene render target
+        // is unavailable.  This happens during 2D-screen-mode transitions
+        // and level loads where UE destroys/recreates the RT.  Dispatching
+        // plugins with a stale or in-flux RT causes D3D12 access violations.
+        bool dispatch_plugins = !is_using_2d_screen() && m_d3d12.is_plugin_dispatch_allowed();
 
-        PluginLoader::get()->on_pre_render_vr_framework_dx12();
-
-        // Native stereo fix: also dispatch for scene capture RT so plugins
-        // process both eyes without needing native-stereo awareness.
-        if (is_native_stereo_fix_enabled()) {
-            if (auto capture = uevr::stereo_hook::get_scene_capture_render_target(); capture != nullptr) {
-                uevr::stereo_hook::set_scene_render_target_override(capture);
-                PluginLoader::get()->on_pre_render_vr_framework_dx12();
-                uevr::stereo_hook::set_scene_render_target_override(nullptr);
+        // Resolve the main scene RT for barrier management.
+        ID3D12Resource* main_native_rt = nullptr;
+        if (dispatch_plugins && m_fake_stereo_hook != nullptr) {
+            if (auto rtm = m_fake_stereo_hook->get_render_target_manager(); rtm != nullptr) {
+                auto rt = rtm->get_render_target();
+                if (rt != nullptr) {
+                    main_native_rt = (ID3D12Resource*)rt->get_native_resource();
+                }
+                if (main_native_rt == nullptr) {
+                    dispatch_plugins = false;
+                }
+            } else {
+                dispatch_plugins = false;
             }
         }
 
-        // Close and execute the plugin command list on the game's queue.
-        m_d3d12.end_plugin_pre_render();
+        if (dispatch_plugins) {
+            // Single command list for all plugin dispatches.
+            // Resource state transitions bracket each dispatch so plugins
+            // see the RT in RENDER_TARGET state and UEVR's on_frame()
+            // copy sees ENGINE_SRC_COLOR afterwards.
+            m_d3d12.begin_plugin_pre_render();
+            m_d3d12.prepare_plugin_rt(main_native_rt);
+
+            PluginLoader::get()->on_pre_render_vr_framework_dx12();
+
+            m_d3d12.restore_plugin_rt(main_native_rt);
+
+            // Native stereo fix: also dispatch for scene capture RT.
+            // Recorded on the same command list — D3D12 runtime keeps
+            // resources alive through the command allocator until GPU
+            // execution completes, so no separate submit cycle needed.
+            if (is_native_stereo_fix_enabled()) {
+                auto rtm = m_fake_stereo_hook->get_render_target_manager();
+                if (rtm != nullptr) {
+                    auto capture = rtm->get_scene_capture_render_target();
+                    if (capture != nullptr) {
+                        auto capture_native = (ID3D12Resource*)capture->get_native_resource();
+                        if (capture_native != nullptr) {
+                            m_d3d12.prepare_plugin_rt(capture_native);
+
+                            uevr::stereo_hook::set_scene_render_target_override((UEVR_FRHITexture2DHandle)capture);
+                            PluginLoader::get()->on_pre_render_vr_framework_dx12();
+                            uevr::stereo_hook::set_scene_render_target_override(nullptr);
+
+                            m_d3d12.restore_plugin_rt(capture_native);
+                        }
+                    }
+                }
+            }
+
+            m_d3d12.end_plugin_pre_render();
+        }
 
         e = m_d3d12.on_frame(this);
     }

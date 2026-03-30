@@ -2061,14 +2061,23 @@ void PluginLoader::on_pre_render_vr_framework_dx11() {
     }
 }
 
+// Isolated into its own function because __try/__except cannot coexist with
+// C++ objects that have destructors (like std::shared_lock) in the same scope.
+static bool invoke_dx12_pre_render_callback_seh(UEVR_OnPreRenderVRFrameworkDX12Cb cb) {
+    __try {
+        cb();
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void PluginLoader::on_pre_render_vr_framework_dx12() {
     std::shared_lock _{m_api_cb_mtx};
 
     for (auto&& cb : m_on_pre_render_vr_framework_dx12_cbs) {
-        try {
-            cb();
-        } catch(...) {
-            spdlog::error("[APIProxy] Exception occurred in on_pre_render_vr_framework_dx12 callback; one of the plugins has an error.");
+        if (!invoke_dx12_pre_render_callback_seh(cb)) {
+            spdlog::error("[APIProxy] Access violation in on_pre_render_vr_framework_dx12 callback; one of the plugins has an error.");
             continue;
         }
     }

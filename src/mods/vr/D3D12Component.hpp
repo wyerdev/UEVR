@@ -37,6 +37,10 @@ public:
 
     void force_reset() { m_force_reset = true; }
 
+    bool is_plugin_dispatch_allowed() const {
+        return !m_force_reset;
+    }
+
     const auto& get_backbuffer_size() const { return m_backbuffer_size; }
 
     auto is_initialized() const { return m_openvr.left_eye_tex[0].texture != nullptr; }
@@ -49,6 +53,12 @@ public:
     void begin_plugin_pre_render();
     void end_plugin_pre_render();
     ID3D12GraphicsCommandList* get_plugin_command_list();
+
+    // Resource state management for plugin dispatch.
+    // Transitions the scene RT to RENDER_TARGET before plugins see it,
+    // and restores it to ENGINE_SRC_COLOR afterwards for UEVR's copy.
+    void prepare_plugin_rt(ID3D12Resource* rt);
+    void restore_plugin_rt(ID3D12Resource* rt);
 
 private:
     bool setup();

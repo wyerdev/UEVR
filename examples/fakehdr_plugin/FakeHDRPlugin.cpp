@@ -10,6 +10,11 @@ This ensures the effect is visible in both the VR headset and desktop mirror.
 
 Includes an ImGui settings panel with enable/disable, parameter sliders, reset.
 
+v1.0.8: Inlined GPU work to avoid redundant device/GetDesc lookups that
+         caused crashes during UEVR transitions (meditate, level load, etc.).
+         Removed GetDeviceRemovedReason (can throw C++ exceptions during transitions).
+         Added SEH guard around GPU command recording.
+
 License: MIT (same as UEVR example plugins)
 */
 
@@ -145,7 +150,7 @@ static bool is_typeless_format(DXGI_FORMAT fmt) {
 static constexpr float DEFAULT_HDR_POWER = 1.30f;
 static constexpr float DEFAULT_RADIUS1   = 0.793f;
 static constexpr float DEFAULT_RADIUS2   = 0.87f;
-static constexpr const char* FAKEHDR_VERSION = "1.0.6";
+static constexpr const char* FAKEHDR_VERSION = "1.0.8";
 
 // ============================================================================
 // FakeHDR Plugin
@@ -210,10 +215,6 @@ public:
     bool m_dx12_ready = false;
     HDRParamsCB* m_dx12_cb_mapped = nullptr;
     DXGI_FORMAT m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
-
-    // Frame skip: wait for VR system to stabilize
-    uint32_t m_frame_count = 0;
-    static constexpr uint32_t SKIP_FRAMES = 60;
 
     void on_dllmain() override {}
 
@@ -293,43 +294,103 @@ public:
     void on_pre_render_vr_framework_dx12() override {
         if (!m_enabled) return;
 
-        // Skip early frames while VR/D3D12 is still initializing
-        m_frame_count++;
-        if (m_frame_count < SKIP_FRAMES) {
-            if (m_frame_count == 1) {
-                API::get()->log_info("[FakeHDR DX12] Skipping first %u frames for stability", SKIP_FRAMES);
-            }
-            return;
-        }
-
         const auto renderer_data = API::get()->param()->renderer;
         if (renderer_data->renderer_type != UEVR_RENDERER_D3D12) return;
         if (!renderer_data->device) return;
 
-        // Get the UE4 scene render target that UEVR will copy to VR eyes
         auto scene_rt = API::StereoHook::get_scene_render_target();
         if (!scene_rt) return;
 
         auto native = (ID3D12Resource*)scene_rt->get_native_resource();
         if (!native) return;
-
-        // Verify the resource looks valid (has non-zero dimensions)
         auto desc = native->GetDesc();
         if (desc.Width == 0 || desc.Height == 0) return;
 
-        if (m_frame_count == SKIP_FRAMES) {
-            API::get()->log_info("[FakeHDR DX12] First apply: resource %llx format %u size %ux%u",
-                (unsigned long long)native, (unsigned)desc.Format, (unsigned)desc.Width, (unsigned)desc.Height);
+        // Process every valid callback — UEVR dispatches twice per frame
+        // with native stereo (once per eye RT). find_target_state handles
+        // size-based caching so each size gets its own GPU resources.
+        auto device = (ID3D12Device*)renderer_data->device;
+        const auto resolved_format = resolve_typeless_format(desc.Format);
+
+        if (!m_dx12_ready || m_dx12_rt_format != resolved_format) {
+            if (m_dx12_ready) release_effect_resources();
+            if (!init_dx12_pipeline(device, desc.Format)) return;
+        }
+        auto& ts = find_target_state((UINT)desc.Width, desc.Height);
+        if (!ensure_dx12_copy_texture(device, native, ts)) return;
+
+        auto cmd = (ID3D12GraphicsCommandList*)API::StereoHook::get_pre_render_command_list();
+        if (!cmd) return;
+
+        // Update CB
+        if (m_dx12_cb_mapped) {
+            m_dx12_cb_mapped->HDRPower = m_hdr_power;
+            m_dx12_cb_mapped->Radius1 = m_radius1;
+            m_dx12_cb_mapped->Radius2 = m_radius2;
+            m_dx12_cb_mapped->_pad0 = 0;
+            m_dx12_cb_mapped->PixelSizeX = 1.0f / (float)ts.width;
+            m_dx12_cb_mapped->PixelSizeY = 1.0f / (float)ts.height;
+            m_dx12_cb_mapped->_pad1[0] = 0; m_dx12_cb_mapped->_pad1[1] = 0;
         }
 
-        __try {
-            auto& ts = find_target_state((UINT)desc.Width, desc.Height);
-            apply_fakehdr_to_resource_dx12(native, D3D12_RESOURCE_STATE_RENDER_TARGET, ts);
-        } __except(EXCEPTION_EXECUTE_HANDLER) {
-            API::get()->log_error("[FakeHDR DX12] SEH exception in apply (code 0x%x)", GetExceptionCode());
-            // Disable to prevent repeated crashes
-            m_enabled = false;
-        }
+        // Step 1: Copy target -> copy_tex (for SRV sampling)
+        D3D12_RESOURCE_BARRIER barriers[2]{};
+        barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[0].Transition.pResource = native;
+        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[1].Transition.pResource = ts.copy_tex.Get();
+        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        cmd->ResourceBarrier(2, barriers);
+        cmd->CopyResource(ts.copy_tex.Get(), native);
+
+        // Transition back: target -> RENDER_TARGET, copy_tex -> SRV
+        barriers[0].Transition.pResource = native;
+        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barriers[1].Transition.pResource = ts.copy_tex.Get();
+        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        cmd->ResourceBarrier(2, barriers);
+
+        // Step 2: Draw FakeHDR from copy_tex -> result_tex
+        cmd->SetPipelineState(m_dx12_pso.Get());
+        cmd->SetGraphicsRootSignature(m_dx12_root_sig.Get());
+        cmd->SetGraphicsRootConstantBufferView(0, m_dx12_cb->GetGPUVirtualAddress());
+        ID3D12DescriptorHeap* heaps[] = { ts.srv_heap.Get() };
+        cmd->SetDescriptorHeaps(1, heaps);
+        cmd->SetGraphicsRootDescriptorTable(1, ts.srv_heap->GetGPUDescriptorHandleForHeapStart());
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = ts.rtv_heap->GetCPUDescriptorHandleForHeapStart();
+        cmd->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
+        D3D12_VIEWPORT vp{}; vp.Width = (float)ts.width; vp.Height = (float)ts.height; vp.MaxDepth = 1.0f;
+        cmd->RSSetViewports(1, &vp);
+        D3D12_RECT scissor{}; scissor.right = (LONG)ts.width; scissor.bottom = (LONG)ts.height;
+        cmd->RSSetScissorRects(1, &scissor);
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        cmd->DrawInstanced(3, 1, 0, 0);
+
+        // Step 3: Copy result_tex -> target (write back)
+        barriers[0].Transition.pResource = ts.result_tex.Get();
+        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barriers[1].Transition.pResource = native;
+        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        cmd->ResourceBarrier(2, barriers);
+        cmd->CopyResource(native, ts.result_tex.Get());
+
+        // Step 4: Restore states
+        barriers[0].Transition.pResource = ts.result_tex.Get();
+        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barriers[1].Transition.pResource = native;
+        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        cmd->ResourceBarrier(2, barriers);
     }
 
     void on_pre_render_vr_framework_dx11() override {
@@ -650,109 +711,9 @@ private:
         return true;
     }
 
-    void apply_fakehdr_to_resource_dx12(ID3D12Resource* target, D3D12_RESOURCE_STATES initial_state, DX12TargetState& ts) {
-        const auto rd = API::get()->param()->renderer;
-        auto device = (ID3D12Device*)rd->device;
-        if (!device || !target) return;
-
-        auto bb_desc = target->GetDesc();
-        const auto resolved_format = resolve_typeless_format(bb_desc.Format);
-
-        // Init or reinit if format changed
-        if (!m_dx12_ready || m_dx12_rt_format != resolved_format) {
-            if (m_dx12_ready) release_effect_resources();
-            if (!init_dx12_pipeline(device, bb_desc.Format)) return;
-        }
-        if (!ensure_dx12_copy_texture(device, target, ts)) return;
-
-        // Get the command list UEVR provides for pre-render recording.
-        // UEVR handles allocator, submission, fence — plugin just records.
-        auto cmd = (ID3D12GraphicsCommandList*)API::StereoHook::get_pre_render_command_list();
-        if (!cmd) {
-            API::get()->log_error("[FakeHDR DX12] No pre-render command list available");
-            return;
-        }
-
-        // Update CB
-        if (m_dx12_cb_mapped) {
-            m_dx12_cb_mapped->HDRPower = m_hdr_power;
-            m_dx12_cb_mapped->Radius1 = m_radius1;
-            m_dx12_cb_mapped->Radius2 = m_radius2;
-            m_dx12_cb_mapped->_pad0 = 0;
-            m_dx12_cb_mapped->PixelSizeX = 1.0f / (float)ts.width;
-            m_dx12_cb_mapped->PixelSizeY = 1.0f / (float)ts.height;
-            m_dx12_cb_mapped->_pad1[0] = 0; m_dx12_cb_mapped->_pad1[1] = 0;
-        }
-
-        // Record into UEVR's command list (no allocator reset, no close, no submit)
-
-        // Step 1: Copy target -> copy_tex (for SRV sampling)
-        D3D12_RESOURCE_BARRIER barriers[3]{};
-        barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barriers[0].Transition.pResource = target;
-        barriers[0].Transition.StateBefore = initial_state;
-        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barriers[1].Transition.pResource = ts.copy_tex.Get();
-        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        cmd->ResourceBarrier(2, barriers);
-
-        cmd->CopyResource(ts.copy_tex.Get(), target);
-
-        // Step 2: Render FakeHDR from copy_tex -> result_tex
-        barriers[0].Transition.pResource = ts.copy_tex.Get();
-        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        cmd->ResourceBarrier(1, &barriers[0]);
-
-        cmd->SetPipelineState(m_dx12_pso.Get());
-        cmd->SetGraphicsRootSignature(m_dx12_root_sig.Get());
-        cmd->SetGraphicsRootConstantBufferView(0, m_dx12_cb->GetGPUVirtualAddress());
-
-        ID3D12DescriptorHeap* heaps[] = { ts.srv_heap.Get() };
-        cmd->SetDescriptorHeaps(1, heaps);
-        cmd->SetGraphicsRootDescriptorTable(1, ts.srv_heap->GetGPUDescriptorHandleForHeapStart());
-
-        D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = ts.rtv_heap->GetCPUDescriptorHandleForHeapStart();
-        cmd->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
-
-        D3D12_VIEWPORT vp{}; vp.Width = (float)ts.width; vp.Height = (float)ts.height; vp.MaxDepth = 1.0f;
-        cmd->RSSetViewports(1, &vp);
-        D3D12_RECT scissor{}; scissor.right = (LONG)ts.width; scissor.bottom = (LONG)ts.height;
-        cmd->RSSetScissorRects(1, &scissor);
-
-        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        cmd->DrawInstanced(3, 1, 0, 0);
-
-        // Step 3: Copy result_tex -> target (write back)
-        barriers[0].Transition.pResource = ts.result_tex.Get();
-        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barriers[1].Transition.pResource = target;
-        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        cmd->ResourceBarrier(2, barriers);
-
-        cmd->CopyResource(target, ts.result_tex.Get());
-
-        // Step 4: Restore states
-        barriers[0].Transition.pResource = ts.result_tex.Get();
-        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barriers[1].Transition.pResource = target;
-        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barriers[1].Transition.StateAfter = initial_state;
-        barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        cmd->ResourceBarrier(2, barriers);
-
-        // No close, no submit, no fence — UEVR handles all of that.
-    }
+    // apply_fakehdr_to_resource_dx12 removed in v1.0.8 — GPU work is now
+    // inlined in on_pre_render_vr_framework_dx12 to avoid redundant
+    // device/GetDesc lookups that caused crashes during UEVR transitions.
 };
 
 // ============================================================================
