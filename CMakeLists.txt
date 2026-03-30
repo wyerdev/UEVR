@@ -466,6 +466,48 @@ set_target_properties(fakehdr_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target curves_plugin
+set(CMKR_TARGET curves_plugin)
+set(curves_plugin_SOURCES "")
+
+list(APPEND curves_plugin_SOURCES
+	"examples/curves_plugin/CurvesPlugin.cpp"
+)
+
+list(APPEND curves_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${curves_plugin_SOURCES})
+add_library(curves_plugin SHARED)
+
+if(curves_plugin_SOURCES)
+	target_sources(curves_plugin PRIVATE ${curves_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${curves_plugin_SOURCES})
+
+target_compile_features(curves_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(curves_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(curves_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(curves_plugin PROPERTIES
+	OUTPUT_NAME
+		CurvesPlugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target sdk-test
 set(CMKR_TARGET sdk-test)
 set(sdk-test_SOURCES "")
@@ -792,6 +834,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/CVarManager.cpp"
 	"src/mods/vr/D3D11Component.cpp"
 	"src/mods/vr/D3D12Component.cpp"
+	"src/mods/vr/FFakeStereoRenderingHook - Copy.cpp"
 	"src/mods/vr/FFakeStereoRenderingHook.cpp"
 	"src/mods/vr/IXRTrackingSystemHook.cpp"
 	"src/mods/vr/OverlayComponent.cpp"

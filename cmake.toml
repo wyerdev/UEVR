@@ -164,6 +164,14 @@ headers = ["examples/fakehdr_plugin/**.hpp", "examples/fakehdr_plugin/**.h"]
 [target.fakehdr_plugin.properties]
 OUTPUT_NAME = "FakeHDRPlugin"
 
+[target.curves_plugin]
+type = "plugin"
+sources = ["examples/curves_plugin/CurvesPlugin.cpp"]
+headers = ["examples/curves_plugin/**.hpp", "examples/curves_plugin/**.h"]
+
+[target.curves_plugin.properties]
+OUTPUT_NAME = "CurvesPlugin"
+
 [target.sdk-test]
 type = "shared"
 sources = ["side-projects/sdk-test/**.cpp", "side-projects/sdk-test/**.c"]
