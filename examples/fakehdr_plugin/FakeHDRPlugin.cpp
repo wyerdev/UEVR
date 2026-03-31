@@ -188,14 +188,13 @@ public:
     // without recreating GPU resources every time.
     struct DX12TargetState {
         ComPtr<ID3D12Resource>       copy_tex;    // SRV input (scene snapshot)
-        ComPtr<ID3D12Resource>       result_tex;  // RTV output (has ALLOW_RENDER_TARGET)
         ComPtr<ID3D12DescriptorHeap> srv_heap;
-        ComPtr<ID3D12DescriptorHeap> rtv_heap;
+        ComPtr<ID3D12DescriptorHeap> rtv_heap;    // RTV written per-frame on native target
         UINT width  = 0;
         UINT height = 0;
 
         void reset() {
-            copy_tex.Reset(); result_tex.Reset();
+            copy_tex.Reset();
             srv_heap.Reset(); rtv_heap.Reset();
             width = 0; height = 0;
         }
@@ -361,7 +360,13 @@ public:
         barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         cmd->ResourceBarrier(2, barriers);
 
-        // Step 2: Draw FakeHDR from copy_tex -> result_tex
+        // Step 2: Create RTV on native target (CPU descriptor write — essentially free)
+        D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{};
+        rtv_desc.Format = resolved_format;
+        rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        device->CreateRenderTargetView(native, &rtv_desc, ts.rtv_heap->GetCPUDescriptorHandleForHeapStart());
+
+        // Draw FakeHDR: read copy_tex (SRV) -> write native (RTV) — no hazard, different resources
         cmd->SetPipelineState(m_dx12_pso.Get());
         cmd->SetGraphicsRootSignature(m_dx12_root_sig.Get());
         cmd->SetGraphicsRootConstantBufferView(0, m_dx12_cb->GetGPUVirtualAddress());
@@ -376,25 +381,7 @@ public:
         cmd->RSSetScissorRects(1, &scissor);
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         cmd->DrawInstanced(3, 1, 0, 0);
-
-        // Step 3: Copy result_tex -> target (write back)
-        barriers[0].Transition.pResource = ts.result_tex.Get();
-        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barriers[1].Transition.pResource = native;
-        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        cmd->ResourceBarrier(2, barriers);
-        cmd->CopyResource(native, ts.result_tex.Get());
-
-        // Step 4: Restore states
-        barriers[0].Transition.pResource = ts.result_tex.Get();
-        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barriers[1].Transition.pResource = native;
-        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        cmd->ResourceBarrier(2, barriers);
+        // native left in RENDER_TARGET state — exactly what UEVR expects
     }
 
     void on_pre_render_vr_framework_dx11() override {
@@ -672,14 +659,13 @@ private:
 
     bool ensure_dx12_copy_texture(ID3D12Device* device, ID3D12Resource* src, DX12TargetState& ts) {
         auto sd = src->GetDesc();
-        if (ts.copy_tex && ts.result_tex && ts.width == (UINT)sd.Width && ts.height == sd.Height) return true;
+        if (ts.copy_tex && ts.width == (UINT)sd.Width && ts.height == sd.Height) return true;
         ts.reset();
 
         const auto resolved_fmt = resolve_typeless_format(sd.Format);
-
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-        // Copy texture: SRV input (no render target flag needed)
+        // Only need copy_tex — we render directly to the native target (no intermediate result_tex)
         D3D12_RESOURCE_DESC copy_desc = sd;
         copy_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
         copy_desc.Format = resolved_fmt;
@@ -689,23 +675,12 @@ private:
             return false;
         }
 
-        // Result texture: RTV output (MUST have ALLOW_RENDER_TARGET)
-        D3D12_RESOURCE_DESC result_desc = sd;
-        result_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-        result_desc.Format = resolved_fmt;
-        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &result_desc,
-                D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&ts.result_tex)))) {
-            API::get()->log_error("[FakeHDR DX12] Failed to create result texture");
-            ts.reset();
-            return false;
-        }
-
         // SRV heap
         D3D12_DESCRIPTOR_HEAP_DESC shd{}; shd.NumDescriptors = 1;
         shd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; shd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(device->CreateDescriptorHeap(&shd, IID_PPV_ARGS(&ts.srv_heap)))) { ts.reset(); return false; }
 
-        // RTV heap
+        // RTV heap (descriptor written per-frame on native target)
         D3D12_DESCRIPTOR_HEAP_DESC rhd{}; rhd.NumDescriptors = 1; rhd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         if (FAILED(device->CreateDescriptorHeap(&rhd, IID_PPV_ARGS(&ts.rtv_heap)))) { ts.reset(); return false; }
 
@@ -716,15 +691,10 @@ private:
         svd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         svd.Texture2D.MipLevels = 1;
         device->CreateShaderResourceView(ts.copy_tex.Get(), &svd, ts.srv_heap->GetCPUDescriptorHandleForHeapStart());
-
-        // RTV for result texture
-        D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{};
-        rtv_desc.Format = resolved_fmt;
-        rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-        device->CreateRenderTargetView(ts.result_tex.Get(), &rtv_desc, ts.rtv_heap->GetCPUDescriptorHandleForHeapStart());
+        // RTV descriptor written per-frame in render function
 
         ts.width = (UINT)sd.Width; ts.height = sd.Height;
-        API::get()->log_info("[FakeHDR DX12] Target textures ready: %ux%u fmt %u", ts.width, ts.height, (unsigned)resolved_fmt);
+        API::get()->log_info("[FakeHDR DX12] Copy texture ready: %ux%u fmt %u", ts.width, ts.height, (unsigned)resolved_fmt);
         return true;
     }
 };

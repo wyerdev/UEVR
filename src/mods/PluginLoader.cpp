@@ -1922,6 +1922,21 @@ void PluginLoader::attempt_unload_plugins() {
             }
         }
 
+        // Drain all in-flight GPU work that may reference plugin-owned
+        // D3D12 resources (PSOs, textures, descriptor heaps, etc.).
+        // Without this, FreeLibrary destroys ComPtrs while the GPU is
+        // still executing the previous frame's command list → TDR/BSOD.
+        try {
+            if (g_framework->is_dx12()) {
+                auto vr = VR::get();
+                if (vr != nullptr) {
+                    vr->d3d12().wait_for_plugin_gpu_work();
+                }
+            }
+        } catch (...) {
+            spdlog::error("[PluginLoader] Exception while draining GPU before plugin unload");
+        }
+
         for (auto& pair : m_plugins) {
             FreeLibrary(pair.second);
         }

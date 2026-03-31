@@ -1102,6 +1102,12 @@ ID3D12GraphicsCommandList* D3D12Component::get_plugin_command_list() {
     return m_plugin_pre_render_ctx.cmd_list.Get();
 }
 
+void D3D12Component::wait_for_plugin_gpu_work() {
+    if (m_plugin_pre_render_ctx.ready()) {
+        m_plugin_pre_render_ctx.wait(INFINITE);
+    }
+}
+
 void D3D12Component::prepare_plugin_rt(ID3D12Resource* rt) {
     if (rt == nullptr || !m_plugin_pre_render_active || !m_plugin_pre_render_ctx.ready()) {
         return;

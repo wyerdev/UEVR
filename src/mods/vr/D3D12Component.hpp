@@ -54,6 +54,11 @@ public:
     void end_plugin_pre_render();
     ID3D12GraphicsCommandList* get_plugin_command_list();
 
+    // Wait for any in-flight plugin GPU commands to complete.
+    // Must be called before destroying plugin-owned D3D12 resources
+    // (e.g. before FreeLibrary during plugin unload).
+    void wait_for_plugin_gpu_work();
+
     // Resource state management for plugin dispatch.
     // Transitions the scene RT to RENDER_TARGET before plugins see it,
     // and restores it to ENGINE_SRC_COLOR afterwards for UEVR's copy.

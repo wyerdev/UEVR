@@ -53,10 +53,8 @@ VSOutput main(uint vertexID : SV_VertexID) {
 // Faithful port of DKT70/CeeJay.dk's Technicolor.fx
 static const char* g_ps_src = R"(
 cbuffer TechnicolorParams : register(b0) {
-    float Power;              // 0..8
-    float3 RGBNegativeAmount; // per-channel negative amount
-    float Strength;           // 0..1
-    float3 _Pad;
+    float3 InvNegPower; // precomputed 1/(RGBNegativeAmount * Power)
+    float Strength;     // 0..1
 };
 
 Texture2D SceneTexture : register(t0);
@@ -77,9 +75,9 @@ float4 main(PSInput input) : SV_Target {
     static const float2 greenfilter     = float2(0.30, 1.0);
     float2 magentafilter2 = magentafilter.rb;
 
-    float2 negative_mul_r = tcol.rg * (1.0 / (RGBNegativeAmount.r * Power));
-    float2 negative_mul_g = tcol.rg * (1.0 / (RGBNegativeAmount.g * Power));
-    float2 negative_mul_b = tcol.rb * (1.0 / (RGBNegativeAmount.b * Power));
+    float2 negative_mul_r = tcol.rg * InvNegPower.r;
+    float2 negative_mul_g = tcol.rg * InvNegPower.g;
+    float2 negative_mul_b = tcol.rb * InvNegPower.b;
 
     float3 output_r = dot(redorangefilter, negative_mul_r).xxx + cyanfilter;
     float3 output_g = dot(greenfilter, negative_mul_g).xxx + magentafilter;
@@ -94,10 +92,8 @@ float4 main(PSInput input) : SV_Target {
 // Constant buffer layout
 // ============================================================================
 struct TechnicolorCB {
-    float Power;
-    float RGBNegativeAmount[3];
-    float Strength;
-    float _pad[3];
+    float InvNegPower[3]; // precomputed 1/(neg*power) per channel
+    float Strength;       // 0..1
 };
 
 // ============================================================================
@@ -156,11 +152,10 @@ public:
 
     struct DX12TargetState {
         ComPtr<ID3D12Resource>       copy_tex;
-        ComPtr<ID3D12Resource>       result_tex;
         ComPtr<ID3D12DescriptorHeap> srv_heap;
-        ComPtr<ID3D12DescriptorHeap> rtv_heap;
+        ComPtr<ID3D12DescriptorHeap> rtv_heap;  // RTV written per-frame on native target
         UINT width = 0, height = 0;
-        void reset() { copy_tex.Reset(); result_tex.Reset(); srv_heap.Reset(); rtv_heap.Reset(); width = 0; height = 0; }
+        void reset() { copy_tex.Reset(); srv_heap.Reset(); rtv_heap.Reset(); width = 0; height = 0; }
     };
     static constexpr size_t MAX_TARGET_STATES = 2;
     DX12TargetState m_dx12_targets[MAX_TARGET_STATES];
@@ -275,14 +270,14 @@ public:
         if (!cmd) return;
 
         if (m_dx12_cb_mapped) {
-            m_dx12_cb_mapped->Power = m_power;
-            m_dx12_cb_mapped->RGBNegativeAmount[0] = m_neg_r;
-            m_dx12_cb_mapped->RGBNegativeAmount[1] = m_neg_g;
-            m_dx12_cb_mapped->RGBNegativeAmount[2] = m_neg_b;
+            auto safe_inv = [](float neg, float pwr) { float d = neg * pwr; return d > 1e-4f ? 1.0f / d : 0.0f; };
+            m_dx12_cb_mapped->InvNegPower[0] = safe_inv(m_neg_r, m_power);
+            m_dx12_cb_mapped->InvNegPower[1] = safe_inv(m_neg_g, m_power);
+            m_dx12_cb_mapped->InvNegPower[2] = safe_inv(m_neg_b, m_power);
             m_dx12_cb_mapped->Strength = m_strength;
         }
 
-        // Copy target -> copy_tex
+        // Step 1: Copy target -> copy_tex
         D3D12_RESOURCE_BARRIER barriers[2]{};
         barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barriers[0].Transition.pResource = native;
@@ -297,13 +292,20 @@ public:
         cmd->ResourceBarrier(2, barriers);
         cmd->CopyResource(ts.copy_tex.Get(), native);
 
+        // Step 2: Transition back — then render directly to native (no intermediate result_tex)
         barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
         barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         cmd->ResourceBarrier(2, barriers);
 
-        // Draw effect: copy_tex -> result_tex
+        // Create RTV on native target (CPU descriptor write — essentially free)
+        D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{};
+        rtv_desc.Format = resolved_format;
+        rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        device->CreateRenderTargetView(native, &rtv_desc, ts.rtv_heap->GetCPUDescriptorHandleForHeapStart());
+
+        // Draw: read copy_tex (SRV) -> write native (RTV) — no hazard, different resources
         cmd->SetPipelineState(m_dx12_pso.Get());
         cmd->SetGraphicsRootSignature(m_dx12_root_sig.Get());
         cmd->SetGraphicsRootConstantBufferView(0, m_dx12_cb->GetGPUVirtualAddress());
@@ -318,22 +320,7 @@ public:
         cmd->RSSetScissorRects(1, &scissor);
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         cmd->DrawInstanced(3, 1, 0, 0);
-
-        // Copy result_tex -> target
-        barriers[0].Transition.pResource = ts.result_tex.Get();
-        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barriers[1].Transition.pResource = native;
-        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        cmd->ResourceBarrier(2, barriers);
-        cmd->CopyResource(native, ts.result_tex.Get());
-
-        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        cmd->ResourceBarrier(2, barriers);
+        // native left in RENDER_TARGET state — exactly what UEVR expects
     }
 
     // ========================================================================
@@ -460,10 +447,10 @@ private:
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (SUCCEEDED(ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
             auto* p = static_cast<TechnicolorCB*>(mapped.pData);
-            p->Power = m_power;
-            p->RGBNegativeAmount[0] = m_neg_r;
-            p->RGBNegativeAmount[1] = m_neg_g;
-            p->RGBNegativeAmount[2] = m_neg_b;
+            auto safe_inv = [](float neg, float pwr) { float d = neg * pwr; return d > 1e-4f ? 1.0f / d : 0.0f; };
+            p->InvNegPower[0] = safe_inv(m_neg_r, m_power);
+            p->InvNegPower[1] = safe_inv(m_neg_g, m_power);
+            p->InvNegPower[2] = safe_inv(m_neg_b, m_power);
             p->Strength = m_strength;
             ctx->Unmap(m_cb.Get(), 0);
         }
@@ -567,19 +554,16 @@ private:
 
     bool ensure_dx12_textures(ID3D12Device* device, ID3D12Resource* src, DX12TargetState& ts) {
         auto sd = src->GetDesc();
-        if (ts.copy_tex && ts.result_tex && ts.width == (UINT)sd.Width && ts.height == sd.Height) return true;
+        if (ts.copy_tex && ts.width == (UINT)sd.Width && ts.height == sd.Height) return true;
         ts.reset();
 
         const auto resolved_fmt = resolve_typeless_format(sd.Format);
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
 
+        // Only need copy_tex — we render directly to the native target (no intermediate result_tex)
         D3D12_RESOURCE_DESC copy_desc = sd; copy_desc.Flags = D3D12_RESOURCE_FLAG_NONE; copy_desc.Format = resolved_fmt;
         if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &copy_desc,
                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&ts.copy_tex)))) return false;
-
-        D3D12_RESOURCE_DESC result_desc = sd; result_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET; result_desc.Format = resolved_fmt;
-        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &result_desc,
-                D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&ts.result_tex)))) { ts.reset(); return false; }
 
         D3D12_DESCRIPTOR_HEAP_DESC shd{}; shd.NumDescriptors = 1;
         shd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; shd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
@@ -592,9 +576,7 @@ private:
         svd.Format = resolved_fmt; svd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         svd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; svd.Texture2D.MipLevels = 1;
         device->CreateShaderResourceView(ts.copy_tex.Get(), &svd, ts.srv_heap->GetCPUDescriptorHandleForHeapStart());
-
-        D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{}; rtv_desc.Format = resolved_fmt; rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-        device->CreateRenderTargetView(ts.result_tex.Get(), &rtv_desc, ts.rtv_heap->GetCPUDescriptorHandleForHeapStart());
+        // RTV descriptor written per-frame on native target in render function
 
         ts.width = (UINT)sd.Width; ts.height = sd.Height;
         return true;
