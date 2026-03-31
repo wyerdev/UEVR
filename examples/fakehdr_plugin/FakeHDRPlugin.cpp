@@ -67,7 +67,7 @@ cbuffer HDRParams : register(b0) {
     float HDRPower;
     float Radius1;
     float Radius2;
-    float _Pad0;
+    float BloomMip;   // mip level for bloom samples (0=full, 1=half, 2=quarter)
     float2 PixelSize;
     float2 _Pad1;
 };
@@ -82,28 +82,29 @@ struct PSInput {
 
 float4 main(PSInput input) : SV_Target {
     float2 tc = input.TexCoord;
-    float3 color = SceneTexture.Sample(LinearSampler, tc).rgb;
+    float3 color = SceneTexture.SampleLevel(LinearSampler, tc, 0).rgb;
 
+    float bm = BloomMip;
     float3 bloom1 = 0;
-    bloom1 += SceneTexture.Sample(LinearSampler, tc + float2( 1.5, -1.5) * Radius1 * PixelSize).rgb;
-    bloom1 += SceneTexture.Sample(LinearSampler, tc + float2(-1.5, -1.5) * Radius1 * PixelSize).rgb;
-    bloom1 += SceneTexture.Sample(LinearSampler, tc + float2( 1.5,  1.5) * Radius1 * PixelSize).rgb;
-    bloom1 += SceneTexture.Sample(LinearSampler, tc + float2(-1.5,  1.5) * Radius1 * PixelSize).rgb;
-    bloom1 += SceneTexture.Sample(LinearSampler, tc + float2( 0.0, -2.5) * Radius1 * PixelSize).rgb;
-    bloom1 += SceneTexture.Sample(LinearSampler, tc + float2( 0.0,  2.5) * Radius1 * PixelSize).rgb;
-    bloom1 += SceneTexture.Sample(LinearSampler, tc + float2(-2.5,  0.0) * Radius1 * PixelSize).rgb;
-    bloom1 += SceneTexture.Sample(LinearSampler, tc + float2( 2.5,  0.0) * Radius1 * PixelSize).rgb;
+    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 1.5, -1.5) * Radius1 * PixelSize, bm).rgb;
+    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-1.5, -1.5) * Radius1 * PixelSize, bm).rgb;
+    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 1.5,  1.5) * Radius1 * PixelSize, bm).rgb;
+    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-1.5,  1.5) * Radius1 * PixelSize, bm).rgb;
+    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 0.0, -2.5) * Radius1 * PixelSize, bm).rgb;
+    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 0.0,  2.5) * Radius1 * PixelSize, bm).rgb;
+    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-2.5,  0.0) * Radius1 * PixelSize, bm).rgb;
+    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 2.5,  0.0) * Radius1 * PixelSize, bm).rgb;
     bloom1 *= 0.005;
 
     float3 bloom2 = 0;
-    bloom2 += SceneTexture.Sample(LinearSampler, tc + float2( 1.5, -1.5) * Radius2 * PixelSize).rgb;
-    bloom2 += SceneTexture.Sample(LinearSampler, tc + float2(-1.5, -1.5) * Radius2 * PixelSize).rgb;
-    bloom2 += SceneTexture.Sample(LinearSampler, tc + float2( 1.5,  1.5) * Radius2 * PixelSize).rgb;
-    bloom2 += SceneTexture.Sample(LinearSampler, tc + float2(-1.5,  1.5) * Radius2 * PixelSize).rgb;
-    bloom2 += SceneTexture.Sample(LinearSampler, tc + float2( 0.0, -2.5) * Radius2 * PixelSize).rgb;
-    bloom2 += SceneTexture.Sample(LinearSampler, tc + float2( 0.0,  2.5) * Radius2 * PixelSize).rgb;
-    bloom2 += SceneTexture.Sample(LinearSampler, tc + float2(-2.5,  0.0) * Radius2 * PixelSize).rgb;
-    bloom2 += SceneTexture.Sample(LinearSampler, tc + float2( 2.5,  0.0) * Radius2 * PixelSize).rgb;
+    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 1.5, -1.5) * Radius2 * PixelSize, bm).rgb;
+    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-1.5, -1.5) * Radius2 * PixelSize, bm).rgb;
+    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 1.5,  1.5) * Radius2 * PixelSize, bm).rgb;
+    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-1.5,  1.5) * Radius2 * PixelSize, bm).rgb;
+    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 0.0, -2.5) * Radius2 * PixelSize, bm).rgb;
+    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 0.0,  2.5) * Radius2 * PixelSize, bm).rgb;
+    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-2.5,  0.0) * Radius2 * PixelSize, bm).rgb;
+    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 2.5,  0.0) * Radius2 * PixelSize, bm).rgb;
     bloom2 *= 0.010;
 
     float dist = Radius2 - Radius1;
@@ -121,7 +122,7 @@ struct HDRParamsCB {
     float HDRPower;
     float Radius1;
     float Radius2;
-    float _pad0;
+    float BloomMip;   // 0=full res, 1=half res, 2=quarter (DX11 uses mipped bloom)
     float PixelSizeX;
     float PixelSizeY;
     float _pad1[2];
@@ -168,15 +169,50 @@ public:
     bool  m_enabled   = true;
 
     // D3D11 effect resources
+    ComPtr<ID3D11DeviceContext>      m_dx11_ctx;
     ComPtr<ID3D11VertexShader>       m_vs;
     ComPtr<ID3D11PixelShader>        m_ps;
     ComPtr<ID3D11Buffer>             m_cb;
     ComPtr<ID3D11SamplerState>       m_sampler;
-    ComPtr<ID3D11Texture2D>          m_copy_tex;
-    ComPtr<ID3D11ShaderResourceView> m_copy_srv;
-    UINT m_copy_width  = 0;
-    UINT m_copy_height = 0;
     bool m_shader_ready = false;
+    bool m_dx11_logged_flags = false;  // diagnostic: log RT bind flags once
+    bool m_dx11_first_apply_logged = false;  // diagnostic: log first successful effect apply
+
+    // DX11 per-target state — cached by texture dimensions (2-slot cache like DX12)
+    struct DX11TargetState {
+        ComPtr<ID3D11Texture2D>          copy_tex;
+        ComPtr<ID3D11ShaderResourceView> copy_srv;
+        ComPtr<ID3D11RenderTargetView>   rtv;
+        ID3D11Texture2D*                 rtv_tex = nullptr;
+        UINT width  = 0;
+        UINT height = 0;
+        bool cache_hit_logged = false;
+
+        void reset() {
+            copy_tex.Reset(); copy_srv.Reset(); rtv.Reset();
+            rtv_tex = nullptr; width = 0; height = 0;
+            cache_hit_logged = false;
+        }
+    };
+    static constexpr size_t MAX_DX11_TARGETS = 2;
+    DX11TargetState m_dx11_targets[MAX_DX11_TARGETS];
+
+    DX11TargetState& find_dx11_target_state(UINT w, UINT h) {
+        for (size_t i = 0; i < MAX_DX11_TARGETS; ++i) {
+            auto& ts = m_dx11_targets[i];
+            if (ts.width == w && ts.height == h) {
+                if (!ts.cache_hit_logged) {
+                    ts.cache_hit_logged = true;
+                    API::get()->log_info("[FakeHDR] DX11 cache hit: slot %d (%ux%u)", (int)i, w, h);
+                }
+                return ts;
+            }
+        }
+        for (auto& ts : m_dx11_targets)
+            if (ts.width == 0) return ts;
+        m_dx11_targets[1].reset();
+        return m_dx11_targets[1];
+    }
 
     // DX12 effect resources — shared across targets
     ComPtr<ID3D12RootSignature>  m_dx12_root_sig;
@@ -330,7 +366,7 @@ public:
             m_dx12_cb_mapped->HDRPower = m_hdr_power;
             m_dx12_cb_mapped->Radius1 = m_radius1;
             m_dx12_cb_mapped->Radius2 = m_radius2;
-            m_dx12_cb_mapped->_pad0 = 0;
+            m_dx12_cb_mapped->BloomMip = 0.0f;  // DX12: full-res bloom (no perf issue)
             m_dx12_cb_mapped->PixelSizeX = 1.0f / (float)ts.width;
             m_dx12_cb_mapped->PixelSizeY = 1.0f / (float)ts.height;
             m_dx12_cb_mapped->_pad1[0] = 0; m_dx12_cb_mapped->_pad1[1] = 0;
@@ -440,9 +476,12 @@ private:
     // ========================================================================
     void release_effect_resources() {
         // DX11
+        m_dx11_ctx.Reset();
         m_vs.Reset(); m_ps.Reset(); m_cb.Reset(); m_sampler.Reset();
-        m_copy_tex.Reset(); m_copy_srv.Reset();
-        m_copy_width = 0; m_copy_height = 0; m_shader_ready = false;
+        for (auto& ts : m_dx11_targets) ts.reset();
+        m_shader_ready = false;
+        m_dx11_logged_flags = false;
+        m_dx11_first_apply_logged = false;
 
         // DX12 — only device-level resources to release.
         // No command infrastructure to drain (UEVR owns the command list).
@@ -479,22 +518,25 @@ private:
         return true;
     }
 
-    bool ensure_copy_texture_dx11(ID3D11Device* device, ID3D11Texture2D* src) {
+    bool ensure_dx11_copy_texture(ID3D11Device* device, ID3D11Texture2D* src, DX11TargetState& ts) {
         D3D11_TEXTURE2D_DESC src_desc{}; src->GetDesc(&src_desc);
         const auto resolved_fmt = resolve_typeless_format(src_desc.Format);
-        if (m_copy_tex && m_copy_width == src_desc.Width && m_copy_height == src_desc.Height) return true;
-        m_copy_tex.Reset(); m_copy_srv.Reset();
+        if (ts.copy_tex && ts.width == src_desc.Width && ts.height == src_desc.Height) return true;
+        ts.reset();
 
         D3D11_TEXTURE2D_DESC cd = src_desc;
         cd.Format = resolved_fmt;
-        cd.BindFlags = D3D11_BIND_SHADER_RESOURCE; cd.MiscFlags = 0; cd.Usage = D3D11_USAGE_DEFAULT; cd.CPUAccessFlags = 0;
-        if (FAILED(device->CreateTexture2D(&cd, nullptr, &m_copy_tex))) return false;
+        cd.MipLevels = 1;
+        cd.BindFlags = D3D11_BIND_SHADER_RESOURCE; cd.MiscFlags = 0;
+        cd.Usage = D3D11_USAGE_DEFAULT; cd.CPUAccessFlags = 0;
+        if (FAILED(device->CreateTexture2D(&cd, nullptr, &ts.copy_tex))) return false;
 
         D3D11_SHADER_RESOURCE_VIEW_DESC svd{}; svd.Format = resolved_fmt;
         svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; svd.Texture2D.MipLevels = 1;
-        if (FAILED(device->CreateShaderResourceView(m_copy_tex.Get(), &svd, &m_copy_srv))) { m_copy_tex.Reset(); return false; }
+        if (FAILED(device->CreateShaderResourceView(ts.copy_tex.Get(), &svd, &ts.copy_srv))) { ts.reset(); return false; }
 
-        m_copy_width = src_desc.Width; m_copy_height = src_desc.Height;
+        ts.width = src_desc.Width; ts.height = src_desc.Height;
+        API::get()->log_info("[FakeHDR] DX11 copy texture created: %ux%u", ts.width, ts.height);
         return true;
     }
 
@@ -507,67 +549,66 @@ private:
         target->GetDesc(&target_desc);
         if (target_desc.Width == 0 || target_desc.Height == 0) return;
 
-        ComPtr<ID3D11DeviceContext> ctx;
-        device->GetImmediateContext(&ctx);
+        // Log bind flags once for diagnostics
+        if (!m_dx11_logged_flags) {
+            m_dx11_logged_flags = true;
+            API::get()->log_info("[FakeHDR] DX11 RT: %ux%u fmt=%u bind=0x%x misc=0x%x",
+                target_desc.Width, target_desc.Height, target_desc.Format,
+                target_desc.BindFlags, target_desc.MiscFlags);
+        }
+
+        if (!m_dx11_ctx) device->GetImmediateContext(&m_dx11_ctx);
+        auto ctx = m_dx11_ctx.Get();
 
         if (!m_shader_ready && !init_shaders_dx11(device)) return;
-        if (!ensure_copy_texture_dx11(device, target)) return;
 
-        // Create RTV on the target — use resolved format for typeless textures
-        const auto resolved_fmt = resolve_typeless_format(target_desc.Format);
-        D3D11_RENDER_TARGET_VIEW_DESC rtv_desc{};
-        rtv_desc.Format = resolved_fmt;
-        rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-        rtv_desc.Texture2D.MipSlice = 0;
-        ComPtr<ID3D11RenderTargetView> target_rtv;
-        if (FAILED(device->CreateRenderTargetView(target, &rtv_desc, &target_rtv))) return;
+        auto& ts = find_dx11_target_state(target_desc.Width, target_desc.Height);
+        if (!ensure_dx11_copy_texture(device, target, ts)) return;
 
-        // Save state
-        ComPtr<ID3D11RenderTargetView> old_rtv; ComPtr<ID3D11DepthStencilView> old_dsv;
-        ctx->OMGetRenderTargets(1, &old_rtv, &old_dsv);
-        D3D11_VIEWPORT old_vp{}; UINT nvp = 1; ctx->RSGetViewports(&nvp, &old_vp);
-        ComPtr<ID3D11VertexShader> ovs; ComPtr<ID3D11PixelShader> ops; ComPtr<ID3D11InputLayout> oil;
-        ComPtr<ID3D11Buffer> ocb; ComPtr<ID3D11ShaderResourceView> osrv; ComPtr<ID3D11SamplerState> osmp;
-        D3D11_PRIMITIVE_TOPOLOGY otopo;
-        ctx->VSGetShader(&ovs, nullptr, nullptr); ctx->PSGetShader(&ops, nullptr, nullptr);
-        ctx->IAGetInputLayout(&oil); ctx->PSGetConstantBuffers(0, 1, &ocb);
-        ctx->PSGetShaderResources(0, 1, &osrv); ctx->PSGetSamplers(0, 1, &osmp);
-        ctx->IAGetPrimitiveTopology(&otopo);
-
-        ctx->CopyResource(m_copy_tex.Get(), target);
+        // Cache RTV — recreate only when the underlying texture changes
+        if (ts.rtv_tex != target) {
+            ts.rtv.Reset();
+            const auto resolved_fmt = resolve_typeless_format(target_desc.Format);
+            D3D11_RENDER_TARGET_VIEW_DESC rtv_desc{};
+            rtv_desc.Format = resolved_fmt;
+            rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            rtv_desc.Texture2D.MipSlice = 0;
+            if (FAILED(device->CreateRenderTargetView(target, &rtv_desc, &ts.rtv))) return;
+            ts.rtv_tex = target;
+        }
 
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (SUCCEEDED(ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
             auto* p = static_cast<HDRParamsCB*>(mapped.pData);
-            p->HDRPower = m_hdr_power; p->Radius1 = m_radius1; p->Radius2 = m_radius2; p->_pad0 = 0;
-            p->PixelSizeX = 1.0f / (float)m_copy_width; p->PixelSizeY = 1.0f / (float)m_copy_height;
+            p->HDRPower = m_hdr_power; p->Radius1 = m_radius1; p->Radius2 = m_radius2;
+            p->BloomMip = 0.0f;
+            p->PixelSizeX = 1.0f / (float)ts.width; p->PixelSizeY = 1.0f / (float)ts.height;
             p->_pad1[0] = 0; p->_pad1[1] = 0;
             ctx->Unmap(m_cb.Get(), 0);
         }
 
-        D3D11_VIEWPORT vp{}; vp.Width = (float)m_copy_width; vp.Height = (float)m_copy_height; vp.MaxDepth = 1.0f;
+        ctx->CopyResource(ts.copy_tex.Get(), target);
+
+        D3D11_VIEWPORT vp{}; vp.Width = (float)ts.width; vp.Height = (float)ts.height; vp.MaxDepth = 1.0f;
         ctx->RSSetViewports(1, &vp);
-        ID3D11RenderTargetView* rtv_raw = target_rtv.Get();
+        ID3D11RenderTargetView* rtv_raw = ts.rtv.Get();
         ctx->OMSetRenderTargets(1, &rtv_raw, nullptr);
         ctx->IASetInputLayout(nullptr);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx->VSSetShader(m_vs.Get(), nullptr, 0);
         ctx->PSSetShader(m_ps.Get(), nullptr, 0);
         ctx->PSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
-        ctx->PSSetShaderResources(0, 1, m_copy_srv.GetAddressOf());
+        ctx->PSSetShaderResources(0, 1, ts.copy_srv.GetAddressOf());
         ctx->PSSetSamplers(0, 1, m_sampler.GetAddressOf());
         ctx->Draw(3, 0);
 
+        if (!m_dx11_first_apply_logged) {
+            m_dx11_first_apply_logged = true;
+            API::get()->log_info("[FakeHDR] DX11 effect applied: %ux%u", ts.width, ts.height);
+        }
+
         ID3D11ShaderResourceView* null_srv = nullptr;
         ctx->PSSetShaderResources(0, 1, &null_srv);
-
-        // Restore state
-        ctx->OMSetRenderTargets(1, old_rtv.GetAddressOf(), old_dsv.Get());
-        ctx->RSSetViewports(1, &old_vp);
-        ctx->VSSetShader(ovs.Get(), nullptr, 0); ctx->PSSetShader(ops.Get(), nullptr, 0);
-        ctx->IASetInputLayout(oil.Get()); ctx->PSSetConstantBuffers(0, 1, ocb.GetAddressOf());
-        ctx->PSSetShaderResources(0, 1, osrv.GetAddressOf()); ctx->PSSetSamplers(0, 1, osmp.GetAddressOf());
-        ctx->IASetPrimitiveTopology(otopo);
     }
 
     // ========================================================================
