@@ -204,6 +204,38 @@ headers = ["examples/colourfulness_plugin/**.hpp", "examples/colourfulness_plugi
 [target.colourfulness_plugin.properties]
 OUTPUT_NAME = "ColourfulnessPlugin"
 
+[target.liftgammagain_plugin]
+type = "plugin"
+sources = ["examples/liftgammagain_plugin/LiftGammaGainPlugin.cpp"]
+headers = ["examples/liftgammagain_plugin/**.hpp", "examples/liftgammagain_plugin/**.h"]
+
+[target.liftgammagain_plugin.properties]
+OUTPUT_NAME = "LiftGammaGainPlugin"
+
+[target.vibrance_plugin]
+type = "plugin"
+sources = ["examples/vibrance_plugin/VibrancePlugin.cpp"]
+headers = ["examples/vibrance_plugin/**.hpp", "examples/vibrance_plugin/**.h"]
+
+[target.vibrance_plugin.properties]
+OUTPUT_NAME = "VibrancePlugin"
+
+[target.tonemap_plugin]
+type = "plugin"
+sources = ["examples/tonemap_plugin/TonemapPlugin.cpp"]
+headers = ["examples/tonemap_plugin/**.hpp", "examples/tonemap_plugin/**.h"]
+
+[target.tonemap_plugin.properties]
+OUTPUT_NAME = "TonemapPlugin"
+
+[target.dpx_plugin]
+type = "plugin"
+sources = ["examples/dpx_plugin/DPXPlugin.cpp"]
+headers = ["examples/dpx_plugin/**.hpp", "examples/dpx_plugin/**.h"]
+
+[target.dpx_plugin.properties]
+OUTPUT_NAME = "DPXPlugin"
+
 [target.sdk-test]
 type = "shared"
 sources = ["side-projects/sdk-test/**.cpp", "side-projects/sdk-test/**.c"]

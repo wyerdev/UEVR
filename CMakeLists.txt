@@ -676,6 +676,174 @@ set_target_properties(colourfulness_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target liftgammagain_plugin
+set(CMKR_TARGET liftgammagain_plugin)
+set(liftgammagain_plugin_SOURCES "")
+
+list(APPEND liftgammagain_plugin_SOURCES
+	"examples/liftgammagain_plugin/LiftGammaGainPlugin.cpp"
+)
+
+list(APPEND liftgammagain_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${liftgammagain_plugin_SOURCES})
+add_library(liftgammagain_plugin SHARED)
+
+if(liftgammagain_plugin_SOURCES)
+	target_sources(liftgammagain_plugin PRIVATE ${liftgammagain_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${liftgammagain_plugin_SOURCES})
+
+target_compile_features(liftgammagain_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(liftgammagain_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(liftgammagain_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(liftgammagain_plugin PROPERTIES
+	OUTPUT_NAME
+		LiftGammaGainPlugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target vibrance_plugin
+set(CMKR_TARGET vibrance_plugin)
+set(vibrance_plugin_SOURCES "")
+
+list(APPEND vibrance_plugin_SOURCES
+	"examples/vibrance_plugin/VibrancePlugin.cpp"
+)
+
+list(APPEND vibrance_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${vibrance_plugin_SOURCES})
+add_library(vibrance_plugin SHARED)
+
+if(vibrance_plugin_SOURCES)
+	target_sources(vibrance_plugin PRIVATE ${vibrance_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${vibrance_plugin_SOURCES})
+
+target_compile_features(vibrance_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(vibrance_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(vibrance_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(vibrance_plugin PROPERTIES
+	OUTPUT_NAME
+		VibrancePlugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target tonemap_plugin
+set(CMKR_TARGET tonemap_plugin)
+set(tonemap_plugin_SOURCES "")
+
+list(APPEND tonemap_plugin_SOURCES
+	"examples/tonemap_plugin/TonemapPlugin.cpp"
+)
+
+list(APPEND tonemap_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${tonemap_plugin_SOURCES})
+add_library(tonemap_plugin SHARED)
+
+if(tonemap_plugin_SOURCES)
+	target_sources(tonemap_plugin PRIVATE ${tonemap_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${tonemap_plugin_SOURCES})
+
+target_compile_features(tonemap_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(tonemap_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(tonemap_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(tonemap_plugin PROPERTIES
+	OUTPUT_NAME
+		TonemapPlugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target dpx_plugin
+set(CMKR_TARGET dpx_plugin)
+set(dpx_plugin_SOURCES "")
+
+list(APPEND dpx_plugin_SOURCES
+	"examples/dpx_plugin/DPXPlugin.cpp"
+)
+
+list(APPEND dpx_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${dpx_plugin_SOURCES})
+add_library(dpx_plugin SHARED)
+
+if(dpx_plugin_SOURCES)
+	target_sources(dpx_plugin PRIVATE ${dpx_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${dpx_plugin_SOURCES})
+
+target_compile_features(dpx_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(dpx_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(dpx_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(dpx_plugin PROPERTIES
+	OUTPUT_NAME
+		DPXPlugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target sdk-test
 set(CMKR_TARGET sdk-test)
 set(sdk-test_SOURCES "")
