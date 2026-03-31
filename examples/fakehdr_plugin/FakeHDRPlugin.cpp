@@ -24,8 +24,8 @@ UEVR plugin wrapper: MIT license
 Original shader:
 HDR by Christian Cann Schuldt Jensen ~ CeeJay.dk
 Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/FakeHDR.fx
-(part of crosire/reshade-shaders, public domain / Unlicense)
-Not actual HDR - It just tries to mimic an HDR look.
+From the crosire/reshade-shaders community collection. No explicit license
+was provided in the original file or repository.
 */
 
 #include <memory>
@@ -172,7 +172,7 @@ public:
     float m_hdr_power = DEFAULT_HDR_POWER;
     float m_radius1   = DEFAULT_RADIUS1;
     float m_radius2   = DEFAULT_RADIUS2;
-    bool  m_enabled   = true;
+    bool  m_enabled   = false;
 
     // D3D11 effect resources
     ComPtr<ID3D11DeviceContext>      m_dx11_ctx;

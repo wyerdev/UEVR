@@ -25,7 +25,7 @@ for pair in \
   fi
 done
 
-# Deploy plugin DLLs
+# Deploy plugin DLLs and their license files
 PLUGIN_SRC="$SCRIPT_DIR/build/Release"
 PLUGIN_DST="$UEVR_DATA/uevr/Plugins"
 mkdir -p "$PLUGIN_DST"
@@ -33,6 +33,15 @@ for dll in "$PLUGIN_SRC"/*Plugin.dll; do
   if [[ -f "$dll" ]]; then
     cp -f "$dll" "$PLUGIN_DST/"
     echo "  Copied plugin $(basename "$dll")"
+    ((COPIED++))
+  fi
+done
+
+# Deploy per-plugin license files
+for lic in "$SCRIPT_DIR"/examples/*/*-LICENSE.txt; do
+  if [[ -f "$lic" ]]; then
+    cp -f "$lic" "$PLUGIN_DST/"
+    echo "  Copied $(basename "$lic")"
     ((COPIED++))
   fi
 done

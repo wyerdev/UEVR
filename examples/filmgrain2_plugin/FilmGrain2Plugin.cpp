@@ -234,7 +234,7 @@ public:
     float m_color_amount = DEFAULT_COLOR_AMOUNT;
     float m_lum_amount   = DEFAULT_LUM_AMOUNT;
     float m_grain_size   = DEFAULT_GRAIN_SIZE;
-    bool  m_enabled      = true;
+    bool  m_enabled      = false;
 
     // D3D11 effect resources
     ComPtr<ID3D11DeviceContext>      m_dx11_ctx;

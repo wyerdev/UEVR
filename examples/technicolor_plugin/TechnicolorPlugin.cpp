@@ -14,7 +14,8 @@ Technicolor2 version 1.0
 Original by Prod80
 Optimized by CeeJay.dk
 Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/Technicolor2.fx
-(part of crosire/reshade-shaders, public domain / Unlicense)
+From the crosire/reshade-shaders community collection. No explicit license
+was provided in the original file or repository.
 */
 
 #include <memory>
@@ -140,7 +141,7 @@ public:
     float m_neg_g    = DEFAULT_NEG_G;
     float m_neg_b    = DEFAULT_NEG_B;
     float m_strength = DEFAULT_STRENGTH;
-    bool  m_enabled  = true;
+    bool  m_enabled  = false;
 
     // DX11
     ComPtr<ID3D11DeviceContext>      m_dx11_ctx;

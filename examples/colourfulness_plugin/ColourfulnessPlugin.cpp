@@ -208,7 +208,7 @@ public:
     bool  m_enable_dither = false;
     bool  m_col_noise     = true;
     float m_bb_bits       = DEFAULT_BB_BITS;
-    bool  m_enabled       = true;
+    bool  m_enabled       = false;
 
     // D3D11 effect resources
     ComPtr<ID3D11DeviceContext>      m_dx11_ctx;

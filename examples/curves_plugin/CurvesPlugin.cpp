@@ -15,7 +15,8 @@ UEVR plugin wrapper: MIT license
 Original shader:
 Curves by Christian Cann Schuldt Jensen ~ CeeJay.dk
 Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/Curves.fx
-(part of crosire/reshade-shaders, public domain / Unlicense)
+From the crosire/reshade-shaders community collection. No explicit license
+was provided in the original file or repository.
 */
 
 #include <memory>
@@ -209,7 +210,7 @@ public:
     int   m_mode     = DEFAULT_MODE;
     int   m_formula  = DEFAULT_FORMULA;
     float m_contrast = DEFAULT_CONTRAST;
-    bool  m_enabled  = true;
+    bool  m_enabled  = false;
 
     // D3D11 effect resources
     ComPtr<ID3D11DeviceContext>        m_dx11_ctx;

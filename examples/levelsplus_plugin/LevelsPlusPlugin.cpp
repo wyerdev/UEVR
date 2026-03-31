@@ -18,7 +18,8 @@ Original shader licenses:
 Levels v1.8.3 by Christian Cann Schuldt Jensen ~ CeeJay.dk
 updated to 1.3+ by Kirill Yarovoy ~ v00d00m4n
 Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/LevelsPlus.fx
-(part of crosire/reshade-shaders, public domain / Unlicense)
+From the crosire/reshade-shaders community collection. No explicit license
+was provided for the Levels portion.
 
 ACES tonemapping code from Baking Lab by MJP and David Neubelt
 http://mynameismjp.wordpress.com/
@@ -256,7 +257,7 @@ public:
     float m_aces_lum[3] = { DEF_ACES_LUM[0], DEF_ACES_LUM[1], DEF_ACES_LUM[2] };
     bool  m_enable_levels = true;
     bool  m_highlight_clipping = false;
-    bool  m_enabled = true;
+    bool  m_enabled = false;
 
     // D3D11 effect resources
     ComPtr<ID3D11DeviceContext>      m_dx11_ctx;
