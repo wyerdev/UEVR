@@ -46,6 +46,23 @@ for lic in "$SCRIPT_DIR"/examples/*/*-LICENSE.txt; do
   fi
 done
 
+# Deploy shipping presets (skip if preset folder already exists to preserve user edits)
+PRESET_SRC="$SCRIPT_DIR/presets"
+PRESET_DST="$UEVR_DATA/uevr/presets"
+if [[ -d "$PRESET_SRC" ]]; then
+  mkdir -p "$PRESET_DST"
+  for preset_dir in "$PRESET_SRC"/*/; do
+    preset_name="$(basename "$preset_dir")"
+    if [[ ! -d "$PRESET_DST/$preset_name" ]]; then
+      cp -r "$preset_dir" "$PRESET_DST/$preset_name"
+      echo "  Deployed preset: $preset_name"
+      ((COPIED++))
+    else
+      echo "  Preset already exists (skipped): $preset_name"
+    fi
+  done
+fi
+
 LOG="$UEVR_DATA/CreaturesOfAva-Win64-Shipping/log.txt"
 if [[ -f "$LOG" ]]; then
   rm "$LOG"

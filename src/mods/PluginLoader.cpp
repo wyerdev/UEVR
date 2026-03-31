@@ -1,8 +1,10 @@
 #include <filesystem>
+#include <fstream>
 
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
+#include <ShlObj.h>
 #include <openvr.h>
 
 #include "Framework.hpp"
@@ -1997,16 +1999,6 @@ void PluginLoader::on_draw_ui() {
         reload_plugins();
     }
 
-    if (!m_plugins.empty()) {
-        ImGui::Text("Loaded plugins:");
-
-        for (auto&& [name, _] : m_plugins) {
-            ImGui::Text(name.c_str());
-        }
-    } else {
-        ImGui::Text("No plugins loaded.");
-    }
-
     if (!m_plugin_load_errors.empty()) {
         ImGui::Spacing();
         ImGui::Text("Errors:");
@@ -2021,6 +2013,234 @@ void PluginLoader::on_draw_ui() {
         for (auto&& [name, warning] : m_plugin_load_warnings) {
             ImGui::Text("%s - %s", name.c_str(), warning.c_str());
         }
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    draw_preset_ui();
+
+    // Plugin status display — drawn AFTER preset UI so loading a preset refreshes immediately
+    if (!m_plugins.empty()) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::Text("Plugin status:");
+
+        const auto persistent_dir = Framework::get_persistent_dir();
+        for (auto&& [name, _] : m_plugins) {
+            // Derive settings filename from plugin DLL name:
+            // "01_LevelsPlusPlugin" → strip prefix digits/underscore → "LevelsPlusPlugin"
+            // → strip "Plugin" suffix → "LevelsPlus" → lowercase → "levelsplus_settings.txt"
+            std::string core = name;
+            // Strip leading digits and underscores (e.g. "01_")
+            size_t start = 0;
+            while (start < core.size() && (std::isdigit(core[start]) || core[start] == '_')) ++start;
+            core = core.substr(start);
+            // Strip "Plugin" suffix
+            const std::string suffix = "Plugin";
+            if (core.size() > suffix.size() && core.substr(core.size() - suffix.size()) == suffix) {
+                core = core.substr(0, core.size() - suffix.size());
+            }
+            // Lowercase
+            for (auto& c : core) c = (char)std::tolower(c);
+            auto settings_path = persistent_dir / (core + "_settings.txt");
+
+            bool is_enabled = false;
+            try {
+                std::ifstream f(settings_path);
+                if (f.is_open()) {
+                    int val = 0;
+                    if (f >> val) is_enabled = (val != 0);
+                }
+            } catch (...) {}
+
+            if (is_enabled) {
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "[ON]  %s", name.c_str());
+            } else {
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[OFF] %s", name.c_str());
+            }
+        }
+    } else {
+        ImGui::Text("No plugins loaded.");
+    }
+}
+
+std::filesystem::path PluginLoader::get_local_presets_dir() {
+    auto dir = Framework::get_persistent_dir() / "presets";
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+std::filesystem::path PluginLoader::get_global_presets_dir() {
+    wchar_t app_data_path[MAX_PATH]{};
+    SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
+    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "uevr" / "presets";
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+std::vector<std::string> PluginLoader::list_presets(const std::filesystem::path& dir) {
+    std::vector<std::string> result;
+    try {
+        if (!std::filesystem::exists(dir)) return result;
+        for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+            if (entry.is_directory()) {
+                result.push_back(entry.path().filename().string());
+            }
+        }
+        std::sort(result.begin(), result.end());
+    } catch (...) {}
+    return result;
+}
+
+bool PluginLoader::save_preset(const std::filesystem::path& presets_dir, const std::string& name) {
+    try {
+        auto preset_path = presets_dir / name;
+        std::filesystem::create_directories(preset_path);
+
+        const auto persistent_dir = Framework::get_persistent_dir();
+        int count = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(persistent_dir)) {
+            if (!entry.is_regular_file()) continue;
+            auto fname = entry.path().filename().string();
+            if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
+                std::filesystem::copy_file(entry.path(), preset_path / fname, std::filesystem::copy_options::overwrite_existing);
+                ++count;
+            }
+        }
+
+        m_preset_status = "Saved \"" + name + "\" (" + std::to_string(count) + " files)";
+        spdlog::info("[PluginLoader] Saved preset '{}' with {} settings files to {}", name, count, preset_path.string());
+        return true;
+    } catch (const std::exception& e) {
+        m_preset_status = std::string("Save failed: ") + e.what();
+        spdlog::error("[PluginLoader] Failed to save preset '{}': {}", name, e.what());
+        return false;
+    }
+}
+
+bool PluginLoader::load_preset(const std::filesystem::path& preset_path) {
+    try {
+        const auto persistent_dir = Framework::get_persistent_dir();
+        int count = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(preset_path)) {
+            if (!entry.is_regular_file()) continue;
+            auto fname = entry.path().filename().string();
+            if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
+                std::filesystem::copy_file(entry.path(), persistent_dir / fname, std::filesystem::copy_options::overwrite_existing);
+                ++count;
+            }
+        }
+
+        auto name = preset_path.filename().string();
+        m_preset_status = "Loaded \"" + name + "\" (" + std::to_string(count) + " files) - reloading plugins...";
+        spdlog::info("[PluginLoader] Loaded preset '{}' ({} files), reloading plugins", name, count);
+
+        attempt_unload_plugins();
+        reload_plugins();
+
+        m_preset_status = "Loaded \"" + name + "\" (" + std::to_string(count) + " files)";
+        return true;
+    } catch (const std::exception& e) {
+        m_preset_status = std::string("Load failed: ") + e.what();
+        spdlog::error("[PluginLoader] Failed to load preset: {}", e.what());
+        return false;
+    }
+}
+
+bool PluginLoader::delete_preset(const std::filesystem::path& preset_path) {
+    try {
+        auto name = preset_path.filename().string();
+        std::filesystem::remove_all(preset_path);
+        m_preset_status = "Deleted \"" + name + "\"";
+        spdlog::info("[PluginLoader] Deleted preset '{}'", name);
+        return true;
+    } catch (const std::exception& e) {
+        m_preset_status = std::string("Delete failed: ") + e.what();
+        return false;
+    }
+}
+
+void PluginLoader::draw_preset_ui() {
+    if (ImGui::CollapsingHeader("Plugin Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Auto-name helper: finds next available "Preset N" name
+        auto next_auto_name = [](const std::filesystem::path& presets_dir) -> std::string {
+            for (int i = 1; i < 1000; ++i) {
+                auto name = "Preset " + std::to_string(i);
+                if (!std::filesystem::exists(presets_dir / name)) {
+                    return name;
+                }
+            }
+            return "Preset";
+        };
+
+        // Quick Save buttons (gamepad-friendly, no typing needed)
+        if (ImGui::Button("Quick Save Local")) {
+            auto dir = get_local_presets_dir();
+            auto name = next_auto_name(dir);
+            save_preset(dir, name);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Quick Save Global")) {
+            auto dir = get_global_presets_dir();
+            auto name = next_auto_name(dir);
+            save_preset(dir, name);
+        }
+
+        ImGui::Spacing();
+        ImGui::InputText("Preset Name", m_preset_name_buf, sizeof(m_preset_name_buf));
+
+        const bool has_name = m_preset_name_buf[0] != '\0';
+
+        if (!has_name) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button("Save Local")) {
+            save_preset(get_local_presets_dir(), m_preset_name_buf);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Save Global")) {
+            save_preset(get_global_presets_dir(), m_preset_name_buf);
+        }
+        if (!has_name) {
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("(enter a name or use Quick Save)");
+        }
+
+        if (!m_preset_status.empty()) {
+            ImGui::TextWrapped("%s", m_preset_status.c_str());
+        }
+
+        auto draw_preset_list = [&](const char* section_label, const std::filesystem::path& presets_dir) {
+            auto presets = list_presets(presets_dir);
+            if (presets.empty()) {
+                ImGui::TextDisabled("  (none)");
+                return;
+            }
+            for (const auto& name : presets) {
+                ImGui::PushID((section_label + name).c_str());
+                if (ImGui::Button("Load")) {
+                    load_preset(presets_dir / name);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Delete")) {
+                    delete_preset(presets_dir / name);
+                }
+                ImGui::SameLine();
+                ImGui::Text("%s", name.c_str());
+                ImGui::PopID();
+            }
+        };
+
+        ImGui::Spacing();
+        ImGui::Text("Local Presets (this game):");
+        draw_preset_list("local_", get_local_presets_dir());
+
+        ImGui::Spacing();
+        ImGui::Text("Global Presets (all games):");
+        draw_preset_list("global_", get_global_presets_dir());
     }
 }
 

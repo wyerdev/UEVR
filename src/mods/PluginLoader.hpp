@@ -222,6 +222,17 @@ private:
     std::map<std::string, std::string> m_plugin_load_warnings{};
     std::string m_current_loading_plugin{};
 
+    // Preset system
+    char m_preset_name_buf[128]{};
+    std::string m_preset_status{};
+    void draw_preset_ui();
+    std::filesystem::path get_local_presets_dir();
+    std::filesystem::path get_global_presets_dir();
+    std::vector<std::string> list_presets(const std::filesystem::path& dir);
+    bool save_preset(const std::filesystem::path& presets_dir, const std::string& name);
+    bool load_preset(const std::filesystem::path& preset_path);
+    bool delete_preset(const std::filesystem::path& preset_path);
+
     struct InlineHookState {
         InlineHookState(safetyhook::InlineHook&& hook)
             : hook{std::move(hook)}
