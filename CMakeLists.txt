@@ -460,7 +460,7 @@ target_link_libraries(fakehdr_plugin PUBLIC
 
 set_target_properties(fakehdr_plugin PROPERTIES
 	OUTPUT_NAME
-		FakeHDRPlugin
+		05_FakeHDRPlugin
 )
 
 unset(CMKR_TARGET)
@@ -502,7 +502,7 @@ target_link_libraries(curves_plugin PUBLIC
 
 set_target_properties(curves_plugin PROPERTIES
 	OUTPUT_NAME
-		CurvesPlugin
+		04_CurvesPlugin
 )
 
 unset(CMKR_TARGET)
@@ -544,7 +544,7 @@ target_link_libraries(technicolor_plugin PUBLIC
 
 set_target_properties(technicolor_plugin PROPERTIES
 	OUTPUT_NAME
-		TechnicolorPlugin
+		07_TechnicolorPlugin
 )
 
 unset(CMKR_TARGET)
@@ -586,7 +586,7 @@ target_link_libraries(filmgrain2_plugin PUBLIC
 
 set_target_properties(filmgrain2_plugin PROPERTIES
 	OUTPUT_NAME
-		FilmGrain2Plugin
+		10_FilmGrain2Plugin
 )
 
 unset(CMKR_TARGET)
@@ -628,7 +628,7 @@ target_link_libraries(levelsplus_plugin PUBLIC
 
 set_target_properties(levelsplus_plugin PROPERTIES
 	OUTPUT_NAME
-		LevelsPlusPlugin
+		01_LevelsPlusPlugin
 )
 
 unset(CMKR_TARGET)
@@ -670,7 +670,7 @@ target_link_libraries(colourfulness_plugin PUBLIC
 
 set_target_properties(colourfulness_plugin PROPERTIES
 	OUTPUT_NAME
-		ColourfulnessPlugin
+		08_ColourfulnessPlugin
 )
 
 unset(CMKR_TARGET)
@@ -712,7 +712,7 @@ target_link_libraries(liftgammagain_plugin PUBLIC
 
 set_target_properties(liftgammagain_plugin PROPERTIES
 	OUTPUT_NAME
-		LiftGammaGainPlugin
+		02_LiftGammaGainPlugin
 )
 
 unset(CMKR_TARGET)
@@ -754,7 +754,7 @@ target_link_libraries(vibrance_plugin PUBLIC
 
 set_target_properties(vibrance_plugin PROPERTIES
 	OUTPUT_NAME
-		VibrancePlugin
+		09_VibrancePlugin
 )
 
 unset(CMKR_TARGET)
@@ -796,7 +796,7 @@ target_link_libraries(tonemap_plugin PUBLIC
 
 set_target_properties(tonemap_plugin PROPERTIES
 	OUTPUT_NAME
-		TonemapPlugin
+		03_TonemapPlugin
 )
 
 unset(CMKR_TARGET)
@@ -838,7 +838,7 @@ target_link_libraries(dpx_plugin PUBLIC
 
 set_target_properties(dpx_plugin PROPERTIES
 	OUTPUT_NAME
-		DPXPlugin
+		06_DPXPlugin
 )
 
 unset(CMKR_TARGET)

@@ -162,7 +162,7 @@ sources = ["examples/fakehdr_plugin/FakeHDRPlugin.cpp"]
 headers = ["examples/fakehdr_plugin/**.hpp", "examples/fakehdr_plugin/**.h"]
 
 [target.fakehdr_plugin.properties]
-OUTPUT_NAME = "FakeHDRPlugin"
+OUTPUT_NAME = "05_FakeHDRPlugin"
 
 [target.curves_plugin]
 type = "plugin"
@@ -170,7 +170,7 @@ sources = ["examples/curves_plugin/CurvesPlugin.cpp"]
 headers = ["examples/curves_plugin/**.hpp", "examples/curves_plugin/**.h"]
 
 [target.curves_plugin.properties]
-OUTPUT_NAME = "CurvesPlugin"
+OUTPUT_NAME = "04_CurvesPlugin"
 
 [target.technicolor_plugin]
 type = "plugin"
@@ -178,7 +178,7 @@ sources = ["examples/technicolor_plugin/TechnicolorPlugin.cpp"]
 headers = ["examples/technicolor_plugin/**.hpp", "examples/technicolor_plugin/**.h"]
 
 [target.technicolor_plugin.properties]
-OUTPUT_NAME = "TechnicolorPlugin"
+OUTPUT_NAME = "07_TechnicolorPlugin"
 
 [target.filmgrain2_plugin]
 type = "plugin"
@@ -186,7 +186,7 @@ sources = ["examples/filmgrain2_plugin/FilmGrain2Plugin.cpp"]
 headers = ["examples/filmgrain2_plugin/**.hpp", "examples/filmgrain2_plugin/**.h"]
 
 [target.filmgrain2_plugin.properties]
-OUTPUT_NAME = "FilmGrain2Plugin"
+OUTPUT_NAME = "10_FilmGrain2Plugin"
 
 [target.levelsplus_plugin]
 type = "plugin"
@@ -194,7 +194,7 @@ sources = ["examples/levelsplus_plugin/LevelsPlusPlugin.cpp"]
 headers = ["examples/levelsplus_plugin/**.hpp", "examples/levelsplus_plugin/**.h"]
 
 [target.levelsplus_plugin.properties]
-OUTPUT_NAME = "LevelsPlusPlugin"
+OUTPUT_NAME = "01_LevelsPlusPlugin"
 
 [target.colourfulness_plugin]
 type = "plugin"
@@ -202,7 +202,7 @@ sources = ["examples/colourfulness_plugin/ColourfulnessPlugin.cpp"]
 headers = ["examples/colourfulness_plugin/**.hpp", "examples/colourfulness_plugin/**.h"]
 
 [target.colourfulness_plugin.properties]
-OUTPUT_NAME = "ColourfulnessPlugin"
+OUTPUT_NAME = "08_ColourfulnessPlugin"
 
 [target.liftgammagain_plugin]
 type = "plugin"
@@ -210,7 +210,7 @@ sources = ["examples/liftgammagain_plugin/LiftGammaGainPlugin.cpp"]
 headers = ["examples/liftgammagain_plugin/**.hpp", "examples/liftgammagain_plugin/**.h"]
 
 [target.liftgammagain_plugin.properties]
-OUTPUT_NAME = "LiftGammaGainPlugin"
+OUTPUT_NAME = "02_LiftGammaGainPlugin"
 
 [target.vibrance_plugin]
 type = "plugin"
@@ -218,7 +218,7 @@ sources = ["examples/vibrance_plugin/VibrancePlugin.cpp"]
 headers = ["examples/vibrance_plugin/**.hpp", "examples/vibrance_plugin/**.h"]
 
 [target.vibrance_plugin.properties]
-OUTPUT_NAME = "VibrancePlugin"
+OUTPUT_NAME = "09_VibrancePlugin"
 
 [target.tonemap_plugin]
 type = "plugin"
@@ -226,7 +226,7 @@ sources = ["examples/tonemap_plugin/TonemapPlugin.cpp"]
 headers = ["examples/tonemap_plugin/**.hpp", "examples/tonemap_plugin/**.h"]
 
 [target.tonemap_plugin.properties]
-OUTPUT_NAME = "TonemapPlugin"
+OUTPUT_NAME = "03_TonemapPlugin"
 
 [target.dpx_plugin]
 type = "plugin"
@@ -234,7 +234,7 @@ sources = ["examples/dpx_plugin/DPXPlugin.cpp"]
 headers = ["examples/dpx_plugin/**.hpp", "examples/dpx_plugin/**.h"]
 
 [target.dpx_plugin.properties]
-OUTPUT_NAME = "DPXPlugin"
+OUTPUT_NAME = "06_DPXPlugin"
 
 [target.sdk-test]
 type = "shared"
