@@ -1,8 +1,51 @@
-# FakeHDR VR Post-Process Plugin — Technical Documentation
+# VR Post-Processing Plugins — Technical Documentation
 
-A UEVR C++ plugin that applies CeeJay.dk's FakeHDR post-processing effect directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), this plugin modifies the UE render target **before** UEVR copies it to VR, so the effect is visible in-headset.
+10 UEVR C++ plugins that apply ReShade-based post-processing effects directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), these plugins modify the UE render target **before** UEVR copies it to VR, so effects are visible in-headset.
+
+The plugin architecture, DX11/DX12 rendering pipeline, and UEVR core API changes were designed for FakeHDR (CeeJay.dk's FakeHDR.fx) and are shared by all 10 plugins.
 
 Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and `on_draw_ui`) and several DX12 workarounds for UE's TYPELESS render targets and missing `ALLOW_RENDER_TARGET` flag.
+
+## Plugins
+
+| # | Plugin | Based On | Description |
+|---|--------|----------|-------------|
+| 01 | LevelsPlus | Levels.fx (prod80) | Black/white point, per-channel gamma, ACES tone mapping |
+| 02 | LiftGammaGain | LiftGammaGain.fx (prod80) | Shadow/midtone/highlight RGB lift, gamma, gain |
+| 03 | Tonemap | Tonemap.fx (prod80) | Gamma, exposure, saturation, bleach bypass, defog |
+| 04 | Curves | Curves.fx (CeeJay.dk) | Luma/chroma contrast S-curve with multiple formulas |
+| 05 | FakeHDR | FakeHDR.fx (CeeJay.dk) | Local tone mapping via dual-radius bloom |
+| 06 | DPX | DPX.fx (Loadus) | Cineon film stock color emulation |
+| 07 | Technicolor | Technicolor2.fx (prod80) | 2-strip Technicolor color grading |
+| 08 | Colourfulness | Colourfulness.fx (prod80) | Saturation enhancement with luma limiting |
+| 09 | Vibrance | Vibrance.fx (Jeanseb) | Intelligent saturation boost |
+| 10 | FilmGrain2 | FilmGrain2.fx (Martins Upitis) | Photographic film grain overlay |
+
+All plugins share the same architecture:
+- DX11 and DX12 dual-path rendering
+- 2-slot texture cache (copy + result) with `PointSampler` and fullscreen triangle vertex shader
+- Copy→draw pattern: copy scene to SRV texture, run pixel shader, copy result back
+- Runtime `D3DCompile` — no pre-compiled `.cso` files needed
+- ImGui settings panel in the UEVR menu sidebar (via `on_draw_ui` callback)
+- Auto-save settings per game to `%APPDATA%/UnrealVRMod/<game>/<name>_settings.txt`
+- All disabled by default (`m_enabled = false`)
+
+### Plugin Load Order
+
+Plugins are loaded in DLL name alphabetical order. Numeric prefixes (`01_` through `10_`) ensure:
+- Levels/color correction runs first (01–03)
+- Color grading effects run in the middle (04–09)
+- Film grain runs last (10)
+
+### Preset System
+
+The PluginLoader manages a preset system for saving/loading all plugin settings at once:
+- **Local presets**: `%APPDATA%/UnrealVRMod/<game>/presets/<name>/` — per-game
+- **Global presets**: `%APPDATA%/UnrealVRMod/uevr/presets/<name>/` — shared across games
+- Each preset folder contains copies of all `*_settings.txt` files
+- **Quick Save** buttons auto-generate names ("Preset 1", "Preset 2", ...) for gamepad-only VR sessions
+- **Plugin status display** shows `[ON]`/`[OFF]` per plugin, updates live after preset load
+- Ships with 6 built-in presets (All Off, VR Fix - Black Levels, VR Essentials, Cinematic, Vivid, HDR Look)
 
 ## Problem Statement
 
@@ -393,18 +436,30 @@ The plugin implements `on_device_reset()` which calls `release_effect_resources(
 ## File Layout
 
 ```
-examples/fakehdr_plugin/
-    FakeHDRPlugin.cpp        — Complete plugin (~720 lines)
+examples/
+    colourfulness_plugin/    — ColourfulnessPlugin.cpp + LICENSE
+    curves_plugin/           — CurvesPlugin.cpp + LICENSE
+    dpx_plugin/              — DPXPlugin.cpp + LICENSE
+    fakehdr_plugin/          — FakeHDRPlugin.cpp + README.md + LICENSE + shaders/
+    filmgrain2_plugin/       — FilmGrain2Plugin.cpp + LICENSE
+    levelsplus_plugin/       — LevelsPlusPlugin.cpp + LICENSE
+    liftgammagain_plugin/    — LiftGammaGainPlugin.cpp + LICENSE
+    technicolor_plugin/      — TechnicolorPlugin.cpp + LICENSE
+    tonemap_plugin/          — TonemapPlugin.cpp + LICENSE
+    vibrance_plugin/         — VibrancePlugin.cpp + LICENSE
+
+presets/                     — Shipping presets (6 folders, 10 settings files each)
 
 include/uevr/
     API.h                    — Pre-render + draw_ui callback types added to C API
     Plugin.hpp               — Pre-render + draw_ui virtual methods + registration
 
 src/
+    Framework.cpp            — Sidebar alignment (left-aligned + sub-entry indentation)
     Mod.hpp                  — Virtual method stubs
     mods/
-        PluginLoader.hpp     — Storage + dispatch declarations
-        PluginLoader.cpp     — Namespace functions + dispatch + add_ implementations + on_draw_ui dispatch + SEH wrapper
+        PluginLoader.hpp     — Storage + dispatch + preset system declarations
+        PluginLoader.cpp     — Plugin dispatch + preset save/load/delete + Quick Save + status display + on_draw_ui
         VR.cpp               — Resource state bracketing + RT validation gate + dispatch loop
         vr/
             D3D12Component.hpp — prepare/restore_plugin_rt API + plugin command context
@@ -413,21 +468,28 @@ src/
                 CommandContext.cpp  — SEH-wrapped execute + recover + discard
                 TextureContext.cpp  — update_texture() for in-place heap reuse
 
-cmake.toml                   — [target.fakehdr_plugin] with type = "plugin"
+cmake.toml                   — All 10 plugin targets with numeric-prefixed OUTPUT_NAMEs
+deploy.sh                    — Build deployment script (DLLs + plugins + licenses + presets)
 ```
 
 ## Build
 
 ```bash
+# Build a single plugin
 cmake --build build --config Release --target fakehdr_plugin
-```
 
-Output: `build/Release/FakeHDRPlugin.dll`
+# Build all plugins (targets defined in cmake.toml)
+cmake --build build --config Release
 
-Deploy to: `<game_profile>/plugins/FakeHDRPlugin.dll`
-
-The UEVR core (`UEVRBackend.dll`) must also be rebuilt if the pre-render callback API changes are not already present:
-
-```bash
+# Rebuild UEVR core (needed if API headers changed)
 cmake --build build --config Release --target uevr --clean-first
 ```
+
+Output: `build/Release/01_LevelsPlusPlugin.dll` through `build/Release/10_FilmGrain2Plugin.dll`
+
+Deploy plugins + licenses + presets:
+```bash
+bash deploy.sh
+```
+
+Plugins are deployed to `%APPDATA%/UnrealVRMod/uevr/Plugins/`. Shipping presets are deployed to `%APPDATA%/UnrealVRMod/uevr/presets/` (only if the preset folder doesn't already exist, to preserve user edits).

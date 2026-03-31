@@ -47,3 +47,18 @@ cmake --build ./build --config Release --target uevr
 4. When "Select a kit" appears, select `Visual Studio Community 2022 Release - amd64`
 5. Select the desired build config (usually `Release` or `RelWithDebInfo`)
 6. You should now be able to compile UEVR by pressing `Ctrl+Shift+P` and selecting `CMake: Build` or by pressing `F7`
+### Building plugins
+
+The 10 post-processing plugins are defined in `cmake.toml` and built alongside UEVR:
+
+```
+cmake --build ./build --config Release --target fakehdr_plugin
+```
+
+Or build all targets at once. Plugin DLLs are output to `build/Release/` with numeric prefixes (e.g. `05_FakeHDRPlugin.dll`).
+
+To deploy plugins, licenses, and shipping presets:
+
+```bash
+bash deploy.sh
+```

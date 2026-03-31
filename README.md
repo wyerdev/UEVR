@@ -1,13 +1,80 @@
+
 # UEVR (Patched Fork)
 
-This is a patched fork of [praydog's UEVR](https://github.com/praydog/UEVR) with the following fixes:
+Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix washed-out colors and grey blacks in VR.
+
+**Credits:** 
+- Built on [praydog's UEVR](https://github.com/praydog/UEVR) ([Original UEVR README below](#original-uevr-readme)). 
+- Shaders ported from ReShade originals by CeeJay.dk, prod80, Loadus, Martins Upitis, and Jeanseb ([license files](examples/)).
+
+
+
+## [How to Install](docs/INSTALL.md)
+
+## What's New in This Fork
+
+### Crash Fixes
 
 - Fix crashes in Creatures of Ava — [technical details](docs/native-stereo-crash-handler.md)
 - Fix crashes on death in Returnal — [technical details](docs/transition-crash-handler.md)
 
-**How to use:** Download the matching [UEVR Nightly](https://github.com/praydog/UEVR-nightly/releases), then overwrite with files from [this fork's releases](https://github.com/wyerdev/UEVR/releases).
+### 10 ReShade Post-Processing Plugins
+
+VR headsets often show washed-out colors and grey blacks compared to a flat monitor. This fork includes 10 ReShade shaders re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
+
+| # | Plugin | Based On | What It Does |
+|---|--------|----------|--------------|
+| 01 | LevelsPlus | Levels.fx (prod80) | Black/white point, per-channel gamma — **fixes grey/washed-out blacks** |
+| 02 | LiftGammaGain | LiftGammaGain.fx (prod80) | Shadow/midtone/highlight RGB lift, gamma, gain |
+| 03 | Tonemap | Tonemap.fx (prod80) | Gamma, exposure, saturation, bleach bypass, defog |
+| 04 | Curves | Curves.fx (CeeJay.dk) | Luma/chroma contrast S-curve |
+| 05 | FakeHDR | FakeHDR.fx (CeeJay.dk) | Local tone mapping via dual-radius bloom — [technical docs](docs/fakehdr-vr-postprocess-plugin.md) |
+| 06 | DPX | DPX.fx (Loadus) | Cineon film stock color emulation |
+| 07 | Technicolor | Technicolor2.fx (prod80) | 2-strip Technicolor color grading |
+| 08 | Colourfulness | Colourfulness.fx (prod80) | Saturation enhancement with luma limiting |
+| 09 | Vibrance | Vibrance.fx (Jeanseb) | Intelligent saturation boost |
+| 10 | FilmGrain2 | FilmGrain2.fx (Martins Upitis) | Photographic film grain overlay |
+
+All plugins are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Plugins are loaded in numeric order (01→10): levels/color correction first, grain last. Settings are saved per-game automatically.
+
+### Presets
+
+Don't want to configure each plugin manually? Load a preset instead:
+
+| Preset | What It Enables | Best For |
+|--------|----------------|----------|
+| **All Off** | Nothing | Reset everything back to defaults |
+| **VR Fix - Black Levels** | LevelsPlus | Quick fix for grey/washed-out blacks |
+| **VR Essentials** | LevelsPlus + Vibrance | Black fix + subtle color boost |
+| **Cinematic** | LevelsPlus + Tonemap + Curves + DPX | Warm, film-like look |
+| **Vivid** | LevelsPlus + Vibrance + Colourfulness | Punchy, saturated colors |
+| **HDR Look** | LevelsPlus + FakeHDR + Colourfulness | Local tone mapping + enhanced color |
+
+You can also save your own presets — **per-game** (local) or **shared across all games** (global). Use the **Quick Save** buttons if you're in VR with a gamepad and can't type a name.
+
+### Other Improvements
+
+- Left-aligned sidebar entries with sub-entry indentation
 
 ---
+
+## Building Plugins
+
+```bash
+cmake --build build --config Release --target <plugin_name>
+```
+
+Or build the full project. Plugin DLLs output to `build/Release/`. Deploy to `%APPDATA%/UnrealVRMod/uevr/Plugins/`.
+
+### Licenses
+
+Each plugin includes a LICENSE.txt crediting the original ReShade shader author. All original shaders are open source (BSD, MIT, or public domain). See individual files in `examples/*/`.
+
+---
+
+# Original UEVR README
+
+> Everything below is the original README from [praydog/UEVR](https://github.com/praydog/UEVR).
 
 # UEVR ![build](https://github.com/praydog/UEVR/actions/workflows/dev-release.yml/badge.svg)
 

@@ -37,36 +37,33 @@ files needed.
 ## Parameters
 
 | Parameter | Default | Description |
-|-----------|---------|-------------|
-| HDRPower  | 1.30    | Strength of the HDR tonemapping curve |
-| Radius1   | 0.793   | Inner bloom sample radius |
-| Radius2   | 0.87    | Outer bloom sample radius (higher = stronger + brighter) |
+| Parameter | Default | Range | Description |
+|-----------|---------|-------|-------------|
+| HDR Power | 1.30 | 0.0 – 8.0 | Strength of the HDR tonemapping curve |
+| Radius 1 | 0.793 | 0.0 – 8.0 | Inner bloom sample radius |
+| Radius 2 | 0.87 | 0.0 – 8.0 | Outer bloom sample radius (higher = stronger + brighter) |
 
-To change these, modify `m_hdr_power`, `m_radius1`, `m_radius2` in the plugin
-source and rebuild. A future version could expose these via UEVR's ImGui overlay.
+All parameters are adjustable at runtime via the UEVR menu (Insert key → FakeHDR sidebar entry).
+Settings are auto-saved per game to `fakehdr_settings.txt`.
 
 ## Building
 
 The plugin is built as part of the UEVR project:
 
 ```bash
-cmake -B build -G "Visual Studio 18 2026" -A x64
+cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release --target fakehdr_plugin
 ```
 
-Output: `build/Release/FakeHDRPlugin.dll`
+Output: `build/Release/05_FakeHDRPlugin.dll`
 
 ## Installation
 
-1. Copy `FakeHDRPlugin.dll` to your UEVR game profile's `plugins/` folder
+1. Copy `05_FakeHDRPlugin.dll` to `%APPDATA%/UnrealVRMod/uevr/Plugins/`
 2. Launch the game with UEVR
-3. FakeHDR is applied automatically to both eyes
+3. Open UEVR menu (Insert or L3+R3) → FakeHDR sidebar entry → Enable
 
-## Limitations
-
-- **D3D11 only** — D3D12 support is stubbed but not yet implemented
-- Parameters are compile-time constants (no runtime UI yet)
-- The effect is a simple 8-tap bloom approximation, not true HDR tonemapping
+This plugin is one of 10 ReShade-ported post-processing plugins. See the [main README](../../README.md) and [technical docs](../../docs/fakehdr-vr-postprocess-plugin.md) for the full suite.
 
 ## Credits
 
