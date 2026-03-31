@@ -1,31 +1,41 @@
 /*
-FakeHDR Plugin for UEVR
-=======================
-A UEVR C++ plugin that applies a FakeHDR post-processing effect to VR frames.
-Based on CeeJay.dk's FakeHDR ReShade effect.
+Colourfulness Plugin for UEVR
+==============================
+A UEVR C++ plugin that applies bacondither's Colourfulness effect to VR frames.
+Attempt to increase or decrease colourfulness/saturation in a perceptually
+uniform way, using a weighted power mean to soft-limit saturation changes
+and prevent clipping.
 
-The effect is applied to the UE4 scene render target in on_pre_render_vr_framework
-(both DX11 and DX12), which fires just BEFORE UEVR copies the render target to
-VR eye textures.  This ensures the effect is visible in both the VR headset and
-desktop mirror.
-
-Includes an ImGui settings panel with enable/disable, parameter sliders, reset.
-
-v1.1.0: DX11 path now applies effect to the UE4 scene render target (via
-         StereoHook API) instead of the swapchain backbuffer.  Handles typeless
-         texture formats for RTV/SRV creation.
-v1.0.9: UEVR core now handles resource state management (ENGINE_SRC_COLOR ↔ RENDER_TARGET
-         bracketing), SEH crash protection, RT validation, and command list lifecycle.
-         The plugin just records GPU commands on UEVR's command list — no crash protection
-         or synchronisation code needed on the plugin side.
+Applied to the UE4 scene render target in on_pre_render_vr_framework (DX11/DX12).
 
 UEVR plugin wrapper: MIT license
 
-Original shader:
-HDR by Christian Cann Schuldt Jensen ~ CeeJay.dk
-Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/FakeHDR.fx
-(part of crosire/reshade-shaders, public domain / Unlicense)
-Not actual HDR - It just tries to mimic an HDR look.
+Original shader license (BSD 2-Clause):
+Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/Colourfulness.fx
+
+Copyright (c) 2016-2018, bacondither
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer
+   in this position and unchanged.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <memory>
@@ -51,10 +61,10 @@ using namespace uevr;
 template<typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
 // ============================================================================
-// Embedded HLSL source (compiled at runtime via D3DCompile)
+// Embedded HLSL source
 // ============================================================================
 
-static const char* g_fakehdr_vs_src = R"(
+static const char* g_colourfulness_vs_src = R"(
 struct VSOutput {
     float4 Position : SV_Position;
     float2 TexCoord : TEXCOORD0;
@@ -68,74 +78,103 @@ VSOutput main(uint vertexID : SV_VertexID) {
 }
 )";
 
-static const char* g_fakehdr_ps_src = R"(
-cbuffer HDRParams : register(b0) {
-    float HDRPower;
-    float Radius1;
-    float Radius2;
-    float BloomMip;   // mip level for bloom samples (0=full, 1=half, 2=quarter)
-    float2 PixelSize;
-    float2 _Pad1;
+// Faithful port of bacondither's Colourfulness v2018-11-12
+// Using fast_luma=1 path (rapid approx of sRGB gamma)
+// Dithering controlled via CB bools; temporal_dither disabled (no random uniform in plugin)
+static const char* g_colourfulness_ps_src = R"(
+cbuffer ColourParams : register(b0) {
+    float Colourfulness;   // -1.0 to 2.0, 0 = neutral
+    float LimLuma;         // 0.1 to 1.0
+    int   EnableDither;    // 0 or 1
+    int   ColNoise;        // 0 or 1 (coloured dither noise)
+    float BackbufferBits;  // typically 8 or 10
+    float3 _pad0;
 };
 
 Texture2D SceneTexture : register(t0);
-SamplerState LinearSampler : register(s0);
+SamplerState PointSampler : register(s0);
 
 struct PSInput {
     float4 Position : SV_Position;
     float2 TexCoord : TEXCOORD0;
 };
 
-float4 main(PSInput input) : SV_Target {
-    float2 tc = input.TexCoord;
-    float3 color = SceneTexture.SampleLevel(LinearSampler, tc, 0).rgb;
+// Sigmoid function
+float3 soft_lim(float3 v, float3 s)
+{
+    return (v * s) * rsqrt(s * s + v * v);
+}
 
-    float bm = BloomMip;
-    float3 bloom1 = 0;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 1.5, -1.5) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-1.5, -1.5) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 1.5,  1.5) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-1.5,  1.5) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 0.0, -2.5) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 0.0,  2.5) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-2.5,  0.0) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 2.5,  0.0) * Radius1 * PixelSize, bm).rgb;
-    bloom1 *= 0.005;
+// Weighted power mean, p = 0.5
+float3 wpmean(float3 a, float3 b, float w)
+{
+    float3 sa = sqrt(abs(a));
+    float3 sb = sqrt(abs(b));
+    return pow(abs(abs(w) * sa + abs(1.0 - w) * sb), 2.0);
+}
 
-    float3 bloom2 = 0;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 1.5, -1.5) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-1.5, -1.5) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 1.5,  1.5) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-1.5,  1.5) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 0.0, -2.5) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 0.0,  2.5) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-2.5,  0.0) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 2.5,  0.0) * Radius2 * PixelSize, bm).rgb;
-    bloom2 *= 0.010;
+// Mean of Rec. 709 & 601 luma coefficients
+static const float3 lumacoeff = float3(0.2558, 0.6511, 0.0931);
 
-    float dist = Radius2 - Radius1;
-    float3 HDR = (color + (bloom2 - bloom1)) * dist;
-    float3 blend = HDR + color;
-    color = pow(abs(blend), abs(HDRPower)) + HDR;
-    return float4(saturate(color), 1.0);
+float4 main(PSInput input) : SV_Target
+{
+    float4 vpos = input.Position;
+
+    // fast_luma path
+    float3 c0 = SceneTexture.Sample(PointSampler, input.TexCoord).rgb;
+    float luma = sqrt(dot(saturate(c0 * abs(c0)), lumacoeff));
+    c0 = saturate(c0);
+
+    // Calc colour saturation change
+    float3 diff_luma = c0 - luma;
+    float3 c_diff = diff_luma * (Colourfulness + 1.0) - diff_luma;
+
+    if (Colourfulness > 0.0)
+    {
+        // 120% of c_diff clamped to max visible range + overshoot
+        float3 rlc_diff = clamp((c_diff * 1.2) + c0, -0.0001, 1.0001) - c0;
+
+        // Calc max saturation-increase without altering RGB ratios
+        float3 ad = abs(diff_luma);
+        float maxC = max(ad.r, max(ad.g, ad.b));
+        float minC = min(ad.r, min(ad.g, ad.b));
+
+        float poslim = (1.0002 - luma) / (maxC + 0.0001);
+        float neglim = (luma + 0.0002) / (minC + 0.0001);
+
+        float3 diffmax = diff_luma * min(min(poslim, neglim), 32.0) - diff_luma;
+
+        // Soft limit diff
+        c_diff = soft_lim(c_diff, max(wpmean(diffmax, rlc_diff, LimLuma), 1e-7));
+    }
+
+    if (EnableDither)
+    {
+        // Interleaved gradient noise by Jorge Jimenez
+        const float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
+        float xy_magic = vpos.x * magic.x + vpos.y * magic.y;
+        float noise = (frac(magic.z * frac(xy_magic)) - 0.5) / (exp2(BackbufferBits) - 1.0);
+        c_diff += ColNoise ? float3(-noise, noise, -noise) : noise;
+    }
+
+    return float4(saturate(c0 + c_diff), 1.0);
 }
 )";
 
 // ============================================================================
-// Constant buffer layout (must match HLSL cbuffer HDRParams)
+// Constant buffer layout (must match HLSL cbuffer ColourParams)
 // ============================================================================
-struct HDRParamsCB {
-    float HDRPower;
-    float Radius1;
-    float Radius2;
-    float BloomMip;   // 0=full res, 1=half res, 2=quarter (DX11 uses mipped bloom)
-    float PixelSizeX;
-    float PixelSizeY;
-    float _pad1[2];
+struct ColourParamsCB {
+    float Colourfulness;
+    float LimLuma;
+    int   EnableDither;
+    int   ColNoise;
+    float BackbufferBits;
+    float _pad0[3];
 };
 
 // ============================================================================
-// Helper: resolve TYPELESS formats to typed equivalents for views/PSOs
+// Helper: resolve TYPELESS formats
 // ============================================================================
 static DXGI_FORMAT resolve_typeless_format(DXGI_FORMAT fmt) {
     switch (fmt) {
@@ -151,28 +190,25 @@ static DXGI_FORMAT resolve_typeless_format(DXGI_FORMAT fmt) {
     }
 }
 
-static bool is_typeless_format(DXGI_FORMAT fmt) {
-    return resolve_typeless_format(fmt) != fmt;
-}
-
 // ============================================================================
 // Default parameter values
 // ============================================================================
-static constexpr float DEFAULT_HDR_POWER = 1.30f;
-static constexpr float DEFAULT_RADIUS1   = 0.793f;
-static constexpr float DEFAULT_RADIUS2   = 0.87f;
-static constexpr const char* FAKEHDR_VERSION = "1.1.0";
+static constexpr float DEFAULT_COLOURFULNESS  = 0.4f;
+static constexpr float DEFAULT_LIM_LUMA       = 0.7f;
+static constexpr float DEFAULT_BB_BITS        = 10.0f;  // R10G10B10A2 in UEVR
+static constexpr const char* COLOURFULNESS_VERSION = "1.0.0";
 
 // ============================================================================
-// FakeHDR Plugin
+// Colourfulness Plugin
 // ============================================================================
-class FakeHDRPlugin : public uevr::Plugin {
+class ColourfulnessPlugin : public uevr::Plugin {
 public:
-    // Tunable parameters
-    float m_hdr_power = DEFAULT_HDR_POWER;
-    float m_radius1   = DEFAULT_RADIUS1;
-    float m_radius2   = DEFAULT_RADIUS2;
-    bool  m_enabled   = true;
+    float m_colourfulness = DEFAULT_COLOURFULNESS;
+    float m_lim_luma      = DEFAULT_LIM_LUMA;
+    bool  m_enable_dither = false;
+    bool  m_col_noise     = true;
+    float m_bb_bits       = DEFAULT_BB_BITS;
+    bool  m_enabled       = true;
 
     // D3D11 effect resources
     ComPtr<ID3D11DeviceContext>      m_dx11_ctx;
@@ -181,10 +217,9 @@ public:
     ComPtr<ID3D11Buffer>             m_cb;
     ComPtr<ID3D11SamplerState>       m_sampler;
     bool m_shader_ready = false;
-    bool m_dx11_logged_flags = false;  // diagnostic: log RT bind flags once
-    bool m_dx11_first_apply_logged = false;  // diagnostic: log first successful effect apply
+    bool m_dx11_logged_flags = false;
+    bool m_dx11_first_apply_logged = false;
 
-    // DX11 per-target state — cached by texture dimensions (2-slot cache like DX12)
     struct DX11TargetState {
         ComPtr<ID3D11Texture2D>          copy_tex;
         ComPtr<ID3D11ShaderResourceView> copy_srv;
@@ -209,7 +244,7 @@ public:
             if (ts.width == w && ts.height == h) {
                 if (!ts.cache_hit_logged) {
                     ts.cache_hit_logged = true;
-                    API::get()->log_info("[FakeHDR] DX11 cache hit: slot %d (%ux%u)", (int)i, w, h);
+                    API::get()->log_info("[Colourfulness] DX11 cache hit: slot %d (%ux%u)", (int)i, w, h);
                 }
                 return ts;
             }
@@ -220,18 +255,15 @@ public:
         return m_dx11_targets[1];
     }
 
-    // DX12 effect resources — shared across targets
+    // DX12 effect resources
     ComPtr<ID3D12RootSignature>  m_dx12_root_sig;
     ComPtr<ID3D12PipelineState>  m_dx12_pso;
     ComPtr<ID3D12Resource>       m_dx12_cb;
 
-    // Per-target state — cached by texture dimensions so the plugin can be
-    // called multiple times per frame (e.g. UEVR dispatches once per eye source)
-    // without recreating GPU resources every time.
     struct DX12TargetState {
-        ComPtr<ID3D12Resource>       copy_tex;    // SRV input (scene snapshot)
+        ComPtr<ID3D12Resource>       copy_tex;
         ComPtr<ID3D12DescriptorHeap> srv_heap;
-        ComPtr<ID3D12DescriptorHeap> rtv_heap;    // RTV written per-frame on native target
+        ComPtr<ID3D12DescriptorHeap> rtv_heap;
         UINT width  = 0;
         UINT height = 0;
 
@@ -245,26 +277,22 @@ public:
     DX12TargetState m_dx12_targets[MAX_TARGET_STATES];
 
     DX12TargetState& find_target_state(UINT w, UINT h) {
-        // Exact size match?
         for (auto& ts : m_dx12_targets)
             if (ts.width == w && ts.height == h) return ts;
-        // Empty slot?
         for (auto& ts : m_dx12_targets)
             if (ts.width == 0) return ts;
-        // Evict second slot
         m_dx12_targets[1].reset();
         return m_dx12_targets[1];
     }
 
-    // DX12 pipeline state (device-level, created once)
     bool m_dx12_ready = false;
-    HDRParamsCB* m_dx12_cb_mapped = nullptr;
+    ColourParamsCB* m_dx12_cb_mapped = nullptr;
     DXGI_FORMAT m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
 
     void on_dllmain() override {}
 
     void on_initialize() override {
-        API::get()->log_info("[FakeHDR] Plugin initialized");
+        API::get()->log_info("[Colourfulness] Plugin initialized");
         load_settings();
     }
 
@@ -272,14 +300,15 @@ public:
     // Settings persistence
     // ========================================================================
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir(L"fakehdr_settings.txt");
+        return API::get()->get_persistent_dir(L"colourfulness_settings.txt");
     }
 
     void save_settings() {
         try {
             std::ofstream f(get_settings_path());
             if (f.is_open()) {
-                f << m_enabled << "\n" << m_hdr_power << "\n" << m_radius1 << "\n" << m_radius2 << "\n";
+                f << m_enabled << "\n" << m_colourfulness << "\n" << m_lim_luma << "\n"
+                  << m_enable_dither << "\n" << m_col_noise << "\n" << m_bb_bits << "\n";
             }
         } catch (...) {}
     }
@@ -288,53 +317,72 @@ public:
         try {
             std::ifstream f(get_settings_path());
             if (f.is_open()) {
-                int enabled_int;
-                if (f >> enabled_int >> m_hdr_power >> m_radius1 >> m_radius2) {
+                int enabled_int, dither_int, colnoise_int;
+                if (f >> enabled_int >> m_colourfulness >> m_lim_luma
+                      >> dither_int >> colnoise_int >> m_bb_bits)
+                {
                     m_enabled = (enabled_int != 0);
-                    API::get()->log_info("[FakeHDR] Loaded settings: enabled=%d power=%.2f r1=%.3f r2=%.3f",
-                        m_enabled, m_hdr_power, m_radius1, m_radius2);
+                    m_enable_dither = (dither_int != 0);
+                    m_col_noise = (colnoise_int != 0);
+                    m_colourfulness = max(-1.0f, min(2.0f, m_colourfulness));
+                    m_lim_luma = max(0.1f, min(1.0f, m_lim_luma));
+                    m_bb_bits = max(1.0f, min(32.0f, m_bb_bits));
+                    API::get()->log_info("[Colourfulness] Loaded settings: enabled=%d colour=%.2f lim=%.2f dither=%d",
+                        m_enabled, m_colourfulness, m_lim_luma, m_enable_dither);
                 }
             }
         } catch (...) {}
     }
 
     // ========================================================================
-    // on_draw_ui: draw settings inside the UEVR menu (Plugins page)
+    // Helper: fill CB data
+    // ========================================================================
+    void fill_cb(ColourParamsCB* p) {
+        p->Colourfulness = m_colourfulness;
+        p->LimLuma = m_lim_luma;
+        p->EnableDither = m_enable_dither ? 1 : 0;
+        p->ColNoise = m_col_noise ? 1 : 0;
+        p->BackbufferBits = m_bb_bits;
+        p->_pad0[0] = 0; p->_pad0[1] = 0; p->_pad0[2] = 0;
+    }
+
+    // ========================================================================
+    // on_draw_ui
     // ========================================================================
     void on_draw_ui() override {
-        if (ImGui::CollapsingHeader("FakeHDR Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", FAKEHDR_VERSION);
+        if (ImGui::CollapsingHeader("Colourfulness Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextDisabled("v%s", COLOURFULNESS_VERSION);
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);
+            changed |= ImGui::SliderFloat("Colourfulness", &m_colourfulness, -1.0f, 2.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Degree of colourfulness, 0 = neutral");
+            changed |= ImGui::SliderFloat("Luma Limiter", &m_lim_luma, 0.1f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lower values allow more change near clipping");
 
-            constexpr float step = 0.01f;
-            constexpr float step_fast = 0.1f;
-            changed |= ImGui::InputFloat("HDR Power", &m_hdr_power, step, step_fast, "%.2f");
-            changed |= ImGui::InputFloat("Radius 1",  &m_radius1,   step, step_fast, "%.3f");
-            changed |= ImGui::InputFloat("Radius 2",  &m_radius2,   step, step_fast, "%.3f");
-
-            // Clamp values
-            m_hdr_power = (m_hdr_power < 0.0f) ? 0.0f : (m_hdr_power > 8.0f) ? 8.0f : m_hdr_power;
-            m_radius1   = (m_radius1   < 0.0f) ? 0.0f : (m_radius1   > 8.0f) ? 8.0f : m_radius1;
-            m_radius2   = (m_radius2   < 0.0f) ? 0.0f : (m_radius2   > 8.0f) ? 8.0f : m_radius2;
+            ImGui::Separator();
+            ImGui::Text("Dither");
+            changed |= ImGui::Checkbox("Enable Dither", &m_enable_dither);
+            if (m_enable_dither) {
+                changed |= ImGui::Checkbox("Coloured Noise", &m_col_noise);
+                changed |= ImGui::SliderFloat("Backbuffer Bits", &m_bb_bits, 1.0f, 32.0f, "%.0f");
+            }
 
             if (ImGui::Button("Reset to Defaults")) {
-                m_hdr_power = DEFAULT_HDR_POWER;
-                m_radius1   = DEFAULT_RADIUS1;
-                m_radius2   = DEFAULT_RADIUS2;
+                m_colourfulness = DEFAULT_COLOURFULNESS;
+                m_lim_luma = DEFAULT_LIM_LUMA;
+                m_enable_dither = false;
+                m_col_noise = true;
+                m_bb_bits = DEFAULT_BB_BITS;
                 changed = true;
             }
 
-            if (changed) {
-                save_settings();
-            }
+            if (changed) save_settings();
         }
     }
 
     // ========================================================================
-    // on_pre_render_vr_framework_dx12: apply FakeHDR to UE render target
-    // BEFORE UEVR copies it to VR eye textures
+    // on_pre_render_vr_framework_dx12
     // ========================================================================
     void on_pre_render_vr_framework_dx12() override {
         if (!m_enabled) return;
@@ -351,9 +399,6 @@ public:
         auto desc = native->GetDesc();
         if (desc.Width == 0 || desc.Height == 0) return;
 
-        // Process every valid callback — UEVR dispatches twice per frame
-        // with native stereo (once per eye RT). find_target_state handles
-        // size-based caching so each size gets its own GPU resources.
         auto device = (ID3D12Device*)renderer_data->device;
         const auto resolved_format = resolve_typeless_format(desc.Format);
 
@@ -367,18 +412,8 @@ public:
         auto cmd = (ID3D12GraphicsCommandList*)API::StereoHook::get_pre_render_command_list();
         if (!cmd) return;
 
-        // Update CB
-        if (m_dx12_cb_mapped) {
-            m_dx12_cb_mapped->HDRPower = m_hdr_power;
-            m_dx12_cb_mapped->Radius1 = m_radius1;
-            m_dx12_cb_mapped->Radius2 = m_radius2;
-            m_dx12_cb_mapped->BloomMip = 0.0f;  // DX12: full-res bloom (no perf issue)
-            m_dx12_cb_mapped->PixelSizeX = 1.0f / (float)ts.width;
-            m_dx12_cb_mapped->PixelSizeY = 1.0f / (float)ts.height;
-            m_dx12_cb_mapped->_pad1[0] = 0; m_dx12_cb_mapped->_pad1[1] = 0;
-        }
+        if (m_dx12_cb_mapped) fill_cb(m_dx12_cb_mapped);
 
-        // Step 1: Copy target -> copy_tex (for SRV sampling)
         D3D12_RESOURCE_BARRIER barriers[2]{};
         barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barriers[0].Transition.pResource = native;
@@ -393,7 +428,6 @@ public:
         cmd->ResourceBarrier(2, barriers);
         cmd->CopyResource(ts.copy_tex.Get(), native);
 
-        // Transition back: target -> RENDER_TARGET, copy_tex -> SRV
         barriers[0].Transition.pResource = native;
         barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
         barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -402,13 +436,11 @@ public:
         barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         cmd->ResourceBarrier(2, barriers);
 
-        // Step 2: Create RTV on native target (CPU descriptor write — essentially free)
         D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{};
         rtv_desc.Format = resolved_format;
         rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
         device->CreateRenderTargetView(native, &rtv_desc, ts.rtv_heap->GetCPUDescriptorHandleForHeapStart());
 
-        // Draw FakeHDR: read copy_tex (SRV) -> write native (RTV) — no hazard, different resources
         cmd->SetPipelineState(m_dx12_pso.Get());
         cmd->SetGraphicsRootSignature(m_dx12_root_sig.Get());
         cmd->SetGraphicsRootConstantBufferView(0, m_dx12_cb->GetGPUVirtualAddress());
@@ -423,9 +455,11 @@ public:
         cmd->RSSetScissorRects(1, &scissor);
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         cmd->DrawInstanced(3, 1, 0, 0);
-        // native left in RENDER_TARGET state — exactly what UEVR expects
     }
 
+    // ========================================================================
+    // on_pre_render_vr_framework_dx11
+    // ========================================================================
     void on_pre_render_vr_framework_dx11() override {
         if (!m_enabled) return;
 
@@ -438,50 +472,25 @@ public:
         auto native = (ID3D11Texture2D*)scene_rt->get_native_resource();
         if (!native) return;
 
-        apply_fakehdr_to_resource_dx11(native);
+        apply_colourfulness_to_resource_dx11(native);
     }
 
-    // ========================================================================
-    // on_present: no longer needed (UI is in UEVR menu now)
-    // ========================================================================
-    void on_present() override {
-    }
-
-    // ========================================================================
-    // on_pre_engine_tick: nothing to do (UI drawn by UEVR menu)
-    // ========================================================================
-    void on_pre_engine_tick(API::UGameEngine* engine, float delta) override {
-    }
+    void on_present() override {}
+    void on_pre_engine_tick(API::UGameEngine* engine, float delta) override {}
 
     void on_device_reset() override {
-        API::get()->log_info("[FakeHDR] Device reset");
+        API::get()->log_info("[Colourfulness] Device reset");
         release_effect_resources();
     }
 
-    // ========================================================================
-    // VR eye overlay: not used (effect is applied in pre-render)
-    // ========================================================================
     void on_post_render_vr_framework_dx11(
-        ID3D11DeviceContext* context,
-        ID3D11Texture2D* texture,
-        ID3D11RenderTargetView* rtv) override
-    {
-    }
-
+        ID3D11DeviceContext* context, ID3D11Texture2D* texture, ID3D11RenderTargetView* rtv) override {}
     void on_post_render_vr_framework_dx12(
-        ID3D12GraphicsCommandList* command_list,
-        ID3D12Resource* rt,
-        D3D12_CPU_DESCRIPTOR_HANDLE* rtv) override
-    {
-    }
+        ID3D12GraphicsCommandList* command_list, ID3D12Resource* rt, D3D12_CPU_DESCRIPTOR_HANDLE* rtv) override {}
 
 private:
 
-    // ========================================================================
-    // Resource cleanup
-    // ========================================================================
     void release_effect_resources() {
-        // DX11
         m_dx11_ctx.Reset();
         m_vs.Reset(); m_ps.Reset(); m_cb.Reset(); m_sampler.Reset();
         for (auto& ts : m_dx11_targets) ts.reset();
@@ -489,38 +498,39 @@ private:
         m_dx11_logged_flags = false;
         m_dx11_first_apply_logged = false;
 
-        // DX12 — only device-level resources to release.
-        // No command infrastructure to drain (UEVR owns the command list).
         m_dx12_pso.Reset(); m_dx12_root_sig.Reset(); m_dx12_cb.Reset();
         for (auto& ts : m_dx12_targets) ts.reset();
         m_dx12_ready = false; m_dx12_cb_mapped = nullptr; m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
     }
 
     // ========================================================================
-    // DX11: Apply FakeHDR to UE4 scene render target
+    // DX11
     // ========================================================================
     bool init_shaders_dx11(ID3D11Device* device) {
         if (!device) return false;
 
         ComPtr<ID3DBlob> vs_blob, vs_err;
-        if (FAILED(D3DCompile(g_fakehdr_vs_src, strlen(g_fakehdr_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vs_blob, &vs_err))) return false;
+        if (FAILED(D3DCompile(g_colourfulness_vs_src, strlen(g_colourfulness_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vs_blob, &vs_err))) return false;
         ComPtr<ID3DBlob> ps_blob, ps_err;
-        if (FAILED(D3DCompile(g_fakehdr_ps_src, strlen(g_fakehdr_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &ps_blob, &ps_err))) return false;
+        if (FAILED(D3DCompile(g_colourfulness_ps_src, strlen(g_colourfulness_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &ps_blob, &ps_err))) {
+            if (ps_err) API::get()->log_error("[Colourfulness] PS compile: %s", (const char*)ps_err->GetBufferPointer());
+            return false;
+        }
 
         if (FAILED(device->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &m_vs))) return false;
         if (FAILED(device->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &m_ps))) return false;
 
-        D3D11_BUFFER_DESC cb_desc{}; cb_desc.ByteWidth = sizeof(HDRParamsCB);
+        D3D11_BUFFER_DESC cb_desc{}; cb_desc.ByteWidth = sizeof(ColourParamsCB);
         cb_desc.Usage = D3D11_USAGE_DYNAMIC; cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cb_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         if (FAILED(device->CreateBuffer(&cb_desc, nullptr, &m_cb))) return false;
 
-        D3D11_SAMPLER_DESC sd{}; sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        D3D11_SAMPLER_DESC sd{}; sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
         sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
         sd.ComparisonFunc = D3D11_COMPARISON_NEVER; sd.MaxLOD = D3D11_FLOAT32_MAX;
         if (FAILED(device->CreateSamplerState(&sd, &m_sampler))) return false;
 
         m_shader_ready = true;
-        API::get()->log_info("[FakeHDR] DX11 shaders ready");
+        API::get()->log_info("[Colourfulness] DX11 shaders ready");
         return true;
     }
 
@@ -542,11 +552,11 @@ private:
         if (FAILED(device->CreateShaderResourceView(ts.copy_tex.Get(), &svd, &ts.copy_srv))) { ts.reset(); return false; }
 
         ts.width = src_desc.Width; ts.height = src_desc.Height;
-        API::get()->log_info("[FakeHDR] DX11 copy texture created: %ux%u", ts.width, ts.height);
+        API::get()->log_info("[Colourfulness] DX11 copy texture created: %ux%u", ts.width, ts.height);
         return true;
     }
 
-    void apply_fakehdr_to_resource_dx11(ID3D11Texture2D* target) {
+    void apply_colourfulness_to_resource_dx11(ID3D11Texture2D* target) {
         const auto rd = API::get()->param()->renderer;
         auto device = (ID3D11Device*)rd->device;
         if (!device || !target) return;
@@ -555,12 +565,11 @@ private:
         target->GetDesc(&target_desc);
         if (target_desc.Width == 0 || target_desc.Height == 0) return;
 
-        // Log bind flags once for diagnostics
         if (!m_dx11_logged_flags) {
             m_dx11_logged_flags = true;
-            API::get()->log_info("[FakeHDR] DX11 RT: %ux%u fmt=%u bind=0x%x misc=0x%x",
+            API::get()->log_info("[Colourfulness] DX11 RT: %ux%u fmt=%u bind=0x%x",
                 target_desc.Width, target_desc.Height, target_desc.Format,
-                target_desc.BindFlags, target_desc.MiscFlags);
+                target_desc.BindFlags);
         }
 
         if (!m_dx11_ctx) device->GetImmediateContext(&m_dx11_ctx);
@@ -571,7 +580,6 @@ private:
         auto& ts = find_dx11_target_state(target_desc.Width, target_desc.Height);
         if (!ensure_dx11_copy_texture(device, target, ts)) return;
 
-        // Cache RTV — recreate only when the underlying texture changes
         if (ts.rtv_tex != target) {
             ts.rtv.Reset();
             const auto resolved_fmt = resolve_typeless_format(target_desc.Format);
@@ -585,11 +593,7 @@ private:
 
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (SUCCEEDED(ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-            auto* p = static_cast<HDRParamsCB*>(mapped.pData);
-            p->HDRPower = m_hdr_power; p->Radius1 = m_radius1; p->Radius2 = m_radius2;
-            p->BloomMip = 0.0f;
-            p->PixelSizeX = 1.0f / (float)ts.width; p->PixelSizeY = 1.0f / (float)ts.height;
-            p->_pad1[0] = 0; p->_pad1[1] = 0;
+            fill_cb(static_cast<ColourParamsCB*>(mapped.pData));
             ctx->Unmap(m_cb.Get(), 0);
         }
 
@@ -610,7 +614,7 @@ private:
 
         if (!m_dx11_first_apply_logged) {
             m_dx11_first_apply_logged = true;
-            API::get()->log_info("[FakeHDR] DX11 effect applied: %ux%u", ts.width, ts.height);
+            API::get()->log_info("[Colourfulness] DX11 effect applied: %ux%u", ts.width, ts.height);
         }
 
         ID3D11ShaderResourceView* null_srv = nullptr;
@@ -618,16 +622,14 @@ private:
     }
 
     // ========================================================================
-    // DX12: Apply FakeHDR to UE4 scene render target
+    // DX12
     // ========================================================================
     bool init_dx12_pipeline(ID3D12Device* device, DXGI_FORMAT rt_format) {
         if (m_dx12_ready) return true;
         if (!device) return false;
 
-        // Resolve TYPELESS formats — can't use them for PSO RTVFormats or view creation
         rt_format = resolve_typeless_format(rt_format);
 
-        // Root signature
         D3D12_DESCRIPTOR_RANGE1 srv_range{};
         srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         srv_range.NumDescriptors = 1;
@@ -644,7 +646,7 @@ private:
         rp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_STATIC_SAMPLER_DESC ss{};
-        ss.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        ss.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
         ss.AddressU = ss.AddressV = ss.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         ss.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
         ss.MaxLOD = D3D12_FLOAT32_MAX;
@@ -657,17 +659,18 @@ private:
 
         ComPtr<ID3DBlob> sig_blob, sig_err;
         if (FAILED(D3D12SerializeVersionedRootSignature(&rsd, &sig_blob, &sig_err))) {
-            if (sig_err) API::get()->log_error("[FakeHDR DX12] Root sig: %s", (const char*)sig_err->GetBufferPointer());
+            if (sig_err) API::get()->log_error("[Colourfulness DX12] Root sig: %s", (const char*)sig_err->GetBufferPointer());
             return false;
         }
         if (FAILED(device->CreateRootSignature(0, sig_blob->GetBufferPointer(), sig_blob->GetBufferSize(), IID_PPV_ARGS(&m_dx12_root_sig)))) return false;
 
-        // Shaders
         ComPtr<ID3DBlob> vsb, vse, psb, pse;
-        if (FAILED(D3DCompile(g_fakehdr_vs_src, strlen(g_fakehdr_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
-        if (FAILED(D3DCompile(g_fakehdr_ps_src, strlen(g_fakehdr_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) return false;
+        if (FAILED(D3DCompile(g_colourfulness_vs_src, strlen(g_colourfulness_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
+        if (FAILED(D3DCompile(g_colourfulness_ps_src, strlen(g_colourfulness_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) {
+            if (pse) API::get()->log_error("[Colourfulness DX12] PS compile: %s", (const char*)pse->GetBufferPointer());
+            return false;
+        }
 
-        // PSO
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
         pd.pRootSignature = m_dx12_root_sig.Get();
         pd.VS = { vsb->GetBufferPointer(), vsb->GetBufferSize() };
@@ -682,11 +685,10 @@ private:
         pd.SampleDesc.Count = 1;
 
         if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_dx12_pso)))) {
-            API::get()->log_error("[FakeHDR DX12] PSO failed for format %u", (unsigned)rt_format);
+            API::get()->log_error("[Colourfulness DX12] PSO failed for format %u", (unsigned)rt_format);
             return false;
         }
 
-        // CB (upload heap, persistently mapped)
         D3D12_HEAP_PROPERTIES uh{}; uh.Type = D3D12_HEAP_TYPE_UPLOAD;
         D3D12_RESOURCE_DESC cbd{}; cbd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
         cbd.Width = 256; cbd.Height = 1; cbd.DepthOrArraySize = 1; cbd.MipLevels = 1;
@@ -695,12 +697,9 @@ private:
                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_dx12_cb)))) return false;
         m_dx12_cb->Map(0, nullptr, (void**)&m_dx12_cb_mapped);
 
-        // No command allocators, command list, fence, or queue needed —
-        // UEVR provides the command list via get_pre_render_command_list().
-
         m_dx12_rt_format = rt_format;
         m_dx12_ready = true;
-        API::get()->log_info("[FakeHDR DX12] Pipeline ready (format %u)", (unsigned)rt_format);
+        API::get()->log_info("[Colourfulness DX12] Pipeline ready (format %u)", (unsigned)rt_format);
         return true;
     }
 
@@ -712,36 +711,31 @@ private:
         const auto resolved_fmt = resolve_typeless_format(sd.Format);
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-        // Only need copy_tex — we render directly to the native target (no intermediate result_tex)
         D3D12_RESOURCE_DESC copy_desc = sd;
         copy_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
         copy_desc.Format = resolved_fmt;
         if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &copy_desc,
                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&ts.copy_tex)))) {
-            API::get()->log_error("[FakeHDR DX12] Failed to create copy texture");
+            API::get()->log_error("[Colourfulness DX12] Failed to create copy texture");
             return false;
         }
 
-        // SRV heap
         D3D12_DESCRIPTOR_HEAP_DESC shd{}; shd.NumDescriptors = 1;
         shd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; shd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(device->CreateDescriptorHeap(&shd, IID_PPV_ARGS(&ts.srv_heap)))) { ts.reset(); return false; }
 
-        // RTV heap (descriptor written per-frame on native target)
         D3D12_DESCRIPTOR_HEAP_DESC rhd{}; rhd.NumDescriptors = 1; rhd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         if (FAILED(device->CreateDescriptorHeap(&rhd, IID_PPV_ARGS(&ts.rtv_heap)))) { ts.reset(); return false; }
 
-        // SRV for copy texture
         D3D12_SHADER_RESOURCE_VIEW_DESC svd{};
         svd.Format = resolved_fmt;
         svd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         svd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         svd.Texture2D.MipLevels = 1;
         device->CreateShaderResourceView(ts.copy_tex.Get(), &svd, ts.srv_heap->GetCPUDescriptorHandleForHeapStart());
-        // RTV descriptor written per-frame in render function
 
         ts.width = (UINT)sd.Width; ts.height = sd.Height;
-        API::get()->log_info("[FakeHDR DX12] Copy texture ready: %ux%u fmt %u", ts.width, ts.height, (unsigned)resolved_fmt);
+        API::get()->log_info("[Colourfulness DX12] Copy texture ready: %ux%u fmt %u", ts.width, ts.height, (unsigned)resolved_fmt);
         return true;
     }
 };
@@ -749,4 +743,4 @@ private:
 // ============================================================================
 // Plugin entry point
 // ============================================================================
-std::unique_ptr<FakeHDRPlugin> g_plugin{new FakeHDRPlugin()};
+std::unique_ptr<ColourfulnessPlugin> g_plugin{new ColourfulnessPlugin()};

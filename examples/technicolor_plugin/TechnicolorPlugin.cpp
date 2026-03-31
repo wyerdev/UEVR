@@ -1,14 +1,20 @@
 /*
 Technicolor Plugin for UEVR
 ============================
-A UEVR C++ plugin that applies DKT70's Technicolor effect (optimized by CeeJay.dk).
+A UEVR C++ plugin that applies Prod80's Technicolor effect (optimized by CeeJay.dk).
 Simulates a two-strip technicolor process using cyan/magenta/yellow filters.
 
 Applied to the UE4 scene render target in on_pre_render_vr_framework (DX11/DX12),
 which fires BEFORE UEVR copies the render target to VR eye textures.
 
-License: MIT (same as UEVR example plugins)
-Original shader: Technicolor.fx by DKT70, optimized by CeeJay.dk
+UEVR plugin wrapper: MIT license
+
+Original shader:
+Technicolor2 version 1.0
+Original by Prod80
+Optimized by CeeJay.dk
+Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/Technicolor2.fx
+(part of crosire/reshade-shaders, public domain / Unlicense)
 */
 
 #include <memory>

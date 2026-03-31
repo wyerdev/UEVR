@@ -1,31 +1,30 @@
 /*
-FakeHDR Plugin for UEVR
-=======================
-A UEVR C++ plugin that applies a FakeHDR post-processing effect to VR frames.
-Based on CeeJay.dk's FakeHDR ReShade effect.
+LevelsPlus Plugin for UEVR
+===========================
+A UEVR C++ plugin that applies LevelsPlus post-processing to VR frames.
+Based on CeeJay.dk's Levels v1.8.3 with ACES tonemapping by MJP/Stephen Hill.
 
-The effect is applied to the UE4 scene render target in on_pre_render_vr_framework
-(both DX11 and DX12), which fires just BEFORE UEVR copies the render target to
-VR eye textures.  This ensures the effect is visible in both the VR headset and
-desktop mirror.
+Features:
+- RGB input/output black & white points with gamma
+- Color range shift (for TV→PC range expansion)
+- Three ACES tonemapping modes
+- Highlight clipping visualisation (debug)
 
-Includes an ImGui settings panel with enable/disable, parameter sliders, reset.
-
-v1.1.0: DX11 path now applies effect to the UE4 scene render target (via
-         StereoHook API) instead of the swapchain backbuffer.  Handles typeless
-         texture formats for RTV/SRV creation.
-v1.0.9: UEVR core now handles resource state management (ENGINE_SRC_COLOR ↔ RENDER_TARGET
-         bracketing), SEH crash protection, RT validation, and command list lifecycle.
-         The plugin just records GPU commands on UEVR's command list — no crash protection
-         or synchronisation code needed on the plugin side.
+Applied to the UE4 scene render target in on_pre_render_vr_framework (DX11/DX12).
 
 UEVR plugin wrapper: MIT license
 
-Original shader:
-HDR by Christian Cann Schuldt Jensen ~ CeeJay.dk
-Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/FakeHDR.fx
+Original shader licenses:
+Levels v1.8.3 by Christian Cann Schuldt Jensen ~ CeeJay.dk
+updated to 1.3+ by Kirill Yarovoy ~ v00d00m4n
+Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/LevelsPlus.fx
 (part of crosire/reshade-shaders, public domain / Unlicense)
-Not actual HDR - It just tries to mimic an HDR look.
+
+ACES tonemapping code from Baking Lab by MJP and David Neubelt
+http://mynameismjp.wordpress.com/
+All code licensed under the MIT license.
+The code was originally written by Stephen Hill (@self_shadow), who deserves all
+credit for coming up with this fit and implementing it.
 */
 
 #include <memory>
@@ -51,10 +50,10 @@ using namespace uevr;
 template<typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
 // ============================================================================
-// Embedded HLSL source (compiled at runtime via D3DCompile)
+// Embedded HLSL source
 // ============================================================================
 
-static const char* g_fakehdr_vs_src = R"(
+static const char* g_levelsplus_vs_src = R"(
 struct VSOutput {
     float4 Position : SV_Position;
     float2 TexCoord : TEXCOORD0;
@@ -68,74 +67,146 @@ VSOutput main(uint vertexID : SV_VertexID) {
 }
 )";
 
-static const char* g_fakehdr_ps_src = R"(
-cbuffer HDRParams : register(b0) {
-    float HDRPower;
-    float Radius1;
-    float Radius2;
-    float BloomMip;   // mip level for bloom samples (0=full, 1=half, 2=quarter)
-    float2 PixelSize;
-    float2 _Pad1;
+// Faithful port of CeeJay.dk LevelsPlus v1.8.3 + ACES by MJP/Stephen Hill
+static const char* g_levelsplus_ps_src = R"(
+cbuffer LevelsParams : register(b0) {
+    float3 InputBlackPoint;   float _pad0;
+    float3 InputWhitePoint;   float _pad1;
+    float3 InputGamma;        float _pad2;
+    float3 OutputBlackPoint;  float _pad3;
+    float3 OutputWhitePoint;  float _pad4;
+    float3 ColorRangeShift;   float ColorRangeShiftSw;
+    float3 ACESLumPct;        int ACESMode;      // 0=none, 1=old, 2=new, 3=fitted
+    int EnableLevels;         int HighlightClipping;
+    int2 _pad5;
 };
 
 Texture2D SceneTexture : register(t0);
-SamplerState LinearSampler : register(s0);
+SamplerState PointSampler : register(s0);
 
 struct PSInput {
     float4 Position : SV_Position;
     float2 TexCoord : TEXCOORD0;
 };
 
-float4 main(PSInput input) : SV_Target {
-    float2 tc = input.TexCoord;
-    float3 color = SceneTexture.SampleLevel(LinearSampler, tc, 0).rgb;
+// ---- ACES tonemapping ----
 
-    float bm = BloomMip;
-    float3 bloom1 = 0;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 1.5, -1.5) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-1.5, -1.5) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 1.5,  1.5) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-1.5,  1.5) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 0.0, -2.5) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 0.0,  2.5) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-2.5,  0.0) * Radius1 * PixelSize, bm).rgb;
-    bloom1 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 2.5,  0.0) * Radius1 * PixelSize, bm).rgb;
-    bloom1 *= 0.005;
+// sRGB => XYZ => D65_2_D60 => AP1 => RRT_SAT
+static const float3x3 ACESInputMat = float3x3(
+    0.59719, 0.35458, 0.04823,
+    0.07600, 0.90834, 0.01566,
+    0.02840, 0.13383, 0.83777
+);
 
-    float3 bloom2 = 0;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 1.5, -1.5) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-1.5, -1.5) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 1.5,  1.5) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-1.5,  1.5) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 0.0, -2.5) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 0.0,  2.5) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2(-2.5,  0.0) * Radius2 * PixelSize, bm).rgb;
-    bloom2 += SceneTexture.SampleLevel(LinearSampler, tc + float2( 2.5,  0.0) * Radius2 * PixelSize, bm).rgb;
-    bloom2 *= 0.010;
+// ODT_SAT => XYZ => D60_2_D65 => sRGB
+static const float3x3 ACESOutputMat = float3x3(
+     1.60475, -0.53108, -0.07367,
+    -0.10208,  1.10813, -0.00605,
+    -0.00327, -0.07276,  1.07602
+);
 
-    float dist = Radius2 - Radius1;
-    float3 HDR = (color + (bloom2 - bloom1)) * dist;
-    float3 blend = HDR + color;
-    color = pow(abs(blend), abs(HDRPower)) + HDR;
-    return float4(saturate(color), 1.0);
+float3 RRTAndODTFit(float3 v)
+{
+    float3 a = v * (v + 0.0245786f) - 0.000090537f;
+    float3 b = v * (0.983729f * v + 0.4329510f) + 0.238081f;
+    return a / b;
+}
+
+float3 ACESFitted(float3 color)
+{
+    color = mul(ACESInputMat, color);
+    color = RRTAndODTFit(color);
+    color = mul(ACESOutputMat, color);
+    color = saturate(color);
+    return color;
+}
+
+float3 ACESFilmRec2020old(float3 color)
+{
+    float Slope = 15.8f;
+    float Toe = 2.12f;
+    float Shoulder = 1.2f;
+    float BlackClip = 5.92f;
+    float WhiteClip = 1.9f;
+    color = color * ACESLumPct * 0.005f;
+    return (color * (Slope * color + Toe)) / (color * (Shoulder * color + BlackClip) + WhiteClip);
+}
+
+float3 ACESFilmRec2020(float3 color)
+{
+    float Slope = 0.98;
+    float Toe = 0.3;
+    float Shoulder = 0.22;
+    float BlackClip = 0;
+    float WhiteClip = 0.025;
+    color = color * ACESLumPct * 0.005f;
+    return (color * (Slope * color + Toe)) / (color * (Shoulder * color + BlackClip) + WhiteClip);
+}
+
+// ---- Main ----
+
+float4 main(PSInput input) : SV_Target
+{
+    float3 InputColor = SceneTexture.Sample(PointSampler, input.TexCoord).rgb;
+    float3 OutputColor = InputColor;
+
+    if (EnableLevels)
+    {
+        OutputColor = pow(
+            abs(((InputColor + (ColorRangeShift * ColorRangeShiftSw)) - InputBlackPoint)
+                / (InputWhitePoint - InputBlackPoint)),
+            InputGamma
+        ) * (OutputWhitePoint - OutputBlackPoint) + OutputBlackPoint;
+    }
+
+    if (ACESMode == 1)
+        OutputColor = ACESFilmRec2020old(OutputColor);
+    else if (ACESMode == 2)
+        OutputColor = ACESFilmRec2020(OutputColor);
+    else if (ACESMode == 3)
+        OutputColor = ACESFitted(OutputColor);
+
+    if (HighlightClipping)
+    {
+        float3 ClippedColor;
+
+        ClippedColor = any(OutputColor > saturate(OutputColor))
+            ? float3(1.0, 1.0, 0.0)
+            : OutputColor;
+        ClippedColor = all(OutputColor > saturate(OutputColor))
+            ? float3(1.0, 0.0, 0.0)
+            : ClippedColor;
+        ClippedColor = any(OutputColor < saturate(OutputColor))
+            ? float3(0.0, 1.0, 1.0)
+            : ClippedColor;
+        ClippedColor = all(OutputColor < saturate(OutputColor))
+            ? float3(0.0, 0.0, 1.0)
+            : ClippedColor;
+
+        OutputColor = ClippedColor;
+    }
+
+    return float4(saturate(OutputColor), 1.0);
 }
 )";
 
 // ============================================================================
-// Constant buffer layout (must match HLSL cbuffer HDRParams)
+// Constant buffer layout (must match HLSL cbuffer LevelsParams)
 // ============================================================================
-struct HDRParamsCB {
-    float HDRPower;
-    float Radius1;
-    float Radius2;
-    float BloomMip;   // 0=full res, 1=half res, 2=quarter (DX11 uses mipped bloom)
-    float PixelSizeX;
-    float PixelSizeY;
-    float _pad1[2];
+struct LevelsPlusCB {
+    float InputBlackPoint[3];   float _pad0;
+    float InputWhitePoint[3];   float _pad1;
+    float InputGamma[3];        float _pad2;
+    float OutputBlackPoint[3];  float _pad3;
+    float OutputWhitePoint[3];  float _pad4;
+    float ColorRangeShift[3];   float ColorRangeShiftSw;
+    float ACESLumPct[3];        int   ACESMode;
+    int   EnableLevels;         int   HighlightClipping;
+    int   _pad5[2];
 };
 
 // ============================================================================
-// Helper: resolve TYPELESS formats to typed equivalents for views/PSOs
+// Helper: resolve TYPELESS formats
 // ============================================================================
 static DXGI_FORMAT resolve_typeless_format(DXGI_FORMAT fmt) {
     switch (fmt) {
@@ -151,28 +222,41 @@ static DXGI_FORMAT resolve_typeless_format(DXGI_FORMAT fmt) {
     }
 }
 
-static bool is_typeless_format(DXGI_FORMAT fmt) {
-    return resolve_typeless_format(fmt) != fmt;
-}
+// ============================================================================
+// Default parameter values (from original shader)
+// ============================================================================
+static constexpr float DEF_IN_BLACK[3]  = { 16.0f/255.0f,  18.0f/255.0f,  20.0f/255.0f  };
+static constexpr float DEF_IN_WHITE[3]  = { 233.0f/255.0f, 222.0f/255.0f, 211.0f/255.0f };
+static constexpr float DEF_IN_GAMMA[3]  = { 1.0f, 1.0f, 1.0f };
+static constexpr float DEF_OUT_BLACK[3] = { 0.0f, 0.0f, 0.0f };
+static constexpr float DEF_OUT_WHITE[3] = { 1.0f, 1.0f, 1.0f };
+static constexpr float DEF_RANGE_SHIFT[3] = { 0.0f, 0.0f, 0.0f };
+static constexpr int   DEF_RANGE_SHIFT_SW = 0;
+static constexpr int   DEF_ACES_MODE = 0;
+static constexpr float DEF_ACES_LUM[3] = { 100.0f, 100.0f, 100.0f };
+
+static constexpr const char* LEVELSPLUS_VERSION = "1.0.0";
+static const char* g_aces_names[] = { "None", "ACES Old (Rec2020)", "ACES (Rec2020)", "ACES Fitted" };
+static const char* g_shift_names[] = { "Downshift (-1)", "Disabled (0)", "Upshift (+1)" };
 
 // ============================================================================
-// Default parameter values
+// LevelsPlus Plugin
 // ============================================================================
-static constexpr float DEFAULT_HDR_POWER = 1.30f;
-static constexpr float DEFAULT_RADIUS1   = 0.793f;
-static constexpr float DEFAULT_RADIUS2   = 0.87f;
-static constexpr const char* FAKEHDR_VERSION = "1.1.0";
-
-// ============================================================================
-// FakeHDR Plugin
-// ============================================================================
-class FakeHDRPlugin : public uevr::Plugin {
+class LevelsPlusPlugin : public uevr::Plugin {
 public:
     // Tunable parameters
-    float m_hdr_power = DEFAULT_HDR_POWER;
-    float m_radius1   = DEFAULT_RADIUS1;
-    float m_radius2   = DEFAULT_RADIUS2;
-    bool  m_enabled   = true;
+    float m_in_black[3]  = { DEF_IN_BLACK[0],  DEF_IN_BLACK[1],  DEF_IN_BLACK[2]  };
+    float m_in_white[3]  = { DEF_IN_WHITE[0],  DEF_IN_WHITE[1],  DEF_IN_WHITE[2]  };
+    float m_in_gamma[3]  = { DEF_IN_GAMMA[0],  DEF_IN_GAMMA[1],  DEF_IN_GAMMA[2]  };
+    float m_out_black[3] = { DEF_OUT_BLACK[0], DEF_OUT_BLACK[1], DEF_OUT_BLACK[2] };
+    float m_out_white[3] = { DEF_OUT_WHITE[0], DEF_OUT_WHITE[1], DEF_OUT_WHITE[2] };
+    float m_range_shift[3] = { DEF_RANGE_SHIFT[0], DEF_RANGE_SHIFT[1], DEF_RANGE_SHIFT[2] };
+    int   m_range_shift_sw = DEF_RANGE_SHIFT_SW;  // -1, 0, 1
+    int   m_aces_mode = DEF_ACES_MODE;
+    float m_aces_lum[3] = { DEF_ACES_LUM[0], DEF_ACES_LUM[1], DEF_ACES_LUM[2] };
+    bool  m_enable_levels = true;
+    bool  m_highlight_clipping = false;
+    bool  m_enabled = true;
 
     // D3D11 effect resources
     ComPtr<ID3D11DeviceContext>      m_dx11_ctx;
@@ -181,10 +265,9 @@ public:
     ComPtr<ID3D11Buffer>             m_cb;
     ComPtr<ID3D11SamplerState>       m_sampler;
     bool m_shader_ready = false;
-    bool m_dx11_logged_flags = false;  // diagnostic: log RT bind flags once
-    bool m_dx11_first_apply_logged = false;  // diagnostic: log first successful effect apply
+    bool m_dx11_logged_flags = false;
+    bool m_dx11_first_apply_logged = false;
 
-    // DX11 per-target state — cached by texture dimensions (2-slot cache like DX12)
     struct DX11TargetState {
         ComPtr<ID3D11Texture2D>          copy_tex;
         ComPtr<ID3D11ShaderResourceView> copy_srv;
@@ -209,7 +292,7 @@ public:
             if (ts.width == w && ts.height == h) {
                 if (!ts.cache_hit_logged) {
                     ts.cache_hit_logged = true;
-                    API::get()->log_info("[FakeHDR] DX11 cache hit: slot %d (%ux%u)", (int)i, w, h);
+                    API::get()->log_info("[LevelsPlus] DX11 cache hit: slot %d (%ux%u)", (int)i, w, h);
                 }
                 return ts;
             }
@@ -220,18 +303,15 @@ public:
         return m_dx11_targets[1];
     }
 
-    // DX12 effect resources — shared across targets
+    // DX12 effect resources
     ComPtr<ID3D12RootSignature>  m_dx12_root_sig;
     ComPtr<ID3D12PipelineState>  m_dx12_pso;
     ComPtr<ID3D12Resource>       m_dx12_cb;
 
-    // Per-target state — cached by texture dimensions so the plugin can be
-    // called multiple times per frame (e.g. UEVR dispatches once per eye source)
-    // without recreating GPU resources every time.
     struct DX12TargetState {
-        ComPtr<ID3D12Resource>       copy_tex;    // SRV input (scene snapshot)
+        ComPtr<ID3D12Resource>       copy_tex;
         ComPtr<ID3D12DescriptorHeap> srv_heap;
-        ComPtr<ID3D12DescriptorHeap> rtv_heap;    // RTV written per-frame on native target
+        ComPtr<ID3D12DescriptorHeap> rtv_heap;
         UINT width  = 0;
         UINT height = 0;
 
@@ -245,26 +325,22 @@ public:
     DX12TargetState m_dx12_targets[MAX_TARGET_STATES];
 
     DX12TargetState& find_target_state(UINT w, UINT h) {
-        // Exact size match?
         for (auto& ts : m_dx12_targets)
             if (ts.width == w && ts.height == h) return ts;
-        // Empty slot?
         for (auto& ts : m_dx12_targets)
             if (ts.width == 0) return ts;
-        // Evict second slot
         m_dx12_targets[1].reset();
         return m_dx12_targets[1];
     }
 
-    // DX12 pipeline state (device-level, created once)
     bool m_dx12_ready = false;
-    HDRParamsCB* m_dx12_cb_mapped = nullptr;
+    LevelsPlusCB* m_dx12_cb_mapped = nullptr;
     DXGI_FORMAT m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
 
     void on_dllmain() override {}
 
     void on_initialize() override {
-        API::get()->log_info("[FakeHDR] Plugin initialized");
+        API::get()->log_info("[LevelsPlus] Plugin initialized");
         load_settings();
     }
 
@@ -272,14 +348,25 @@ public:
     // Settings persistence
     // ========================================================================
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir(L"fakehdr_settings.txt");
+        return API::get()->get_persistent_dir(L"levelsplus_settings.txt");
     }
 
     void save_settings() {
         try {
             std::ofstream f(get_settings_path());
             if (f.is_open()) {
-                f << m_enabled << "\n" << m_hdr_power << "\n" << m_radius1 << "\n" << m_radius2 << "\n";
+                f << m_enabled << "\n";
+                f << m_enable_levels << "\n";
+                f << m_in_black[0] << " " << m_in_black[1] << " " << m_in_black[2] << "\n";
+                f << m_in_white[0] << " " << m_in_white[1] << " " << m_in_white[2] << "\n";
+                f << m_in_gamma[0] << " " << m_in_gamma[1] << " " << m_in_gamma[2] << "\n";
+                f << m_out_black[0] << " " << m_out_black[1] << " " << m_out_black[2] << "\n";
+                f << m_out_white[0] << " " << m_out_white[1] << " " << m_out_white[2] << "\n";
+                f << m_range_shift[0] << " " << m_range_shift[1] << " " << m_range_shift[2] << "\n";
+                f << m_range_shift_sw << "\n";
+                f << m_aces_mode << "\n";
+                f << m_aces_lum[0] << " " << m_aces_lum[1] << " " << m_aces_lum[2] << "\n";
+                f << m_highlight_clipping << "\n";
             }
         } catch (...) {}
     }
@@ -288,41 +375,107 @@ public:
         try {
             std::ifstream f(get_settings_path());
             if (f.is_open()) {
-                int enabled_int;
-                if (f >> enabled_int >> m_hdr_power >> m_radius1 >> m_radius2) {
+                int enabled_int, levels_int, clip_int;
+                if (f >> enabled_int >> levels_int
+                    >> m_in_black[0] >> m_in_black[1] >> m_in_black[2]
+                    >> m_in_white[0] >> m_in_white[1] >> m_in_white[2]
+                    >> m_in_gamma[0] >> m_in_gamma[1] >> m_in_gamma[2]
+                    >> m_out_black[0] >> m_out_black[1] >> m_out_black[2]
+                    >> m_out_white[0] >> m_out_white[1] >> m_out_white[2]
+                    >> m_range_shift[0] >> m_range_shift[1] >> m_range_shift[2]
+                    >> m_range_shift_sw >> m_aces_mode
+                    >> m_aces_lum[0] >> m_aces_lum[1] >> m_aces_lum[2]
+                    >> clip_int)
+                {
                     m_enabled = (enabled_int != 0);
-                    API::get()->log_info("[FakeHDR] Loaded settings: enabled=%d power=%.2f r1=%.3f r2=%.3f",
-                        m_enabled, m_hdr_power, m_radius1, m_radius2);
+                    m_enable_levels = (levels_int != 0);
+                    m_highlight_clipping = (clip_int != 0);
+                    if (m_aces_mode < 0 || m_aces_mode > 3) m_aces_mode = DEF_ACES_MODE;
+                    if (m_range_shift_sw < -1 || m_range_shift_sw > 1) m_range_shift_sw = 0;
+                    API::get()->log_info("[LevelsPlus] Loaded settings: enabled=%d levels=%d aces=%d",
+                        m_enabled, m_enable_levels, m_aces_mode);
                 }
             }
         } catch (...) {}
     }
 
     // ========================================================================
-    // on_draw_ui: draw settings inside the UEVR menu (Plugins page)
+    // Helper: fill CB data
+    // ========================================================================
+    void fill_cb(LevelsPlusCB* p) {
+        memcpy(p->InputBlackPoint,  m_in_black,     sizeof(float)*3);  p->_pad0 = 0;
+        memcpy(p->InputWhitePoint,  m_in_white,     sizeof(float)*3);  p->_pad1 = 0;
+        memcpy(p->InputGamma,       m_in_gamma,     sizeof(float)*3);  p->_pad2 = 0;
+        memcpy(p->OutputBlackPoint, m_out_black,    sizeof(float)*3);  p->_pad3 = 0;
+        memcpy(p->OutputWhitePoint, m_out_white,    sizeof(float)*3);  p->_pad4 = 0;
+        memcpy(p->ColorRangeShift,  m_range_shift,  sizeof(float)*3);
+        p->ColorRangeShiftSw = (float)m_range_shift_sw;
+        memcpy(p->ACESLumPct,       m_aces_lum,     sizeof(float)*3);
+        p->ACESMode = m_aces_mode;
+        p->EnableLevels = m_enable_levels ? 1 : 0;
+        p->HighlightClipping = m_highlight_clipping ? 1 : 0;
+        p->_pad5[0] = 0; p->_pad5[1] = 0;
+    }
+
+    // ========================================================================
+    // on_draw_ui
     // ========================================================================
     void on_draw_ui() override {
-        if (ImGui::CollapsingHeader("FakeHDR Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", FAKEHDR_VERSION);
+        if (ImGui::CollapsingHeader("LevelsPlus Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextDisabled("v%s", LEVELSPLUS_VERSION);
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);
+            changed |= ImGui::Checkbox("Enable Levels", &m_enable_levels);
 
-            constexpr float step = 0.01f;
-            constexpr float step_fast = 0.1f;
-            changed |= ImGui::InputFloat("HDR Power", &m_hdr_power, step, step_fast, "%.2f");
-            changed |= ImGui::InputFloat("Radius 1",  &m_radius1,   step, step_fast, "%.3f");
-            changed |= ImGui::InputFloat("Radius 2",  &m_radius2,   step, step_fast, "%.3f");
+            if (m_enable_levels) {
+                ImGui::Separator();
+                ImGui::Text("Input Levels");
+                changed |= ImGui::ColorEdit3("Input Black Point", m_in_black);
+                changed |= ImGui::ColorEdit3("Input White Point", m_in_white);
+                changed |= ImGui::SliderFloat3("Input Gamma", m_in_gamma, 0.01f, 10.0f, "%.2f");
 
-            // Clamp values
-            m_hdr_power = (m_hdr_power < 0.0f) ? 0.0f : (m_hdr_power > 8.0f) ? 8.0f : m_hdr_power;
-            m_radius1   = (m_radius1   < 0.0f) ? 0.0f : (m_radius1   > 8.0f) ? 8.0f : m_radius1;
-            m_radius2   = (m_radius2   < 0.0f) ? 0.0f : (m_radius2   > 8.0f) ? 8.0f : m_radius2;
+                ImGui::Separator();
+                ImGui::Text("Output Levels");
+                changed |= ImGui::ColorEdit3("Output Black Point", m_out_black);
+                changed |= ImGui::ColorEdit3("Output White Point", m_out_white);
+
+                ImGui::Separator();
+                ImGui::Text("Color Range Shift");
+                changed |= ImGui::ColorEdit3("Range Shift", m_range_shift);
+
+                // Shift switch: combo for -1, 0, 1
+                int shift_idx = m_range_shift_sw + 1;  // map -1,0,1 to 0,1,2
+                if (ImGui::Combo("Shift Direction", &shift_idx, g_shift_names, 3)) {
+                    m_range_shift_sw = shift_idx - 1;
+                    changed = true;
+                }
+            }
+
+            ImGui::Separator();
+            ImGui::Text("ACES Tonemapping");
+            if (ImGui::Combo("ACES Mode", &m_aces_mode, g_aces_names, 4)) {
+                changed = true;
+            }
+            if (m_aces_mode > 0) {
+                changed |= ImGui::SliderFloat3("ACES Luminance %", m_aces_lum, 0.0f, 200.0f, "%.0f");
+            }
+
+            ImGui::Separator();
+            changed |= ImGui::Checkbox("Highlight Clipping (debug)", &m_highlight_clipping);
 
             if (ImGui::Button("Reset to Defaults")) {
-                m_hdr_power = DEFAULT_HDR_POWER;
-                m_radius1   = DEFAULT_RADIUS1;
-                m_radius2   = DEFAULT_RADIUS2;
+                memcpy(m_in_black,    DEF_IN_BLACK,      sizeof(float)*3);
+                memcpy(m_in_white,    DEF_IN_WHITE,      sizeof(float)*3);
+                memcpy(m_in_gamma,    DEF_IN_GAMMA,      sizeof(float)*3);
+                memcpy(m_out_black,   DEF_OUT_BLACK,     sizeof(float)*3);
+                memcpy(m_out_white,   DEF_OUT_WHITE,     sizeof(float)*3);
+                memcpy(m_range_shift, DEF_RANGE_SHIFT,   sizeof(float)*3);
+                m_range_shift_sw = DEF_RANGE_SHIFT_SW;
+                m_aces_mode = DEF_ACES_MODE;
+                memcpy(m_aces_lum, DEF_ACES_LUM, sizeof(float)*3);
+                m_enable_levels = true;
+                m_highlight_clipping = false;
                 changed = true;
             }
 
@@ -333,8 +486,7 @@ public:
     }
 
     // ========================================================================
-    // on_pre_render_vr_framework_dx12: apply FakeHDR to UE render target
-    // BEFORE UEVR copies it to VR eye textures
+    // on_pre_render_vr_framework_dx12
     // ========================================================================
     void on_pre_render_vr_framework_dx12() override {
         if (!m_enabled) return;
@@ -351,9 +503,6 @@ public:
         auto desc = native->GetDesc();
         if (desc.Width == 0 || desc.Height == 0) return;
 
-        // Process every valid callback — UEVR dispatches twice per frame
-        // with native stereo (once per eye RT). find_target_state handles
-        // size-based caching so each size gets its own GPU resources.
         auto device = (ID3D12Device*)renderer_data->device;
         const auto resolved_format = resolve_typeless_format(desc.Format);
 
@@ -367,18 +516,11 @@ public:
         auto cmd = (ID3D12GraphicsCommandList*)API::StereoHook::get_pre_render_command_list();
         if (!cmd) return;
 
-        // Update CB
         if (m_dx12_cb_mapped) {
-            m_dx12_cb_mapped->HDRPower = m_hdr_power;
-            m_dx12_cb_mapped->Radius1 = m_radius1;
-            m_dx12_cb_mapped->Radius2 = m_radius2;
-            m_dx12_cb_mapped->BloomMip = 0.0f;  // DX12: full-res bloom (no perf issue)
-            m_dx12_cb_mapped->PixelSizeX = 1.0f / (float)ts.width;
-            m_dx12_cb_mapped->PixelSizeY = 1.0f / (float)ts.height;
-            m_dx12_cb_mapped->_pad1[0] = 0; m_dx12_cb_mapped->_pad1[1] = 0;
+            fill_cb(m_dx12_cb_mapped);
         }
 
-        // Step 1: Copy target -> copy_tex (for SRV sampling)
+        // Copy target -> copy_tex
         D3D12_RESOURCE_BARRIER barriers[2]{};
         barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barriers[0].Transition.pResource = native;
@@ -393,7 +535,6 @@ public:
         cmd->ResourceBarrier(2, barriers);
         cmd->CopyResource(ts.copy_tex.Get(), native);
 
-        // Transition back: target -> RENDER_TARGET, copy_tex -> SRV
         barriers[0].Transition.pResource = native;
         barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
         barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -402,13 +543,11 @@ public:
         barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         cmd->ResourceBarrier(2, barriers);
 
-        // Step 2: Create RTV on native target (CPU descriptor write — essentially free)
         D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{};
         rtv_desc.Format = resolved_format;
         rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
         device->CreateRenderTargetView(native, &rtv_desc, ts.rtv_heap->GetCPUDescriptorHandleForHeapStart());
 
-        // Draw FakeHDR: read copy_tex (SRV) -> write native (RTV) — no hazard, different resources
         cmd->SetPipelineState(m_dx12_pso.Get());
         cmd->SetGraphicsRootSignature(m_dx12_root_sig.Get());
         cmd->SetGraphicsRootConstantBufferView(0, m_dx12_cb->GetGPUVirtualAddress());
@@ -423,9 +562,11 @@ public:
         cmd->RSSetScissorRects(1, &scissor);
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         cmd->DrawInstanced(3, 1, 0, 0);
-        // native left in RENDER_TARGET state — exactly what UEVR expects
     }
 
+    // ========================================================================
+    // on_pre_render_vr_framework_dx11
+    // ========================================================================
     void on_pre_render_vr_framework_dx11() override {
         if (!m_enabled) return;
 
@@ -438,50 +579,25 @@ public:
         auto native = (ID3D11Texture2D*)scene_rt->get_native_resource();
         if (!native) return;
 
-        apply_fakehdr_to_resource_dx11(native);
+        apply_levelsplus_to_resource_dx11(native);
     }
 
-    // ========================================================================
-    // on_present: no longer needed (UI is in UEVR menu now)
-    // ========================================================================
-    void on_present() override {
-    }
-
-    // ========================================================================
-    // on_pre_engine_tick: nothing to do (UI drawn by UEVR menu)
-    // ========================================================================
-    void on_pre_engine_tick(API::UGameEngine* engine, float delta) override {
-    }
+    void on_present() override {}
+    void on_pre_engine_tick(API::UGameEngine* engine, float delta) override {}
 
     void on_device_reset() override {
-        API::get()->log_info("[FakeHDR] Device reset");
+        API::get()->log_info("[LevelsPlus] Device reset");
         release_effect_resources();
     }
 
-    // ========================================================================
-    // VR eye overlay: not used (effect is applied in pre-render)
-    // ========================================================================
     void on_post_render_vr_framework_dx11(
-        ID3D11DeviceContext* context,
-        ID3D11Texture2D* texture,
-        ID3D11RenderTargetView* rtv) override
-    {
-    }
-
+        ID3D11DeviceContext* context, ID3D11Texture2D* texture, ID3D11RenderTargetView* rtv) override {}
     void on_post_render_vr_framework_dx12(
-        ID3D12GraphicsCommandList* command_list,
-        ID3D12Resource* rt,
-        D3D12_CPU_DESCRIPTOR_HANDLE* rtv) override
-    {
-    }
+        ID3D12GraphicsCommandList* command_list, ID3D12Resource* rt, D3D12_CPU_DESCRIPTOR_HANDLE* rtv) override {}
 
 private:
 
-    // ========================================================================
-    // Resource cleanup
-    // ========================================================================
     void release_effect_resources() {
-        // DX11
         m_dx11_ctx.Reset();
         m_vs.Reset(); m_ps.Reset(); m_cb.Reset(); m_sampler.Reset();
         for (auto& ts : m_dx11_targets) ts.reset();
@@ -489,38 +605,39 @@ private:
         m_dx11_logged_flags = false;
         m_dx11_first_apply_logged = false;
 
-        // DX12 — only device-level resources to release.
-        // No command infrastructure to drain (UEVR owns the command list).
         m_dx12_pso.Reset(); m_dx12_root_sig.Reset(); m_dx12_cb.Reset();
         for (auto& ts : m_dx12_targets) ts.reset();
         m_dx12_ready = false; m_dx12_cb_mapped = nullptr; m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
     }
 
     // ========================================================================
-    // DX11: Apply FakeHDR to UE4 scene render target
+    // DX11
     // ========================================================================
     bool init_shaders_dx11(ID3D11Device* device) {
         if (!device) return false;
 
         ComPtr<ID3DBlob> vs_blob, vs_err;
-        if (FAILED(D3DCompile(g_fakehdr_vs_src, strlen(g_fakehdr_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vs_blob, &vs_err))) return false;
+        if (FAILED(D3DCompile(g_levelsplus_vs_src, strlen(g_levelsplus_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vs_blob, &vs_err))) return false;
         ComPtr<ID3DBlob> ps_blob, ps_err;
-        if (FAILED(D3DCompile(g_fakehdr_ps_src, strlen(g_fakehdr_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &ps_blob, &ps_err))) return false;
+        if (FAILED(D3DCompile(g_levelsplus_ps_src, strlen(g_levelsplus_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &ps_blob, &ps_err))) {
+            if (ps_err) API::get()->log_error("[LevelsPlus] PS compile: %s", (const char*)ps_err->GetBufferPointer());
+            return false;
+        }
 
         if (FAILED(device->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &m_vs))) return false;
         if (FAILED(device->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &m_ps))) return false;
 
-        D3D11_BUFFER_DESC cb_desc{}; cb_desc.ByteWidth = sizeof(HDRParamsCB);
+        D3D11_BUFFER_DESC cb_desc{}; cb_desc.ByteWidth = sizeof(LevelsPlusCB);
         cb_desc.Usage = D3D11_USAGE_DYNAMIC; cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cb_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         if (FAILED(device->CreateBuffer(&cb_desc, nullptr, &m_cb))) return false;
 
-        D3D11_SAMPLER_DESC sd{}; sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        D3D11_SAMPLER_DESC sd{}; sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
         sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
         sd.ComparisonFunc = D3D11_COMPARISON_NEVER; sd.MaxLOD = D3D11_FLOAT32_MAX;
         if (FAILED(device->CreateSamplerState(&sd, &m_sampler))) return false;
 
         m_shader_ready = true;
-        API::get()->log_info("[FakeHDR] DX11 shaders ready");
+        API::get()->log_info("[LevelsPlus] DX11 shaders ready");
         return true;
     }
 
@@ -542,11 +659,11 @@ private:
         if (FAILED(device->CreateShaderResourceView(ts.copy_tex.Get(), &svd, &ts.copy_srv))) { ts.reset(); return false; }
 
         ts.width = src_desc.Width; ts.height = src_desc.Height;
-        API::get()->log_info("[FakeHDR] DX11 copy texture created: %ux%u", ts.width, ts.height);
+        API::get()->log_info("[LevelsPlus] DX11 copy texture created: %ux%u", ts.width, ts.height);
         return true;
     }
 
-    void apply_fakehdr_to_resource_dx11(ID3D11Texture2D* target) {
+    void apply_levelsplus_to_resource_dx11(ID3D11Texture2D* target) {
         const auto rd = API::get()->param()->renderer;
         auto device = (ID3D11Device*)rd->device;
         if (!device || !target) return;
@@ -555,12 +672,11 @@ private:
         target->GetDesc(&target_desc);
         if (target_desc.Width == 0 || target_desc.Height == 0) return;
 
-        // Log bind flags once for diagnostics
         if (!m_dx11_logged_flags) {
             m_dx11_logged_flags = true;
-            API::get()->log_info("[FakeHDR] DX11 RT: %ux%u fmt=%u bind=0x%x misc=0x%x",
+            API::get()->log_info("[LevelsPlus] DX11 RT: %ux%u fmt=%u bind=0x%x",
                 target_desc.Width, target_desc.Height, target_desc.Format,
-                target_desc.BindFlags, target_desc.MiscFlags);
+                target_desc.BindFlags);
         }
 
         if (!m_dx11_ctx) device->GetImmediateContext(&m_dx11_ctx);
@@ -571,7 +687,6 @@ private:
         auto& ts = find_dx11_target_state(target_desc.Width, target_desc.Height);
         if (!ensure_dx11_copy_texture(device, target, ts)) return;
 
-        // Cache RTV — recreate only when the underlying texture changes
         if (ts.rtv_tex != target) {
             ts.rtv.Reset();
             const auto resolved_fmt = resolve_typeless_format(target_desc.Format);
@@ -585,11 +700,7 @@ private:
 
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (SUCCEEDED(ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-            auto* p = static_cast<HDRParamsCB*>(mapped.pData);
-            p->HDRPower = m_hdr_power; p->Radius1 = m_radius1; p->Radius2 = m_radius2;
-            p->BloomMip = 0.0f;
-            p->PixelSizeX = 1.0f / (float)ts.width; p->PixelSizeY = 1.0f / (float)ts.height;
-            p->_pad1[0] = 0; p->_pad1[1] = 0;
+            fill_cb(static_cast<LevelsPlusCB*>(mapped.pData));
             ctx->Unmap(m_cb.Get(), 0);
         }
 
@@ -610,7 +721,7 @@ private:
 
         if (!m_dx11_first_apply_logged) {
             m_dx11_first_apply_logged = true;
-            API::get()->log_info("[FakeHDR] DX11 effect applied: %ux%u", ts.width, ts.height);
+            API::get()->log_info("[LevelsPlus] DX11 effect applied: %ux%u", ts.width, ts.height);
         }
 
         ID3D11ShaderResourceView* null_srv = nullptr;
@@ -618,16 +729,14 @@ private:
     }
 
     // ========================================================================
-    // DX12: Apply FakeHDR to UE4 scene render target
+    // DX12
     // ========================================================================
     bool init_dx12_pipeline(ID3D12Device* device, DXGI_FORMAT rt_format) {
         if (m_dx12_ready) return true;
         if (!device) return false;
 
-        // Resolve TYPELESS formats — can't use them for PSO RTVFormats or view creation
         rt_format = resolve_typeless_format(rt_format);
 
-        // Root signature
         D3D12_DESCRIPTOR_RANGE1 srv_range{};
         srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         srv_range.NumDescriptors = 1;
@@ -644,7 +753,7 @@ private:
         rp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_STATIC_SAMPLER_DESC ss{};
-        ss.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        ss.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
         ss.AddressU = ss.AddressV = ss.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         ss.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
         ss.MaxLOD = D3D12_FLOAT32_MAX;
@@ -657,17 +766,18 @@ private:
 
         ComPtr<ID3DBlob> sig_blob, sig_err;
         if (FAILED(D3D12SerializeVersionedRootSignature(&rsd, &sig_blob, &sig_err))) {
-            if (sig_err) API::get()->log_error("[FakeHDR DX12] Root sig: %s", (const char*)sig_err->GetBufferPointer());
+            if (sig_err) API::get()->log_error("[LevelsPlus DX12] Root sig: %s", (const char*)sig_err->GetBufferPointer());
             return false;
         }
         if (FAILED(device->CreateRootSignature(0, sig_blob->GetBufferPointer(), sig_blob->GetBufferSize(), IID_PPV_ARGS(&m_dx12_root_sig)))) return false;
 
-        // Shaders
         ComPtr<ID3DBlob> vsb, vse, psb, pse;
-        if (FAILED(D3DCompile(g_fakehdr_vs_src, strlen(g_fakehdr_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
-        if (FAILED(D3DCompile(g_fakehdr_ps_src, strlen(g_fakehdr_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) return false;
+        if (FAILED(D3DCompile(g_levelsplus_vs_src, strlen(g_levelsplus_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
+        if (FAILED(D3DCompile(g_levelsplus_ps_src, strlen(g_levelsplus_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) {
+            if (pse) API::get()->log_error("[LevelsPlus DX12] PS compile: %s", (const char*)pse->GetBufferPointer());
+            return false;
+        }
 
-        // PSO
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
         pd.pRootSignature = m_dx12_root_sig.Get();
         pd.VS = { vsb->GetBufferPointer(), vsb->GetBufferSize() };
@@ -682,11 +792,10 @@ private:
         pd.SampleDesc.Count = 1;
 
         if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_dx12_pso)))) {
-            API::get()->log_error("[FakeHDR DX12] PSO failed for format %u", (unsigned)rt_format);
+            API::get()->log_error("[LevelsPlus DX12] PSO failed for format %u", (unsigned)rt_format);
             return false;
         }
 
-        // CB (upload heap, persistently mapped)
         D3D12_HEAP_PROPERTIES uh{}; uh.Type = D3D12_HEAP_TYPE_UPLOAD;
         D3D12_RESOURCE_DESC cbd{}; cbd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
         cbd.Width = 256; cbd.Height = 1; cbd.DepthOrArraySize = 1; cbd.MipLevels = 1;
@@ -695,12 +804,9 @@ private:
                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_dx12_cb)))) return false;
         m_dx12_cb->Map(0, nullptr, (void**)&m_dx12_cb_mapped);
 
-        // No command allocators, command list, fence, or queue needed —
-        // UEVR provides the command list via get_pre_render_command_list().
-
         m_dx12_rt_format = rt_format;
         m_dx12_ready = true;
-        API::get()->log_info("[FakeHDR DX12] Pipeline ready (format %u)", (unsigned)rt_format);
+        API::get()->log_info("[LevelsPlus DX12] Pipeline ready (format %u)", (unsigned)rt_format);
         return true;
     }
 
@@ -712,36 +818,31 @@ private:
         const auto resolved_fmt = resolve_typeless_format(sd.Format);
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-        // Only need copy_tex — we render directly to the native target (no intermediate result_tex)
         D3D12_RESOURCE_DESC copy_desc = sd;
         copy_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
         copy_desc.Format = resolved_fmt;
         if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &copy_desc,
                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&ts.copy_tex)))) {
-            API::get()->log_error("[FakeHDR DX12] Failed to create copy texture");
+            API::get()->log_error("[LevelsPlus DX12] Failed to create copy texture");
             return false;
         }
 
-        // SRV heap
         D3D12_DESCRIPTOR_HEAP_DESC shd{}; shd.NumDescriptors = 1;
         shd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; shd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(device->CreateDescriptorHeap(&shd, IID_PPV_ARGS(&ts.srv_heap)))) { ts.reset(); return false; }
 
-        // RTV heap (descriptor written per-frame on native target)
         D3D12_DESCRIPTOR_HEAP_DESC rhd{}; rhd.NumDescriptors = 1; rhd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         if (FAILED(device->CreateDescriptorHeap(&rhd, IID_PPV_ARGS(&ts.rtv_heap)))) { ts.reset(); return false; }
 
-        // SRV for copy texture
         D3D12_SHADER_RESOURCE_VIEW_DESC svd{};
         svd.Format = resolved_fmt;
         svd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         svd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         svd.Texture2D.MipLevels = 1;
         device->CreateShaderResourceView(ts.copy_tex.Get(), &svd, ts.srv_heap->GetCPUDescriptorHandleForHeapStart());
-        // RTV descriptor written per-frame in render function
 
         ts.width = (UINT)sd.Width; ts.height = sd.Height;
-        API::get()->log_info("[FakeHDR DX12] Copy texture ready: %ux%u fmt %u", ts.width, ts.height, (unsigned)resolved_fmt);
+        API::get()->log_info("[LevelsPlus DX12] Copy texture ready: %ux%u fmt %u", ts.width, ts.height, (unsigned)resolved_fmt);
         return true;
     }
 };
@@ -749,4 +850,4 @@ private:
 // ============================================================================
 // Plugin entry point
 // ============================================================================
-std::unique_ptr<FakeHDRPlugin> g_plugin{new FakeHDRPlugin()};
+std::unique_ptr<LevelsPlusPlugin> g_plugin{new LevelsPlusPlugin()};

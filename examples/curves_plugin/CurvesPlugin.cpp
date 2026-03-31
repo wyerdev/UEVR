@@ -10,7 +10,12 @@ which fires BEFORE UEVR copies the render target to VR eye textures.
 Includes an ImGui settings panel with enable/disable, mode/formula selectors,
 contrast slider, and reset button.
 
-License: MIT (same as UEVR example plugins)
+UEVR plugin wrapper: MIT license
+
+Original shader:
+Curves by Christian Cann Schuldt Jensen ~ CeeJay.dk
+Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/Curves.fx
+(part of crosire/reshade-shaders, public domain / Unlicense)
 */
 
 #include <memory>

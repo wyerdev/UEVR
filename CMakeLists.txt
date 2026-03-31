@@ -550,6 +550,132 @@ set_target_properties(technicolor_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target filmgrain2_plugin
+set(CMKR_TARGET filmgrain2_plugin)
+set(filmgrain2_plugin_SOURCES "")
+
+list(APPEND filmgrain2_plugin_SOURCES
+	"examples/filmgrain2_plugin/FilmGrain2Plugin.cpp"
+)
+
+list(APPEND filmgrain2_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${filmgrain2_plugin_SOURCES})
+add_library(filmgrain2_plugin SHARED)
+
+if(filmgrain2_plugin_SOURCES)
+	target_sources(filmgrain2_plugin PRIVATE ${filmgrain2_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${filmgrain2_plugin_SOURCES})
+
+target_compile_features(filmgrain2_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(filmgrain2_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(filmgrain2_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(filmgrain2_plugin PROPERTIES
+	OUTPUT_NAME
+		FilmGrain2Plugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target levelsplus_plugin
+set(CMKR_TARGET levelsplus_plugin)
+set(levelsplus_plugin_SOURCES "")
+
+list(APPEND levelsplus_plugin_SOURCES
+	"examples/levelsplus_plugin/LevelsPlusPlugin.cpp"
+)
+
+list(APPEND levelsplus_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${levelsplus_plugin_SOURCES})
+add_library(levelsplus_plugin SHARED)
+
+if(levelsplus_plugin_SOURCES)
+	target_sources(levelsplus_plugin PRIVATE ${levelsplus_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${levelsplus_plugin_SOURCES})
+
+target_compile_features(levelsplus_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(levelsplus_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(levelsplus_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(levelsplus_plugin PROPERTIES
+	OUTPUT_NAME
+		LevelsPlusPlugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target colourfulness_plugin
+set(CMKR_TARGET colourfulness_plugin)
+set(colourfulness_plugin_SOURCES "")
+
+list(APPEND colourfulness_plugin_SOURCES
+	"examples/colourfulness_plugin/ColourfulnessPlugin.cpp"
+)
+
+list(APPEND colourfulness_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${colourfulness_plugin_SOURCES})
+add_library(colourfulness_plugin SHARED)
+
+if(colourfulness_plugin_SOURCES)
+	target_sources(colourfulness_plugin PRIVATE ${colourfulness_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${colourfulness_plugin_SOURCES})
+
+target_compile_features(colourfulness_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(colourfulness_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(colourfulness_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(colourfulness_plugin PROPERTIES
+	OUTPUT_NAME
+		ColourfulnessPlugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target sdk-test
 set(CMKR_TARGET sdk-test)
 set(sdk-test_SOURCES "")

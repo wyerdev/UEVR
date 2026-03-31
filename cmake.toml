@@ -180,6 +180,30 @@ headers = ["examples/technicolor_plugin/**.hpp", "examples/technicolor_plugin/**
 [target.technicolor_plugin.properties]
 OUTPUT_NAME = "TechnicolorPlugin"
 
+[target.filmgrain2_plugin]
+type = "plugin"
+sources = ["examples/filmgrain2_plugin/FilmGrain2Plugin.cpp"]
+headers = ["examples/filmgrain2_plugin/**.hpp", "examples/filmgrain2_plugin/**.h"]
+
+[target.filmgrain2_plugin.properties]
+OUTPUT_NAME = "FilmGrain2Plugin"
+
+[target.levelsplus_plugin]
+type = "plugin"
+sources = ["examples/levelsplus_plugin/LevelsPlusPlugin.cpp"]
+headers = ["examples/levelsplus_plugin/**.hpp", "examples/levelsplus_plugin/**.h"]
+
+[target.levelsplus_plugin.properties]
+OUTPUT_NAME = "LevelsPlusPlugin"
+
+[target.colourfulness_plugin]
+type = "plugin"
+sources = ["examples/colourfulness_plugin/ColourfulnessPlugin.cpp"]
+headers = ["examples/colourfulness_plugin/**.hpp", "examples/colourfulness_plugin/**.h"]
+
+[target.colourfulness_plugin.properties]
+OUTPUT_NAME = "ColourfulnessPlugin"
+
 [target.sdk-test]
 type = "shared"
 sources = ["side-projects/sdk-test/**.cpp", "side-projects/sdk-test/**.c"]
