@@ -460,7 +460,7 @@ target_link_libraries(fakehdr_plugin PUBLIC
 
 set_target_properties(fakehdr_plugin PROPERTIES
 	OUTPUT_NAME
-		05_FakeHDRPlugin
+		05_FakeHDRShader
 )
 
 unset(CMKR_TARGET)
@@ -502,7 +502,7 @@ target_link_libraries(curves_plugin PUBLIC
 
 set_target_properties(curves_plugin PROPERTIES
 	OUTPUT_NAME
-		04_CurvesPlugin
+		04_CurvesShader
 )
 
 unset(CMKR_TARGET)
@@ -544,7 +544,7 @@ target_link_libraries(technicolor_plugin PUBLIC
 
 set_target_properties(technicolor_plugin PROPERTIES
 	OUTPUT_NAME
-		07_TechnicolorPlugin
+		07_TechnicolorShader
 )
 
 unset(CMKR_TARGET)
@@ -586,7 +586,7 @@ target_link_libraries(filmgrain2_plugin PUBLIC
 
 set_target_properties(filmgrain2_plugin PROPERTIES
 	OUTPUT_NAME
-		10_FilmGrain2Plugin
+		10_FilmGrain2Shader
 )
 
 unset(CMKR_TARGET)
@@ -628,7 +628,7 @@ target_link_libraries(levelsplus_plugin PUBLIC
 
 set_target_properties(levelsplus_plugin PROPERTIES
 	OUTPUT_NAME
-		01_LevelsPlusPlugin
+		01_LevelsPlusShader
 )
 
 unset(CMKR_TARGET)
@@ -670,7 +670,7 @@ target_link_libraries(colourfulness_plugin PUBLIC
 
 set_target_properties(colourfulness_plugin PROPERTIES
 	OUTPUT_NAME
-		08_ColourfulnessPlugin
+		08_ColourfulnessShader
 )
 
 unset(CMKR_TARGET)
@@ -712,7 +712,7 @@ target_link_libraries(liftgammagain_plugin PUBLIC
 
 set_target_properties(liftgammagain_plugin PROPERTIES
 	OUTPUT_NAME
-		02_LiftGammaGainPlugin
+		02_LiftGammaGainShader
 )
 
 unset(CMKR_TARGET)
@@ -754,7 +754,7 @@ target_link_libraries(vibrance_plugin PUBLIC
 
 set_target_properties(vibrance_plugin PROPERTIES
 	OUTPUT_NAME
-		09_VibrancePlugin
+		09_VibranceShader
 )
 
 unset(CMKR_TARGET)
@@ -796,7 +796,7 @@ target_link_libraries(tonemap_plugin PUBLIC
 
 set_target_properties(tonemap_plugin PROPERTIES
 	OUTPUT_NAME
-		03_TonemapPlugin
+		03_TonemapShader
 )
 
 unset(CMKR_TARGET)
@@ -838,7 +838,7 @@ target_link_libraries(dpx_plugin PUBLIC
 
 set_target_properties(dpx_plugin PROPERTIES
 	OUTPUT_NAME
-		06_DPXPlugin
+		06_DPXShader
 )
 
 unset(CMKR_TARGET)
@@ -880,7 +880,7 @@ target_link_libraries(hslshift_plugin PUBLIC
 
 set_target_properties(hslshift_plugin PROPERTIES
 	OUTPUT_NAME
-		11_HSLShiftPlugin
+		11_HSLShiftShader
 )
 
 unset(CMKR_TARGET)
@@ -922,7 +922,7 @@ target_link_libraries(filmicpass_plugin PUBLIC
 
 set_target_properties(filmicpass_plugin PROPERTIES
 	OUTPUT_NAME
-		12_FilmicPassPlugin
+		12_FilmicPassShader
 )
 
 unset(CMKR_TARGET)
@@ -964,7 +964,7 @@ target_link_libraries(clarity_plugin PUBLIC
 
 set_target_properties(clarity_plugin PROPERTIES
 	OUTPUT_NAME
-		13_ClarityPlugin
+		13_ClarityShader
 )
 
 unset(CMKR_TARGET)

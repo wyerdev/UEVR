@@ -1,6 +1,6 @@
-# FakeHDR Plugin for UEVR
+# FakeHDR Shader for UEVR
 
-A UEVR C++ plugin that applies a FakeHDR post-processing effect to VR frames.
+A UEVR C++ shader that applies a FakeHDR post-processing effect to VR frames.
 Based on CeeJay.dk's FakeHDR ReShade effect, ported to work natively in UEVR's
 per-eye VR rendering pipeline.
 
@@ -18,12 +18,12 @@ Standard ReShade has several issues with VR:
    image, causing bloom kernels to bleed across the eye boundary.
 
 3. **Performance**: ReShade adds a full extra post-process pass on the
-   swapchain. This plugin runs inside UEVR's existing VR render callback with
+   swapchain. This shader runs inside UEVR's existing VR render callback with
    zero extra copies beyond the required SRV copy.
 
 ## How it works
 
-This plugin hooks into UEVR's `on_post_render_vr_framework_dx11` callback,
+This shader hooks into UEVR's `on_post_render_vr_framework_dx11` callback,
 which fires **per-eye** after the engine renders but before submission to the VR
 compositor. For each eye:
 
@@ -55,11 +55,11 @@ cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release --target fakehdr_plugin
 ```
 
-Output: `build/Release/05_FakeHDRPlugin.dll`
+Output: `build/Release/05_FakeHDRShader.dll`
 
 ## Installation
 
-1. Copy `05_FakeHDRPlugin.dll` to `%APPDATA%/UnrealVRMod/UEVR/plugins/` (global, all games) or `%APPDATA%/UnrealVRMod/<game_executable>/plugins/` (per-game)
+1. Copy `05_FakeHDRShader.dll` to `%APPDATA%/UnrealVRMod/UEVR/plugins/` (global, all games) or `%APPDATA%/UnrealVRMod/<game_executable>/plugins/` (per-game)
 2. Launch the game with UEVR
 3. Open UEVR menu (Insert or L3+R3) → FakeHDR sidebar entry → Enable
 

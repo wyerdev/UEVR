@@ -53,8 +53,8 @@ jobs:
           New-Item -ItemType Directory -Path "$staging/plugins" -Force | Out-Null
           New-Item -ItemType Directory -Path "$staging/shipping_presets" -Force | Out-Null
 
-          # Copy plugin DLLs (exclude example_plugin — glob is case-insensitive on Windows)
-          Get-ChildItem "${{github.workspace}}/build/${{env.BUILD_TYPE}}/*Plugin.dll" |
+          # Copy shader DLLs (exclude example_plugin — glob is case-insensitive on Windows)
+          Get-ChildItem "${{github.workspace}}/build/${{env.BUILD_TYPE}}/*Shader.dll" |
             Where-Object { $_.Name -match "^\d{2}_" } |
             Copy-Item -Destination "$staging/plugins/"
 

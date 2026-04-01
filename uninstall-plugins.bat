@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ============================================
-echo   UEVR VR Post-Processing Plugins Uninstaller
+echo   UEVR VR Post-Processing Shaders Uninstaller
 echo ============================================
 echo.
 
@@ -19,10 +19,10 @@ if /i "%SCRIPT_DIR:~0,-1%"=="%PLUGIN_DIR%" (
 )
 
 :: List of plugin DLLs to remove (our 13 post-processing plugins)
-set "PLUGINS=01_LevelsPlusPlugin.dll 02_LiftGammaGainPlugin.dll 03_TonemapPlugin.dll 04_CurvesPlugin.dll 05_FakeHDRPlugin.dll 06_DPXPlugin.dll 07_TechnicolorPlugin.dll 08_ColourfulnessPlugin.dll 09_VibrancePlugin.dll 10_FilmGrain2Plugin.dll 11_HSLShiftPlugin.dll 12_FilmicPassPlugin.dll 13_ClarityPlugin.dll"
+set "PLUGINS=01_LevelsPlusShader.dll 02_LiftGammaGainShader.dll 03_TonemapShader.dll 04_CurvesShader.dll 05_FakeHDRShader.dll 06_DPXShader.dll 07_TechnicolorShader.dll 08_ColourfulnessShader.dll 09_VibranceShader.dll 10_FilmGrain2Shader.dll 11_HSLShiftShader.dll 12_FilmicPassShader.dll 13_ClarityShader.dll"
 
 :: Corresponding license files
-set "LICENSES=01_LevelsPlusPlugin-LICENSE.txt 02_LiftGammaGainPlugin-LICENSE.txt 03_TonemapPlugin-LICENSE.txt 04_CurvesPlugin-LICENSE.txt 05_FakeHDRPlugin-LICENSE.txt 06_DPXPlugin-LICENSE.txt 07_TechnicolorPlugin-LICENSE.txt 08_ColourfulnessPlugin-LICENSE.txt 09_VibrancePlugin-LICENSE.txt 10_FilmGrain2Plugin-LICENSE.txt 11_HSLShiftPlugin-LICENSE.txt 12_FilmicPassPlugin-LICENSE.txt 13_ClarityPlugin-LICENSE.txt"
+set "LICENSES=01_LevelsPlusShader-LICENSE.txt 02_LiftGammaGainShader-LICENSE.txt 03_TonemapShader-LICENSE.txt 04_CurvesShader-LICENSE.txt 05_FakeHDRShader-LICENSE.txt 06_DPXShader-LICENSE.txt 07_TechnicolorShader-LICENSE.txt 08_ColourfulnessShader-LICENSE.txt 09_VibranceShader-LICENSE.txt 10_FilmGrain2Shader-LICENSE.txt 11_HSLShiftShader-LICENSE.txt 12_FilmicPassShader-LICENSE.txt 13_ClarityShader-LICENSE.txt"
 
 :: Check if anything is installed
 set "FOUND=0"
@@ -31,7 +31,7 @@ for %%f in (%PLUGINS%) do (
 )
 
 if %FOUND%==0 (
-    echo No post-processing plugins found in:
+    echo No post-processing shaders found in:
     echo   %PLUGIN_DIR%
     echo.
     echo Nothing to uninstall.
@@ -40,10 +40,10 @@ if %FOUND%==0 (
     exit /b 0
 )
 
-echo Found %FOUND% plugin(s) to remove.
+echo Found %FOUND% shader(s) to remove.
 echo.
 echo This will remove:
-echo   - All 13 post-processing plugin DLLs from global plugins
+echo   - All 13 post-processing shader DLLs from global plugins
 echo   - Their license files
 echo   - Built-in shipping presets
 echo.
@@ -61,7 +61,7 @@ set "REMOVED=0"
 set "ERRORS=0"
 
 :: Remove plugin DLLs
-echo Removing plugins...
+echo Removing shaders...
 for %%f in (%PLUGINS%) do (
     if exist "%PLUGIN_DIR%\%%f" (
         del /f "%PLUGIN_DIR%\%%f" >nul 2>&1

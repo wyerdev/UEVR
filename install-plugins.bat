@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ============================================
-echo   UEVR VR Post-Processing Plugins Installer
+echo   UEVR VR Post-Processing Shaders Installer
 echo ============================================
 echo.
 
@@ -19,10 +19,10 @@ if exist "%SCRIPT_DIR%plugins\" (
     set "PLUGIN_SRC=%SCRIPT_DIR%plugins"
 ) else (
     :: Maybe running from the build output directly
-    if exist "%SCRIPT_DIR%build\Release\01_LevelsPlusPlugin.dll" (
+    if exist "%SCRIPT_DIR%build\Release\01_LevelsPlusShader.dll" (
         set "PLUGIN_SRC=%SCRIPT_DIR%build\Release"
     ) else (
-        echo ERROR: Cannot find plugin DLLs.
+        echo ERROR: Cannot find shader DLLs.
         echo Expected a "plugins" folder next to this script, or build\Release.
         echo.
         goto :fail
@@ -39,15 +39,15 @@ if exist "%SCRIPT_DIR%shipping_presets\" (
 
 :: Count what we have
 set "DLL_COUNT=0"
-for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Plugin.dll" 2^>nul ^| findstr /r "^[0-9]"') do set /a DLL_COUNT+=1
+for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do set /a DLL_COUNT+=1
 
 if %DLL_COUNT%==0 (
-    echo ERROR: No plugin DLLs found in "%PLUGIN_SRC%".
+    echo ERROR: No shader DLLs found in "%PLUGIN_SRC%".
     echo.
     goto :fail
 )
 
-echo Found %DLL_COUNT% plugin DLLs to install.
+echo Found %DLL_COUNT% shader DLLs to install.
 echo.
 echo Install location (global - all games):
 echo   %PLUGIN_DST%
@@ -65,11 +65,11 @@ if not exist "%PLUGIN_DST%" (
     )
 )
 
-:: Copy plugin DLLs (only numbered ones like 01_LevelsPlusPlugin.dll)
+:: Copy shader DLLs (only numbered ones like 01_LevelsPlusShader.dll)
 set "COPIED=0"
 set "ERRORS=0"
-echo Installing plugins...
-for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Plugin.dll" 2^>nul ^| findstr /r "^[0-9]"') do (
+echo Installing shaders...
+for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do (
     copy /Y "%PLUGIN_SRC%\%%f" "%PLUGIN_DST%\" >nul 2>&1
     if errorlevel 1 (
         echo   FAILED: %%f
@@ -124,7 +124,7 @@ echo.
 echo Plugins installed to: %PLUGIN_DST%
 if defined PRESET_SRC echo Presets installed to:  %PRESET_DST%
 echo.
-echo NOTE: These plugins require the patched UEVR fork.
+echo NOTE: These shaders require the patched UEVR fork.
 echo       They will NOT load on stock UEVR nightly.
 echo.
 pause

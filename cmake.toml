@@ -162,7 +162,7 @@ sources = ["examples/fakehdr_plugin/FakeHDRPlugin.cpp"]
 headers = ["examples/fakehdr_plugin/**.hpp", "examples/fakehdr_plugin/**.h"]
 
 [target.fakehdr_plugin.properties]
-OUTPUT_NAME = "05_FakeHDRPlugin"
+OUTPUT_NAME = "05_FakeHDRShader"
 
 [target.curves_plugin]
 type = "plugin"
@@ -170,7 +170,7 @@ sources = ["examples/curves_plugin/CurvesPlugin.cpp"]
 headers = ["examples/curves_plugin/**.hpp", "examples/curves_plugin/**.h"]
 
 [target.curves_plugin.properties]
-OUTPUT_NAME = "04_CurvesPlugin"
+OUTPUT_NAME = "04_CurvesShader"
 
 [target.technicolor_plugin]
 type = "plugin"
@@ -178,7 +178,7 @@ sources = ["examples/technicolor_plugin/TechnicolorPlugin.cpp"]
 headers = ["examples/technicolor_plugin/**.hpp", "examples/technicolor_plugin/**.h"]
 
 [target.technicolor_plugin.properties]
-OUTPUT_NAME = "07_TechnicolorPlugin"
+OUTPUT_NAME = "07_TechnicolorShader"
 
 [target.filmgrain2_plugin]
 type = "plugin"
@@ -186,7 +186,7 @@ sources = ["examples/filmgrain2_plugin/FilmGrain2Plugin.cpp"]
 headers = ["examples/filmgrain2_plugin/**.hpp", "examples/filmgrain2_plugin/**.h"]
 
 [target.filmgrain2_plugin.properties]
-OUTPUT_NAME = "10_FilmGrain2Plugin"
+OUTPUT_NAME = "10_FilmGrain2Shader"
 
 [target.levelsplus_plugin]
 type = "plugin"
@@ -194,7 +194,7 @@ sources = ["examples/levelsplus_plugin/LevelsPlusPlugin.cpp"]
 headers = ["examples/levelsplus_plugin/**.hpp", "examples/levelsplus_plugin/**.h"]
 
 [target.levelsplus_plugin.properties]
-OUTPUT_NAME = "01_LevelsPlusPlugin"
+OUTPUT_NAME = "01_LevelsPlusShader"
 
 [target.colourfulness_plugin]
 type = "plugin"
@@ -202,7 +202,7 @@ sources = ["examples/colourfulness_plugin/ColourfulnessPlugin.cpp"]
 headers = ["examples/colourfulness_plugin/**.hpp", "examples/colourfulness_plugin/**.h"]
 
 [target.colourfulness_plugin.properties]
-OUTPUT_NAME = "08_ColourfulnessPlugin"
+OUTPUT_NAME = "08_ColourfulnessShader"
 
 [target.liftgammagain_plugin]
 type = "plugin"
@@ -210,7 +210,7 @@ sources = ["examples/liftgammagain_plugin/LiftGammaGainPlugin.cpp"]
 headers = ["examples/liftgammagain_plugin/**.hpp", "examples/liftgammagain_plugin/**.h"]
 
 [target.liftgammagain_plugin.properties]
-OUTPUT_NAME = "02_LiftGammaGainPlugin"
+OUTPUT_NAME = "02_LiftGammaGainShader"
 
 [target.vibrance_plugin]
 type = "plugin"
@@ -218,7 +218,7 @@ sources = ["examples/vibrance_plugin/VibrancePlugin.cpp"]
 headers = ["examples/vibrance_plugin/**.hpp", "examples/vibrance_plugin/**.h"]
 
 [target.vibrance_plugin.properties]
-OUTPUT_NAME = "09_VibrancePlugin"
+OUTPUT_NAME = "09_VibranceShader"
 
 [target.tonemap_plugin]
 type = "plugin"
@@ -226,7 +226,7 @@ sources = ["examples/tonemap_plugin/TonemapPlugin.cpp"]
 headers = ["examples/tonemap_plugin/**.hpp", "examples/tonemap_plugin/**.h"]
 
 [target.tonemap_plugin.properties]
-OUTPUT_NAME = "03_TonemapPlugin"
+OUTPUT_NAME = "03_TonemapShader"
 
 [target.dpx_plugin]
 type = "plugin"
@@ -234,7 +234,7 @@ sources = ["examples/dpx_plugin/DPXPlugin.cpp"]
 headers = ["examples/dpx_plugin/**.hpp", "examples/dpx_plugin/**.h"]
 
 [target.dpx_plugin.properties]
-OUTPUT_NAME = "06_DPXPlugin"
+OUTPUT_NAME = "06_DPXShader"
 
 [target.hslshift_plugin]
 type = "plugin"
@@ -242,7 +242,7 @@ sources = ["examples/hslshift_plugin/HSLShiftPlugin.cpp"]
 headers = ["examples/hslshift_plugin/**.hpp", "examples/hslshift_plugin/**.h"]
 
 [target.hslshift_plugin.properties]
-OUTPUT_NAME = "11_HSLShiftPlugin"
+OUTPUT_NAME = "11_HSLShiftShader"
 
 [target.filmicpass_plugin]
 type = "plugin"
@@ -250,7 +250,7 @@ sources = ["examples/filmicpass_plugin/FilmicPassPlugin.cpp"]
 headers = ["examples/filmicpass_plugin/**.hpp", "examples/filmicpass_plugin/**.h"]
 
 [target.filmicpass_plugin.properties]
-OUTPUT_NAME = "12_FilmicPassPlugin"
+OUTPUT_NAME = "12_FilmicPassShader"
 
 [target.clarity_plugin]
 type = "plugin"
@@ -258,7 +258,7 @@ sources = ["examples/clarity_plugin/ClarityPlugin.cpp"]
 headers = ["examples/clarity_plugin/**.hpp", "examples/clarity_plugin/**.h"]
 
 [target.clarity_plugin.properties]
-OUTPUT_NAME = "13_ClarityPlugin"
+OUTPUT_NAME = "13_ClarityShader"
 
 [target.sdk-test]
 type = "shared"

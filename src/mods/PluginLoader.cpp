@@ -2030,17 +2030,20 @@ void PluginLoader::on_draw_ui() {
         const auto persistent_dir = Framework::get_persistent_dir();
         for (auto&& [name, _] : m_plugins) {
             // Derive settings filename from plugin DLL name:
-            // "01_LevelsPlusPlugin" → strip prefix digits/underscore → "LevelsPlusPlugin"
-            // → strip "Plugin" suffix → "LevelsPlus" → lowercase → "levelsplus_settings.txt"
+            // "01_LevelsPlusShader" → strip prefix digits/underscore → "LevelsPlusShader"
+            // → strip "Shader" suffix → "LevelsPlus" → lowercase → "levelsplus_settings.txt"
             std::string core = name;
             // Strip leading digits and underscores (e.g. "01_")
             size_t start = 0;
             while (start < core.size() && (std::isdigit(core[start]) || core[start] == '_')) ++start;
             core = core.substr(start);
-            // Strip "Plugin" suffix
-            const std::string suffix = "Plugin";
-            if (core.size() > suffix.size() && core.substr(core.size() - suffix.size()) == suffix) {
-                core = core.substr(0, core.size() - suffix.size());
+            // Strip "Shader" or "Plugin" suffix
+            const std::string shader_suffix = "Shader";
+            const std::string plugin_suffix = "Plugin";
+            if (core.size() > shader_suffix.size() && core.substr(core.size() - shader_suffix.size()) == shader_suffix) {
+                core = core.substr(0, core.size() - shader_suffix.size());
+            } else if (core.size() > plugin_suffix.size() && core.substr(core.size() - plugin_suffix.size()) == plugin_suffix) {
+                core = core.substr(0, core.size() - plugin_suffix.size());
             }
             // Lowercase
             for (auto& c : core) c = (char)std::tolower(c);

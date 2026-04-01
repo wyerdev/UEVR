@@ -7,8 +7,6 @@ Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix
 - Built on [praydog's UEVR](https://github.com/praydog/UEVR) ([Original UEVR README below](#original-uevr-readme)). 
 - Shaders ported from ReShade originals by CeeJay.dk, prod80, Loadus, Martins Upitis, Jeanseb, Ioxa, and kingeric1992 ([license files](examples/)).
 
-
-
 ## [How to Install](docs/INSTALL.md)
 
 ## What's New in This Fork
@@ -18,15 +16,15 @@ Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix
 - Fix crashes in Creatures of Ava — [technical details](docs/native-stereo-crash-handler.md)
 - Fix crashes on death in Returnal — [technical details](docs/transition-crash-handler.md)
 
-### 13 ReShade Post-Processing Plugins
+### 13 ReShade Post-Processing Shaders
 
 VR headsets often show washed-out colors and grey blacks compared to a flat monitor. This fork includes 13 ReShade shaders re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
 
 #### Color Correction (start here)
 
-These fix the most common VR problems. **LevelsPlus is the single most important plugin** — it fixes grey blacks, which almost every VR game suffers from.
+These fix the most common VR problems. **LevelsPlus is the single most important shader** — it fixes grey blacks, which almost every VR game suffers from.
 
-| # | Plugin | When to Use It |
+| # | Shader | When to Use It |
 |---|--------|----------------|
 | 01 | **LevelsPlus** | **Fix grey/washed-out blacks.** The #1 VR problem. Makes darks actually dark and whites actually bright. Also has per-channel gamma and optional ACES tone mapping. Start here. |
 | 02 | **LiftGammaGain** | Fine-tune shadows, midtones, and highlights separately. Use if LevelsPlus alone isn't enough — e.g. shadows are too blue, or highlights are too warm. |
@@ -34,9 +32,9 @@ These fix the most common VR problems. **LevelsPlus is the single most important
 
 #### Color Grading (make it look good)
 
-These change the overall look and feel of the image. Use after the correction plugins above.
+These change the overall look and feel of the image. Use after the correction shaders above.
 
-| # | Plugin | When to Use It |
+| # | Shader | When to Use It |
 |---|--------|----------------|
 | 04 | **Curves** | Add contrast to the image using S-curves. Makes bright areas brighter and dark areas darker. Multiple curve formulas (Luma, Chroma, etc). Subtle but effective. |
 | 05 | **FakeHDR** | Makes the image look more "HDR-like" by adding local tone mapping via bloom. Brightens details in dark areas without blowing out bright areas. [Technical docs](docs/fakehdr-vr-postprocess-plugin.md). |
@@ -47,23 +45,23 @@ These change the overall look and feel of the image. Use after the correction pl
 
 #### Film Effects (finishing touches)
 
-| # | Plugin | When to Use It |
+| # | Shader | When to Use It |
 |---|--------|----------------|
 | 10 | **FilmGrain2** | Adds subtle photographic film grain. Hides color banding in dark areas (common on VR panels). Keep it subtle — high values look noisy. |
 
 #### Advanced (new)
 
-| # | Plugin | When to Use It |
+| # | Shader | When to Use It |
 |---|--------|----------------|
 | 11 | **HSL Shift** | Remap individual colors to different hues. E.g. make greens more vivid, shift reds toward orange, cool down skin tones. 8 color zones you can shift independently. For fine color work. |
 | 12 | **Filmic Pass** | Full cinematic color processing: sigmoid curves per RGB channel, bleach bypass, fade, saturation, and per-channel gamma. More control than Tonemap — use when you want a specific film look. |
 | 13 | **Clarity** | Local contrast enhancement. Makes textures and details pop without changing colors. Works like sharpening but on mid-frequency detail. Multiple blend modes (Soft Light, Overlay, Hard Light, etc). **Very effective in VR** where things often look flat. |
 
-All plugins are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Plugins are loaded in numeric order (01→13). Settings are saved per-game automatically.
+All shaders are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Shaders are loaded in numeric order (01→13). Settings are saved per-game automatically.
 
 ### Presets
 
-Don't want to configure each plugin manually? Load a preset instead:
+Don't want to configure each shader manually? Load a preset instead:
 
 | Preset | What It Enables | Best For |
 |--------|----------------|----------|
@@ -75,6 +73,10 @@ Don't want to configure each plugin manually? Load a preset instead:
 | **HDR Look** | LevelsPlus + FakeHDR + Colourfulness | Local tone mapping + enhanced color |
 
 You can also save your own presets — **per-game** (local) or **shared across all games** (global).
+
+### Performance
+
+The shaders can have a small performance impact on DX12 games — typically **1–2 ms**. DX11 games may see a larger hit depending on the title. Performance varies game by game.
 
 ### Other Improvements
 

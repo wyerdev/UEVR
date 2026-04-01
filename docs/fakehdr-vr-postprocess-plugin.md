@@ -1,16 +1,16 @@
-# VR Post-Processing Plugins — Technical Documentation
+# VR Post-Processing Shaders — Technical Documentation
 
-13 UEVR C++ plugins that apply ReShade-based post-processing effects directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), these plugins modify the UE render target **before** UEVR copies it to VR, so effects are visible in-headset.
+13 UEVR C++ shaders that apply ReShade-based post-processing effects directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), these shaders modify the UE render target **before** UEVR copies it to VR, so effects are visible in-headset.
 
 The plugin architecture, DX11/DX12 rendering pipeline, and UEVR core API changes were designed for FakeHDR (CeeJay.dk's FakeHDR.fx) and are shared by all 13 plugins.
 
 Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and `on_draw_ui`) and several DX12 workarounds for UE's TYPELESS render targets and missing `ALLOW_RENDER_TARGET` flag.
 
-## Plugins
+## Shaders
 
 ### Color Correction
 
-| # | Plugin | Based On | What It Does | When to Use It |
+| # | Shader | Based On | What It Does | When to Use It |
 |---|--------|----------|--------------|----------------|
 | 01 | LevelsPlus | Levels.fx (prod80) | Black/white point, per-channel gamma, ACES tone mapping | **Fix grey/washed-out blacks** — the #1 VR problem. Start here. |
 | 02 | LiftGammaGain | LiftGammaGain.fx (prod80) | Shadow/midtone/highlight RGB lift, gamma, gain | Fine-tune shadow/midtone/highlight color separately. Use when LevelsPlus isn't enough. |
@@ -18,7 +18,7 @@ Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and
 
 ### Color Grading
 
-| # | Plugin | Based On | What It Does | When to Use It |
+| # | Shader | Based On | What It Does | When to Use It |
 |---|--------|----------|--------------|----------------|
 | 04 | Curves | Curves.fx (CeeJay.dk) | Luma/chroma contrast S-curve with multiple formulas | Add contrast — brights get brighter, darks get darker. Subtle but effective. |
 | 05 | FakeHDR | FakeHDR.fx (CeeJay.dk) | Local tone mapping via dual-radius bloom | "HDR look" — brightens dark details without blowing out highlights. |
@@ -29,13 +29,13 @@ Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and
 
 ### Film Effects
 
-| # | Plugin | Based On | What It Does | When to Use It |
+| # | Shader | Based On | What It Does | When to Use It |
 |---|--------|----------|--------------|----------------|
 | 10 | FilmGrain2 | FilmGrain2.fx (Martins Upitis) | Photographic film grain overlay | Hide color banding in dark areas (common on VR panels). Keep subtle. |
 
 ### Advanced
 
-| # | Plugin | Based On | What It Does | When to Use It |
+| # | Shader | Based On | What It Does | When to Use It |
 |---|--------|----------|--------------|----------------|
 | 11 | HSL Shift | HSLShift.fx (kingeric1992) | Per-hue color remapping (8 color zones) | Remap individual hues — e.g. shift reds toward orange, make greens more vivid. |
 | 12 | Filmic Pass | FilmicPass.fx (ReShade standard) | Sigmoid curves, bleach bypass, fade, per-channel gamma | Full cinematic color processing — more control than Tonemap for specific film looks. |
@@ -509,7 +509,7 @@ cmake --build build --config Release
 cmake --build build --config Release --target uevr --clean-first
 ```
 
-Output: `build/Release/01_LevelsPlusPlugin.dll` through `build/Release/13_ClarityPlugin.dll`
+Output: `build/Release/01_LevelsPlusShader.dll` through `build/Release/13_ClarityShader.dll`
 
 Deploy plugins + licenses + presets:
 ```bash

@@ -25,14 +25,14 @@ for pair in \
   fi
 done
 
-# Deploy plugin DLLs and their license files
+# Deploy shader DLLs and their license files
 PLUGIN_SRC="$SCRIPT_DIR/build/Release"
 PLUGIN_DST="$UEVR_DATA/UEVR/plugins"
 mkdir -p "$PLUGIN_DST"
-for dll in "$PLUGIN_SRC"/*Plugin.dll; do
+for dll in "$PLUGIN_SRC"/*Shader.dll; do
   if [[ -f "$dll" ]]; then
     cp -f "$dll" "$PLUGIN_DST/"
-    echo "  Copied plugin $(basename "$dll")"
+    echo "  Copied $(basename "$dll")"
     ((COPIED++))
   fi
 done

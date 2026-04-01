@@ -55,7 +55,7 @@ The 10 post-processing plugins are defined in `cmake.toml` and built alongside U
 cmake --build ./build --config Release --target fakehdr_plugin
 ```
 
-Or build all targets at once. Plugin DLLs are output to `build/Release/` with numeric prefixes (e.g. `05_FakeHDRPlugin.dll`).
+Or build all targets at once. Plugin DLLs are output to `build/Release/` with numeric prefixes (e.g. `05_FakeHDRShader.dll`).
 
 To deploy plugins, licenses, and shipping presets:
 
