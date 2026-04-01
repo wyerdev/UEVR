@@ -23,7 +23,7 @@ Standard ReShade has several issues with VR:
 
 ## How it works
 
-This shader hooks into UEVR's `on_post_render_vr_framework_dx11` callback,
+This shader hooks into UEVR's `on_pre_render_vr_framework_dx11` callback,
 which fires **per-eye** after the engine renders but before submission to the VR
 compositor. For each eye:
 
@@ -36,7 +36,6 @@ files needed.
 
 ## Parameters
 
-| Parameter | Default | Description |
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | HDR Power | 1.30 | 0.0 – 8.0 | Strength of the HDR tonemapping curve |

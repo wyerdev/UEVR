@@ -42,13 +42,13 @@ Instead of `install-plugins.bat`, you can copy files manually:
 |------|-------|
 | Global shaders | `%APPDATA%\UnrealVRMod\UEVR\plugins\` — loaded for **all** games |
 | Per-game shaders | `%APPDATA%\UnrealVRMod\<game_executable>\plugins\` — loaded for that game only |
-| User presets | `%APPDATA%\UnrealVRMod\uevr\data\plugins\presets\` |
+| User presets | `%APPDATA%\UnrealVRMod\UEVR\data\plugins\presets\` |
 | Built-in presets | `%APPDATA%\UnrealVRMod\UEVR\data\plugins\shipping_presets\` — overwritten on update |
 | Per-game settings | `%APPDATA%\UnrealVRMod\<game_executable>\data\plugins\` |
 
 ## Uninstalling
 
-Run `uninstall-plugins.bat` from the release folder or from `%APPDATA%\UnrealVRMod\UEVR\plugins\`. Removes all shader DLLs, licenses, and built-in presets.
+Run `uninstall-plugins.bat` from the release folder or from `%APPDATA%\UnrealVRMod\UEVR\plugins\`. Removes all shader DLLs, licenses, built-in presets, **user-saved presets, per-game shader settings, and active preset selections**.
 
 ## Updating
 

@@ -26,19 +26,14 @@ Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and
 | 07 | Technicolor | Technicolor2.fx (prod80) | 2-strip Technicolor color grading | Old Hollywood look — teal shadows, warm highlights. Use sparingly. |
 | 08 | Colourfulness | Colourfulness.fx (prod80) | Saturation enhancement with luma limiting | Boost saturation without clipping already-saturated colors. |
 | 09 | Vibrance | Vibrance.fx (Jeanseb) | Intelligent saturation boost (boosts dull colors more) | Make dull games pop without oversaturating skin tones. |
+| 11 | HSL Shift | HSLShift.fx (kingeric1992) | Per-hue color remapping (8 color zones) | Remap individual hues — e.g. shift reds toward orange, make greens more vivid. |
+| 12 | Filmic Pass | FilmicPass.fx (ReShade standard) | Sigmoid curves, bleach bypass, fade, per-channel gamma | Full cinematic color processing — more control than Tonemap for specific film looks. |
 
-### Film Effects
+### Detail & Film Effects
 
 | # | Shader | Based On | What It Does | When to Use It |
 |---|--------|----------|--------------|----------------|
 | 10 | FilmGrain2 | FilmGrain2.fx (Martins Upitis) | Photographic film grain overlay | Hide color banding in dark areas (common on VR panels). Keep subtle. |
-
-### Advanced
-
-| # | Shader | Based On | What It Does | When to Use It |
-|---|--------|----------|--------------|----------------|
-| 11 | HSL Shift | HSLShift.fx (kingeric1992) | Per-hue color remapping (8 color zones) | Remap individual hues — e.g. shift reds toward orange, make greens more vivid. |
-| 12 | Filmic Pass | FilmicPass.fx (ReShade standard) | Sigmoid curves, bleach bypass, fade, per-channel gamma | Full cinematic color processing — more control than Tonemap for specific film looks. |
 | 13 | Clarity | Clarity.fx (Ioxa) | Local contrast enhancement with blend mode selection | Makes textures/details pop without changing colors. **Very effective in VR** where things look flat. |
 
 All plugins share the same architecture:
@@ -55,8 +50,7 @@ All plugins share the same architecture:
 Plugins are loaded in DLL name alphabetical order. Numeric prefixes (`01_` through `13_`) ensure:
 - Color correction runs first (01–03)
 - Color grading runs in the middle (04–09)
-- Film grain (10) before advanced effects
-- Advanced effects run last (11–13): HSL Shift → Filmic Pass → Clarity
+- Detail & film effects run last (10–13): FilmGrain2 → HSL Shift → Filmic Pass → Clarity
 
 ### Preset System
 
