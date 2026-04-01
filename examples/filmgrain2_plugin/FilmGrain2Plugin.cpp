@@ -327,11 +327,12 @@ public:
     // Settings persistence
     // ========================================================================
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir(L"filmgrain2_settings.txt");
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"filmgrain2_settings.txt";
     }
 
     void save_settings() {
         try {
+            std::filesystem::create_directories(get_settings_path().parent_path());
             std::ofstream f(get_settings_path());
             if (f.is_open()) {
                 f << m_enabled << "\n" << m_grain_amount << "\n" << m_color_amount << "\n"

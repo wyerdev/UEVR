@@ -228,6 +228,7 @@ private:
     void draw_preset_ui();
     std::filesystem::path get_local_presets_dir();
     std::filesystem::path get_global_presets_dir();
+    std::filesystem::path get_shipping_presets_dir();
     std::vector<std::string> list_presets(const std::filesystem::path& dir);
     bool save_preset(const std::filesystem::path& presets_dir, const std::string& name);
     bool load_preset(const std::filesystem::path& preset_path);

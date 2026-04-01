@@ -1,17 +1,17 @@
 /*
-Vibrance Plugin for UEVR
-=========================
-A UEVR C++ plugin that applies CeeJay.dk's Vibrance effect to VR frames.
-Intelligently boosts saturation — pixels with little color get a larger boost
-than pixels that are already saturated.
+FilmicPass Plugin for UEVR
+===========================
+A UEVR C++ plugin that applies the FilmicPass effect to VR frames.
+Common color adjustments to mimic a cinema-like look: sigmoid curve per-channel,
+bleach bypass, saturation/fade, per-channel gamma, and soft-light blending.
 
 Applied to the UE4 scene render target in on_pre_render_vr_framework (DX11/DX12).
 
 UEVR plugin wrapper: MIT license (C++ wrapper code ONLY)
 
 Original shader:
-  Vibrance by Christian Cann Schuldt Jensen ~ CeeJay.dk
-  Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/Vibrance.fx
+  FilmicPass by an unknown author (from the standard ReShade shader pack).
+  Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/FilmicPass.fx
   From the crosire/reshade-shaders community collection.
   No explicit license was provided in the original file or repository.
   All rights remain with the original author.
@@ -38,7 +38,7 @@ Original shader:
 using namespace uevr;
 template<typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
-static const char* g_vibrance_vs_src = R"(
+static const char* g_filmicpass_vs_src = R"(
 struct VSOutput { float4 Position : SV_Position; float2 TexCoord : TEXCOORD0; };
 VSOutput main(uint vertexID : SV_VertexID) {
     VSOutput o; o.TexCoord = float2((vertexID << 1) & 2, vertexID & 2);
@@ -46,11 +46,28 @@ VSOutput main(uint vertexID : SV_VertexID) {
 }
 )";
 
-// Faithful port of CeeJay.dk's Vibrance v1.1
-static const char* g_vibrance_ps_src = R"(
-cbuffer VibranceParams : register(b0) {
-    float  Vibrance;
-    float3 VibranceRGBBalance;
+/*
+   Faithful port of FilmicPass.fx
+   Sigmoid per-channel color curves + soft-light blend + bleach bypass + fade/saturation
+*/
+static const char* g_filmicpass_ps_src = R"(
+cbuffer FilmicPassParams : register(b0) {
+    float Strength;
+    float Fade;
+    float Contrast;
+    float Linearization;
+    float Bleach;
+    float Saturation;
+    float RedCurve;
+    float GreenCurve;
+    float BlueCurve;
+    float BaseCurve;
+    float BaseGamma;
+    float EffectGamma;
+    float EffectGammaR;
+    float EffectGammaG;
+    float EffectGammaB;
+    float _pad0;
 };
 
 Texture2D SceneTexture : register(t0);
@@ -58,27 +75,109 @@ SamplerState PointSampler : register(s0);
 
 struct PSInput { float4 Position : SV_Position; float2 TexCoord : TEXCOORD0; };
 
-float4 main(PSInput input) : SV_Target
-{
-    float3 color = SceneTexture.Sample(PointSampler, input.TexCoord).rgb;
+static const float3 LumCoeff = float3(0.212656, 0.715158, 0.072186);
 
-    float3 coefLuma = float3(0.212656, 0.715158, 0.072186);
-    float luma = dot(coefLuma, color);
+float4 main(PSInput input) : SV_Target {
+    float3 B = SceneTexture.Sample(PointSampler, input.TexCoord).rgb;
+    float3 G = B;
+    float3 H = 0.01;
 
-    float max_color = max(color.r, max(color.g, color.b));
-    float min_color = min(color.r, min(color.g, color.b));
-    float color_saturation = max_color - min_color;
+    B = saturate(B);
+    B = pow(B, Linearization);
+    B = lerp(H, B, Contrast);
 
-    float3 coeffVibrance = VibranceRGBBalance * Vibrance;
-    color = lerp(luma, color, 1.0 + (coeffVibrance * (1.0 - (sign(coeffVibrance) * color_saturation))));
+    float A = dot(B.rgb, LumCoeff);
+    float3 D = A;
 
-    return float4(color, 1.0);
+    B = pow(abs(B), 1.0 / BaseGamma);
+
+    float a = RedCurve;
+    float b = GreenCurve;
+    float c = BlueCurve;
+    float d = BaseCurve;
+
+    float y = 1.0 / (1.0 + exp(a / 2.0));
+    float z = 1.0 / (1.0 + exp(b / 2.0));
+    float w = 1.0 / (1.0 + exp(c / 2.0));
+    float v = 1.0 / (1.0 + exp(d / 2.0));
+
+    float3 C = B;
+
+    D.r = (1.0 / (1.0 + exp(-a * (D.r - 0.5))) - y) / (1.0 - 2.0 * y);
+    D.g = (1.0 / (1.0 + exp(-b * (D.g - 0.5))) - z) / (1.0 - 2.0 * z);
+    D.b = (1.0 / (1.0 + exp(-c * (D.b - 0.5))) - w) / (1.0 - 2.0 * w);
+
+    D = pow(abs(D), 1.0 / EffectGamma);
+
+    float3 Di = 1.0 - D;
+    D = lerp(D, Di, Bleach);
+
+    D.r = pow(abs(D.r), 1.0 / EffectGammaR);
+    D.g = pow(abs(D.g), 1.0 / EffectGammaG);
+    D.b = pow(abs(D.b), 1.0 / EffectGammaB);
+
+    // Soft-light blend
+    if (D.r < 0.5) C.r = (2.0 * D.r - 1.0) * (B.r - B.r * B.r) + B.r;
+    else            C.r = (2.0 * D.r - 1.0) * (sqrt(B.r) - B.r) + B.r;
+
+    if (D.g < 0.5) C.g = (2.0 * D.g - 1.0) * (B.g - B.g * B.g) + B.g;
+    else            C.g = (2.0 * D.g - 1.0) * (sqrt(B.g) - B.g) + B.g;
+
+    if (D.b < 0.5) C.b = (2.0 * D.b - 1.0) * (B.b - B.b * B.b) + B.b;
+    else            C.b = (2.0 * D.b - 1.0) * (sqrt(B.b) - B.b) + B.b;
+
+    float3 F = lerp(B, C, Strength);
+
+    F = (1.0 / (1.0 + exp(-d * (F - 0.5))) - v) / (1.0 - 2.0 * v);
+
+    // Saturation / Fade matrix
+    float r2R = 1.0 - Saturation;
+    float g2R = 0.0 + Saturation;
+    float b2R = 0.0 + Saturation;
+
+    float r2G = 0.0 + Saturation;
+    float g2G = (1.0 - Fade) - Saturation;
+    float b2G = (0.0 + Fade) + Saturation;
+
+    float r2B = 0.0 + Saturation;
+    float g2B = (0.0 + Fade) + Saturation;
+    float b2B = (1.0 - Fade) - Saturation;
+
+    float3 iF = F;
+    F.r = (iF.r * r2R + iF.g * g2R + iF.b * b2R);
+    F.g = (iF.r * r2G + iF.g * g2G + iF.b * b2G);
+    F.b = (iF.r * r2B + iF.g * g2B + iF.b * b2B);
+
+    float N = dot(F.rgb, LumCoeff);
+    float3 Cn = F;
+
+    if (N < 0.5) Cn = (2.0 * N - 1.0) * (F - F * F) + F;
+    else         Cn = (2.0 * N - 1.0) * (sqrt(F) - F) + F;
+
+    Cn = pow(max(Cn, 0), 1.0 / Linearization);
+
+    float3 Fn = lerp(B, Cn, Strength);
+    return float4(Fn, 1.0);
 }
 )";
 
-struct VibranceParamsCB {
-    float Vibrance;
-    float VibranceRGBBalance[3];
+struct FilmicPassParamsCB {
+    float Strength;
+    float Fade;
+    float Contrast;
+    float Linearization;
+    float Bleach;
+    float Saturation;
+    float RedCurve;
+    float GreenCurve;
+    float BlueCurve;
+    float BaseCurve;
+    float BaseGamma;
+    float EffectGamma;
+    float EffectGammaR;
+    float EffectGammaG;
+    float EffectGammaB;
+    float _pad0;
 };
 
 static DXGI_FORMAT resolve_typeless_format(DXGI_FORMAT fmt) {
@@ -95,12 +194,25 @@ static DXGI_FORMAT resolve_typeless_format(DXGI_FORMAT fmt) {
     }
 }
 
-static constexpr const char* VIB_VERSION = "1.0.0";
+static constexpr const char* FP_VERSION = "1.0.0";
 
-class VibrancePlugin : public uevr::Plugin {
+class FilmicPassPlugin : public uevr::Plugin {
 public:
-    float m_vibrance = 0.15f;
-    float m_balance[3] = {1.0f, 1.0f, 1.0f};
+    float m_strength = 0.85f;
+    float m_fade = 0.4f;
+    float m_contrast = 1.0f;
+    float m_linearization = 0.5f;
+    float m_bleach = 0.0f;
+    float m_saturation = -0.15f;
+    float m_red_curve = 1.0f;
+    float m_green_curve = 1.0f;
+    float m_blue_curve = 1.0f;
+    float m_base_curve = 1.5f;
+    float m_base_gamma = 1.0f;
+    float m_effect_gamma = 0.65f;
+    float m_effect_gamma_r = 1.0f;
+    float m_effect_gamma_g = 1.0f;
+    float m_effect_gamma_b = 1.0f;
     bool  m_enabled = false;
 
     ComPtr<ID3D11DeviceContext> m_dx11_ctx;
@@ -110,8 +222,8 @@ public:
 
     struct DX11TargetState {
         ComPtr<ID3D11Texture2D> copy_tex; ComPtr<ID3D11ShaderResourceView> copy_srv; ComPtr<ID3D11RenderTargetView> rtv;
-        ID3D11Texture2D* rtv_tex = nullptr; UINT width = 0, height = 0; bool cache_hit_logged = false;
-        void reset() { copy_tex.Reset(); copy_srv.Reset(); rtv.Reset(); rtv_tex = nullptr; width = 0; height = 0; cache_hit_logged = false; }
+        ID3D11Texture2D* rtv_tex = nullptr; UINT width = 0, height = 0;
+        void reset() { copy_tex.Reset(); copy_srv.Reset(); rtv.Reset(); rtv_tex = nullptr; width = 0; height = 0; }
     };
     DX11TargetState m_dx11_targets[2];
     DX11TargetState& find_dx11_target(UINT w, UINT h) {
@@ -121,7 +233,7 @@ public:
     }
 
     ComPtr<ID3D12RootSignature> m_dx12_root_sig; ComPtr<ID3D12PipelineState> m_dx12_pso; ComPtr<ID3D12Resource> m_dx12_cb;
-    VibranceParamsCB* m_dx12_cb_mapped = nullptr; DXGI_FORMAT m_dx12_rt_format = DXGI_FORMAT_UNKNOWN; bool m_dx12_ready = false;
+    FilmicPassParamsCB* m_dx12_cb_mapped = nullptr; DXGI_FORMAT m_dx12_rt_format = DXGI_FORMAT_UNKNOWN; bool m_dx12_ready = false;
     struct DX12TargetState {
         ComPtr<ID3D12Resource> copy_tex; ComPtr<ID3D12DescriptorHeap> srv_heap; ComPtr<ID3D12DescriptorHeap> rtv_heap;
         UINT width = 0, height = 0;
@@ -135,28 +247,80 @@ public:
     }
 
     void on_dllmain() override {}
-    void on_initialize() override { API::get()->log_info("[Vibrance] Plugin initialized"); load_settings(); }
+    void on_initialize() override { API::get()->log_info("[FilmicPass] Plugin initialized"); load_settings(); }
 
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"vibrance_settings.txt";
-    }
-    void save_settings() { try { std::filesystem::create_directories(get_settings_path().parent_path()); std::ofstream f(get_settings_path()); if (f.is_open()) f << m_enabled << "\n" << m_vibrance << "\n" << m_balance[0] << " " << m_balance[1] << " " << m_balance[2] << "\n"; } catch (...) {} }
-    void load_settings() {
-        try { std::ifstream f(get_settings_path()); if (f.is_open()) { int e; if (f >> e) m_enabled = (e != 0); f >> m_vibrance >> m_balance[0] >> m_balance[1] >> m_balance[2];
-            m_vibrance = max(-1.0f, min(1.0f, m_vibrance)); for (int i = 0; i < 3; i++) m_balance[i] = max(0.0f, min(10.0f, m_balance[i])); } } catch (...) {}
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"filmicpass_settings.txt";
     }
 
-    void fill_cb(VibranceParamsCB* p) { p->Vibrance = m_vibrance; memcpy(p->VibranceRGBBalance, m_balance, sizeof(float)*3); }
+    void save_settings() {
+        try { std::filesystem::create_directories(get_settings_path().parent_path()); std::ofstream f(get_settings_path()); if (!f.is_open()) return;
+            f << m_enabled << "\n" << m_strength << "\n" << m_fade << "\n" << m_contrast << "\n"
+              << m_linearization << "\n" << m_bleach << "\n" << m_saturation << "\n"
+              << m_red_curve << "\n" << m_green_curve << "\n" << m_blue_curve << "\n"
+              << m_base_curve << "\n" << m_base_gamma << "\n" << m_effect_gamma << "\n"
+              << m_effect_gamma_r << "\n" << m_effect_gamma_g << "\n" << m_effect_gamma_b << "\n";
+        } catch (...) {}
+    }
+
+    void load_settings() {
+        try { std::ifstream f(get_settings_path()); if (!f.is_open()) return;
+            int e; if (f >> e) m_enabled = (e != 0);
+            f >> m_strength >> m_fade >> m_contrast >> m_linearization >> m_bleach >> m_saturation
+              >> m_red_curve >> m_green_curve >> m_blue_curve >> m_base_curve >> m_base_gamma
+              >> m_effect_gamma >> m_effect_gamma_r >> m_effect_gamma_g >> m_effect_gamma_b;
+            m_strength = max(0.05f, min(1.5f, m_strength)); m_fade = max(0.0f, min(0.6f, m_fade));
+            m_contrast = max(0.5f, min(2.0f, m_contrast)); m_linearization = max(0.5f, min(2.0f, m_linearization));
+            m_bleach = max(-0.5f, min(1.0f, m_bleach)); m_saturation = max(-1.0f, min(1.0f, m_saturation));
+            m_red_curve = max(0.0f, min(2.0f, m_red_curve)); m_green_curve = max(0.0f, min(2.0f, m_green_curve));
+            m_blue_curve = max(0.0f, min(2.0f, m_blue_curve)); m_base_curve = max(0.0f, min(2.0f, m_base_curve));
+            m_base_gamma = max(0.7f, min(2.0f, m_base_gamma)); m_effect_gamma = max(0.0f, min(2.0f, m_effect_gamma));
+            m_effect_gamma_r = max(0.0f, min(2.0f, m_effect_gamma_r)); m_effect_gamma_g = max(0.0f, min(2.0f, m_effect_gamma_g));
+            m_effect_gamma_b = max(0.0f, min(2.0f, m_effect_gamma_b));
+        } catch (...) {}
+    }
+
+    void fill_cb(FilmicPassParamsCB* p) {
+        p->Strength = m_strength; p->Fade = m_fade; p->Contrast = m_contrast; p->Linearization = m_linearization;
+        p->Bleach = m_bleach; p->Saturation = m_saturation; p->RedCurve = m_red_curve; p->GreenCurve = m_green_curve;
+        p->BlueCurve = m_blue_curve; p->BaseCurve = m_base_curve; p->BaseGamma = m_base_gamma;
+        p->EffectGamma = m_effect_gamma; p->EffectGammaR = m_effect_gamma_r; p->EffectGammaG = m_effect_gamma_g; p->EffectGammaB = m_effect_gamma_b;
+    }
 
     void on_draw_ui() override {
-        if (ImGui::CollapsingHeader("Vibrance Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", VIB_VERSION); bool changed = false;
-            changed |= ImGui::Checkbox("Enabled##Vib", &m_enabled);
-            changed |= ImGui::SliderFloat("Vibrance", &m_vibrance, -1.0f, 1.0f, "%.2f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Intelligently saturates (positive) or desaturates (negative)");
-            changed |= ImGui::SliderFloat3("RGB Balance", m_balance, 0.0f, 10.0f, "%.1f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-channel vibrance multiplier");
-            if (ImGui::Button("Reset##Vib")) { m_vibrance = 0.15f; m_balance[0] = m_balance[1] = m_balance[2] = 1.0f; changed = true; }
+        if (ImGui::CollapsingHeader("Filmic Pass Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextDisabled("v%s", FP_VERSION); bool changed = false;
+            changed |= ImGui::Checkbox("Enabled##FP", &m_enabled);
+            changed |= ImGui::SliderFloat("Strength##FP", &m_strength, 0.05f, 1.5f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Strength of the color curve altering");
+            changed |= ImGui::SliderFloat("Fade##FP", &m_fade, 0.0f, 0.6f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Decreases contrast to imitate faded image");
+            changed |= ImGui::SliderFloat("Contrast##FP", &m_contrast, 0.5f, 2.0f, "%.2f");
+            changed |= ImGui::SliderFloat("Linearization##FP", &m_linearization, 0.5f, 2.0f, "%.2f");
+            changed |= ImGui::SliderFloat("Bleach##FP", &m_bleach, -0.5f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("More bleach = more contrast, less color");
+            changed |= ImGui::SliderFloat("Saturation##FP", &m_saturation, -1.0f, 1.0f, "%.2f");
+            if (ImGui::TreeNode("Per-Channel Curves##FP")) {
+                changed |= ImGui::SliderFloat("Red Curve##FP", &m_red_curve, 0.0f, 2.0f, "%.2f");
+                changed |= ImGui::SliderFloat("Green Curve##FP", &m_green_curve, 0.0f, 2.0f, "%.2f");
+                changed |= ImGui::SliderFloat("Blue Curve##FP", &m_blue_curve, 0.0f, 2.0f, "%.2f");
+                changed |= ImGui::SliderFloat("Base Curve##FP", &m_base_curve, 0.0f, 2.0f, "%.2f");
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNode("Gamma##FP")) {
+                changed |= ImGui::SliderFloat("Base Gamma##FP", &m_base_gamma, 0.7f, 2.0f, "%.2f");
+                changed |= ImGui::SliderFloat("Effect Gamma##FP", &m_effect_gamma, 0.0f, 2.0f, "%.2f");
+                changed |= ImGui::SliderFloat("Effect Gamma R##FP", &m_effect_gamma_r, 0.0f, 2.0f, "%.2f");
+                changed |= ImGui::SliderFloat("Effect Gamma G##FP", &m_effect_gamma_g, 0.0f, 2.0f, "%.2f");
+                changed |= ImGui::SliderFloat("Effect Gamma B##FP", &m_effect_gamma_b, 0.0f, 2.0f, "%.2f");
+                ImGui::TreePop();
+            }
+            if (ImGui::Button("Reset##FP")) {
+                m_strength=0.85f; m_fade=0.4f; m_contrast=1.0f; m_linearization=0.5f; m_bleach=0.0f; m_saturation=-0.15f;
+                m_red_curve=1.0f; m_green_curve=1.0f; m_blue_curve=1.0f; m_base_curve=1.5f; m_base_gamma=1.0f;
+                m_effect_gamma=0.65f; m_effect_gamma_r=1.0f; m_effect_gamma_g=1.0f; m_effect_gamma_b=1.0f;
+                changed = true;
+            }
             if (changed) save_settings();
         }
     }
@@ -217,11 +381,11 @@ private:
 
     bool init_shaders_dx11(ID3D11Device* device) {
         ComPtr<ID3DBlob> vsb, vse, psb, pse;
-        if (FAILED(D3DCompile(g_vibrance_vs_src, strlen(g_vibrance_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
-        if (FAILED(D3DCompile(g_vibrance_ps_src, strlen(g_vibrance_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) { if (pse) API::get()->log_error("[Vibrance] PS: %s", (const char*)pse->GetBufferPointer()); return false; }
+        if (FAILED(D3DCompile(g_filmicpass_vs_src, strlen(g_filmicpass_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
+        if (FAILED(D3DCompile(g_filmicpass_ps_src, strlen(g_filmicpass_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) { if (pse) API::get()->log_error("[FilmicPass] PS: %s", (const char*)pse->GetBufferPointer()); return false; }
         if (FAILED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &m_vs))) return false;
         if (FAILED(device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &m_ps))) return false;
-        D3D11_BUFFER_DESC cbd{}; cbd.ByteWidth = sizeof(VibranceParamsCB); cbd.Usage = D3D11_USAGE_DYNAMIC; cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        D3D11_BUFFER_DESC cbd{}; cbd.ByteWidth = sizeof(FilmicPassParamsCB); cbd.Usage = D3D11_USAGE_DYNAMIC; cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         if (FAILED(device->CreateBuffer(&cbd, nullptr, &m_cb))) return false;
         D3D11_SAMPLER_DESC sd{}; sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT; sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sd.ComparisonFunc = D3D11_COMPARISON_NEVER; sd.MaxLOD = D3D11_FLOAT32_MAX;
         if (FAILED(device->CreateSamplerState(&sd, &m_sampler))) return false;
@@ -244,7 +408,7 @@ private:
         if (!m_shader_ready && !init_shaders_dx11(device)) return;
         auto& ts = find_dx11_target(td.Width, td.Height); if (!ensure_dx11_copy(device, target, ts)) return;
         if (ts.rtv_tex != target) { ts.rtv.Reset(); D3D11_RENDER_TARGET_VIEW_DESC rd{}; rd.Format = resolve_typeless_format(td.Format); rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D; if (FAILED(device->CreateRenderTargetView(target, &rd, &ts.rtv))) return; ts.rtv_tex = target; }
-        D3D11_MAPPED_SUBRESOURCE mapped{}; if (SUCCEEDED(ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) { fill_cb((VibranceParamsCB*)mapped.pData); ctx->Unmap(m_cb.Get(), 0); }
+        D3D11_MAPPED_SUBRESOURCE mapped{}; if (SUCCEEDED(ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) { fill_cb((FilmicPassParamsCB*)mapped.pData); ctx->Unmap(m_cb.Get(), 0); }
         ctx->CopyResource(ts.copy_tex.Get(), target);
         D3D11_VIEWPORT vp{}; vp.Width = (float)ts.width; vp.Height = (float)ts.height; vp.MaxDepth = 1.0f; ctx->RSSetViewports(1, &vp);
         ID3D11RenderTargetView* rtv_raw = ts.rtv.Get(); ctx->OMSetRenderTargets(1, &rtv_raw, nullptr);
@@ -264,8 +428,8 @@ private:
         ComPtr<ID3DBlob> sb, se; if (FAILED(D3D12SerializeVersionedRootSignature(&rsd, &sb, &se))) return false;
         if (FAILED(device->CreateRootSignature(0, sb->GetBufferPointer(), sb->GetBufferSize(), IID_PPV_ARGS(&m_dx12_root_sig)))) return false;
         ComPtr<ID3DBlob> vsb, vse, psb, pse;
-        if (FAILED(D3DCompile(g_vibrance_vs_src, strlen(g_vibrance_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
-        if (FAILED(D3DCompile(g_vibrance_ps_src, strlen(g_vibrance_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) return false;
+        if (FAILED(D3DCompile(g_filmicpass_vs_src, strlen(g_filmicpass_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
+        if (FAILED(D3DCompile(g_filmicpass_ps_src, strlen(g_filmicpass_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) return false;
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{}; pd.pRootSignature = m_dx12_root_sig.Get(); pd.VS = { vsb->GetBufferPointer(), vsb->GetBufferSize() }; pd.PS = { psb->GetBufferPointer(), psb->GetBufferSize() };
         pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL; pd.SampleMask = UINT_MAX;
         pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; pd.NumRenderTargets = 1; pd.RTVFormats[0] = rt_format; pd.SampleDesc.Count = 1;
@@ -291,4 +455,4 @@ private:
     }
 };
 
-std::unique_ptr<VibrancePlugin> g_plugin{new VibrancePlugin()};
+std::unique_ptr<FilmicPassPlugin> g_plugin{new FilmicPassPlugin()};

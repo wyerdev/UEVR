@@ -226,11 +226,12 @@ public:
     // Settings
     // ========================================================================
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir(L"technicolor_settings.txt");
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"technicolor_settings.txt";
     }
 
     void save_settings() {
         try {
+            std::filesystem::create_directories(get_settings_path().parent_path());
             std::ofstream f(get_settings_path());
             if (f.is_open()) {
                 f << m_enabled << "\n" << m_power << "\n"

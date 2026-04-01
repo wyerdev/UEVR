@@ -1,25 +1,45 @@
 # VR Post-Processing Plugins — Technical Documentation
 
-10 UEVR C++ plugins that apply ReShade-based post-processing effects directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), these plugins modify the UE render target **before** UEVR copies it to VR, so effects are visible in-headset.
+13 UEVR C++ plugins that apply ReShade-based post-processing effects directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), these plugins modify the UE render target **before** UEVR copies it to VR, so effects are visible in-headset.
 
-The plugin architecture, DX11/DX12 rendering pipeline, and UEVR core API changes were designed for FakeHDR (CeeJay.dk's FakeHDR.fx) and are shared by all 10 plugins.
+The plugin architecture, DX11/DX12 rendering pipeline, and UEVR core API changes were designed for FakeHDR (CeeJay.dk's FakeHDR.fx) and are shared by all 13 plugins.
 
 Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and `on_draw_ui`) and several DX12 workarounds for UE's TYPELESS render targets and missing `ALLOW_RENDER_TARGET` flag.
 
 ## Plugins
 
-| # | Plugin | Based On | Description |
-|---|--------|----------|-------------|
-| 01 | LevelsPlus | Levels.fx (prod80) | Black/white point, per-channel gamma, ACES tone mapping |
-| 02 | LiftGammaGain | LiftGammaGain.fx (prod80) | Shadow/midtone/highlight RGB lift, gamma, gain |
-| 03 | Tonemap | Tonemap.fx (prod80) | Gamma, exposure, saturation, bleach bypass, defog |
-| 04 | Curves | Curves.fx (CeeJay.dk) | Luma/chroma contrast S-curve with multiple formulas |
-| 05 | FakeHDR | FakeHDR.fx (CeeJay.dk) | Local tone mapping via dual-radius bloom |
-| 06 | DPX | DPX.fx (Loadus) | Cineon film stock color emulation |
-| 07 | Technicolor | Technicolor2.fx (prod80) | 2-strip Technicolor color grading |
-| 08 | Colourfulness | Colourfulness.fx (prod80) | Saturation enhancement with luma limiting |
-| 09 | Vibrance | Vibrance.fx (Jeanseb) | Intelligent saturation boost |
-| 10 | FilmGrain2 | FilmGrain2.fx (Martins Upitis) | Photographic film grain overlay |
+### Color Correction
+
+| # | Plugin | Based On | What It Does | When to Use It |
+|---|--------|----------|--------------|----------------|
+| 01 | LevelsPlus | Levels.fx (prod80) | Black/white point, per-channel gamma, ACES tone mapping | **Fix grey/washed-out blacks** — the #1 VR problem. Start here. |
+| 02 | LiftGammaGain | LiftGammaGain.fx (prod80) | Shadow/midtone/highlight RGB lift, gamma, gain | Fine-tune shadow/midtone/highlight color separately. Use when LevelsPlus isn't enough. |
+| 03 | Tonemap | Tonemap.fx (prod80) | Gamma, exposure, saturation, bleach bypass, defog | Adjust overall brightness/saturation. Bleach bypass for desaturated film look. Defog to remove haze. |
+
+### Color Grading
+
+| # | Plugin | Based On | What It Does | When to Use It |
+|---|--------|----------|--------------|----------------|
+| 04 | Curves | Curves.fx (CeeJay.dk) | Luma/chroma contrast S-curve with multiple formulas | Add contrast — brights get brighter, darks get darker. Subtle but effective. |
+| 05 | FakeHDR | FakeHDR.fx (CeeJay.dk) | Local tone mapping via dual-radius bloom | "HDR look" — brightens dark details without blowing out highlights. |
+| 06 | DPX | DPX.fx (Loadus) | Cineon film stock color emulation | Warm cinematic color shift. Good for games that look too cold/digital. |
+| 07 | Technicolor | Technicolor2.fx (prod80) | 2-strip Technicolor color grading | Old Hollywood look — teal shadows, warm highlights. Use sparingly. |
+| 08 | Colourfulness | Colourfulness.fx (prod80) | Saturation enhancement with luma limiting | Boost saturation without clipping already-saturated colors. |
+| 09 | Vibrance | Vibrance.fx (Jeanseb) | Intelligent saturation boost (boosts dull colors more) | Make dull games pop without oversaturating skin tones. |
+
+### Film Effects
+
+| # | Plugin | Based On | What It Does | When to Use It |
+|---|--------|----------|--------------|----------------|
+| 10 | FilmGrain2 | FilmGrain2.fx (Martins Upitis) | Photographic film grain overlay | Hide color banding in dark areas (common on VR panels). Keep subtle. |
+
+### Advanced
+
+| # | Plugin | Based On | What It Does | When to Use It |
+|---|--------|----------|--------------|----------------|
+| 11 | HSL Shift | HSLShift.fx (kingeric1992) | Per-hue color remapping (8 color zones) | Remap individual hues — e.g. shift reds toward orange, make greens more vivid. |
+| 12 | Filmic Pass | FilmicPass.fx (ReShade standard) | Sigmoid curves, bleach bypass, fade, per-channel gamma | Full cinematic color processing — more control than Tonemap for specific film looks. |
+| 13 | Clarity | Clarity.fx (Ioxa) | Local contrast enhancement with blend mode selection | Makes textures/details pop without changing colors. **Very effective in VR** where things look flat. |
 
 All plugins share the same architecture:
 - DX11 and DX12 dual-path rendering
@@ -27,24 +47,25 @@ All plugins share the same architecture:
 - Copy→draw pattern: copy scene to SRV texture, run pixel shader, copy result back
 - Runtime `D3DCompile` — no pre-compiled `.cso` files needed
 - ImGui settings panel in the UEVR menu sidebar (via `on_draw_ui` callback)
-- Auto-save settings per game to `%APPDATA%/UnrealVRMod/<game>/<name>_settings.txt`
+- Auto-save settings per game to `%APPDATA%/UnrealVRMod/<game>/data/plugins/<name>_settings.txt`
 - All disabled by default (`m_enabled = false`)
 
 ### Plugin Load Order
 
-Plugins are loaded in DLL name alphabetical order. Numeric prefixes (`01_` through `10_`) ensure:
-- Levels/color correction runs first (01–03)
-- Color grading effects run in the middle (04–09)
-- Film grain runs last (10)
+Plugins are loaded in DLL name alphabetical order. Numeric prefixes (`01_` through `13_`) ensure:
+- Color correction runs first (01–03)
+- Color grading runs in the middle (04–09)
+- Film grain (10) before advanced effects
+- Advanced effects run last (11–13): HSL Shift → Filmic Pass → Clarity
 
 ### Preset System
 
 The PluginLoader manages a preset system for saving/loading all plugin settings at once:
-- **Local presets**: `%APPDATA%/UnrealVRMod/<game>/presets/<name>/` — per-game
-- **Global presets**: `%APPDATA%/UnrealVRMod/uevr/presets/<name>/` — shared across games
+- **Local presets**: `%APPDATA%/UnrealVRMod/<game>/data/plugins/presets/<name>/` — per-game
+- **Global presets**: `%APPDATA%/UnrealVRMod/uevr/data/plugins/presets/<name>/` — shared across games
+- **Built-in presets**: `%APPDATA%/UnrealVRMod/UEVR/data/plugins/shipping_presets/` — read-only, overwritten on update
 - Each preset folder contains copies of all `*_settings.txt` files
-- **Quick Save** buttons auto-generate names ("Preset 1", "Preset 2", ...) for gamepad-only VR sessions
-- **Plugin status display** shows `[ON]`/`[OFF]` per plugin, updates live after preset load
+- Active preset tracking persists per game via `active_preset.txt`
 - Ships with 6 built-in presets (All Off, VR Fix - Black Levels, VR Essentials, Cinematic, Vivid, HDR Look)
 
 ## Problem Statement
@@ -447,8 +468,11 @@ examples/
     technicolor_plugin/      — TechnicolorPlugin.cpp + LICENSE
     tonemap_plugin/          — TonemapPlugin.cpp + LICENSE
     vibrance_plugin/         — VibrancePlugin.cpp + LICENSE
+    hslshift_plugin/         — HSLShiftPlugin.cpp + LICENSE
+    filmicpass_plugin/       — FilmicPassPlugin.cpp + LICENSE
+    clarity_plugin/          — ClarityPlugin.cpp + LICENSE
 
-presets/                     — Shipping presets (6 folders, 10 settings files each)
+presets/                     — Shipping presets (6 folders, 13 settings files each)
 
 include/uevr/
     API.h                    — Pre-render + draw_ui callback types added to C API
@@ -459,7 +483,7 @@ src/
     Mod.hpp                  — Virtual method stubs
     mods/
         PluginLoader.hpp     — Storage + dispatch + preset system declarations
-        PluginLoader.cpp     — Plugin dispatch + preset save/load/delete + Quick Save + status display + on_draw_ui
+        PluginLoader.cpp     — Plugin dispatch + preset save/load/delete + status display + on_draw_ui
         VR.cpp               — Resource state bracketing + RT validation gate + dispatch loop
         vr/
             D3D12Component.hpp — prepare/restore_plugin_rt API + plugin command context
@@ -468,7 +492,7 @@ src/
                 CommandContext.cpp  — SEH-wrapped execute + recover + discard
                 TextureContext.cpp  — update_texture() for in-place heap reuse
 
-cmake.toml                   — All 10 plugin targets with numeric-prefixed OUTPUT_NAMEs
+cmake.toml                   — All 13 plugin targets with numeric-prefixed OUTPUT_NAMEs
 deploy.sh                    — Build deployment script (DLLs + plugins + licenses + presets)
 ```
 
@@ -485,11 +509,11 @@ cmake --build build --config Release
 cmake --build build --config Release --target uevr --clean-first
 ```
 
-Output: `build/Release/01_LevelsPlusPlugin.dll` through `build/Release/10_FilmGrain2Plugin.dll`
+Output: `build/Release/01_LevelsPlusPlugin.dll` through `build/Release/13_ClarityPlugin.dll`
 
 Deploy plugins + licenses + presets:
 ```bash
 bash deploy.sh
 ```
 
-Plugins are deployed to `%APPDATA%/UnrealVRMod/uevr/Plugins/`. Shipping presets are deployed to `%APPDATA%/UnrealVRMod/uevr/presets/` (only if the preset folder doesn't already exist, to preserve user edits).
+Plugins are deployed to `%APPDATA%/UnrealVRMod/UEVR/plugins/` (global). Shipping presets are deployed to `%APPDATA%/UnrealVRMod/UEVR/shipping_presets/` (always overwritten — these are built-in, not user presets).

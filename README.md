@@ -5,7 +5,7 @@ Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix
 
 **Credits:** 
 - Built on [praydog's UEVR](https://github.com/praydog/UEVR) ([Original UEVR README below](#original-uevr-readme)). 
-- Shaders ported from ReShade originals by CeeJay.dk, prod80, Loadus, Martins Upitis, and Jeanseb ([license files](examples/)).
+- Shaders ported from ReShade originals by CeeJay.dk, prod80, Loadus, Martins Upitis, Jeanseb, Ioxa, and kingeric1992 ([license files](examples/)).
 
 
 
@@ -18,24 +18,48 @@ Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix
 - Fix crashes in Creatures of Ava — [technical details](docs/native-stereo-crash-handler.md)
 - Fix crashes on death in Returnal — [technical details](docs/transition-crash-handler.md)
 
-### 10 ReShade Post-Processing Plugins
+### 13 ReShade Post-Processing Plugins
 
-VR headsets often show washed-out colors and grey blacks compared to a flat monitor. This fork includes 10 ReShade shaders re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
+VR headsets often show washed-out colors and grey blacks compared to a flat monitor. This fork includes 13 ReShade shaders re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
 
-| # | Plugin | Based On | What It Does |
-|---|--------|----------|--------------|
-| 01 | LevelsPlus | Levels.fx (prod80) | Black/white point, per-channel gamma — **fixes grey/washed-out blacks** |
-| 02 | LiftGammaGain | LiftGammaGain.fx (prod80) | Shadow/midtone/highlight RGB lift, gamma, gain |
-| 03 | Tonemap | Tonemap.fx (prod80) | Gamma, exposure, saturation, bleach bypass, defog |
-| 04 | Curves | Curves.fx (CeeJay.dk) | Luma/chroma contrast S-curve |
-| 05 | FakeHDR | FakeHDR.fx (CeeJay.dk) | Local tone mapping via dual-radius bloom — [technical docs](docs/fakehdr-vr-postprocess-plugin.md) |
-| 06 | DPX | DPX.fx (Loadus) | Cineon film stock color emulation |
-| 07 | Technicolor | Technicolor2.fx (prod80) | 2-strip Technicolor color grading |
-| 08 | Colourfulness | Colourfulness.fx (prod80) | Saturation enhancement with luma limiting |
-| 09 | Vibrance | Vibrance.fx (Jeanseb) | Intelligent saturation boost |
-| 10 | FilmGrain2 | FilmGrain2.fx (Martins Upitis) | Photographic film grain overlay |
+#### Color Correction (start here)
 
-All plugins are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Plugins are loaded in numeric order (01→10): levels/color correction first, grain last. Settings are saved per-game automatically.
+These fix the most common VR problems. **LevelsPlus is the single most important plugin** — it fixes grey blacks, which almost every VR game suffers from.
+
+| # | Plugin | When to Use It |
+|---|--------|----------------|
+| 01 | **LevelsPlus** | **Fix grey/washed-out blacks.** The #1 VR problem. Makes darks actually dark and whites actually bright. Also has per-channel gamma and optional ACES tone mapping. Start here. |
+| 02 | **LiftGammaGain** | Fine-tune shadows, midtones, and highlights separately. Use if LevelsPlus alone isn't enough — e.g. shadows are too blue, or highlights are too warm. |
+| 03 | **Tonemap** | Adjust overall gamma, exposure, and saturation. Also has bleach bypass (desaturated high-contrast film look) and defog (removes haze/fog). |
+
+#### Color Grading (make it look good)
+
+These change the overall look and feel of the image. Use after the correction plugins above.
+
+| # | Plugin | When to Use It |
+|---|--------|----------------|
+| 04 | **Curves** | Add contrast to the image using S-curves. Makes bright areas brighter and dark areas darker. Multiple curve formulas (Luma, Chroma, etc). Subtle but effective. |
+| 05 | **FakeHDR** | Makes the image look more "HDR-like" by adding local tone mapping via bloom. Brightens details in dark areas without blowing out bright areas. [Technical docs](docs/fakehdr-vr-postprocess-plugin.md). |
+| 06 | **DPX** | Emulates Cineon film stock. Gives a warm, cinematic color shift. Good for games that look too cold/digital. |
+| 07 | **Technicolor** | Emulates 2-strip Technicolor (old Hollywood look). Strong color shift — teal shadows, warm highlights. Use sparingly. |
+| 08 | **Colourfulness** | Boosts color saturation while protecting already-saturated colors from clipping. Smarter than just cranking saturation. |
+| 09 | **Vibrance** | Similar to Colourfulness but works differently — it boosts unsaturated colors more than saturated ones. Good for making dull games pop without oversaturating skin tones. |
+
+#### Film Effects (finishing touches)
+
+| # | Plugin | When to Use It |
+|---|--------|----------------|
+| 10 | **FilmGrain2** | Adds subtle photographic film grain. Hides color banding in dark areas (common on VR panels). Keep it subtle — high values look noisy. |
+
+#### Advanced (new)
+
+| # | Plugin | When to Use It |
+|---|--------|----------------|
+| 11 | **HSL Shift** | Remap individual colors to different hues. E.g. make greens more vivid, shift reds toward orange, cool down skin tones. 8 color zones you can shift independently. For fine color work. |
+| 12 | **Filmic Pass** | Full cinematic color processing: sigmoid curves per RGB channel, bleach bypass, fade, saturation, and per-channel gamma. More control than Tonemap — use when you want a specific film look. |
+| 13 | **Clarity** | Local contrast enhancement. Makes textures and details pop without changing colors. Works like sharpening but on mid-frequency detail. Multiple blend modes (Soft Light, Overlay, Hard Light, etc). **Very effective in VR** where things often look flat. |
+
+All plugins are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Plugins are loaded in numeric order (01→13). Settings are saved per-game automatically.
 
 ### Presets
 
@@ -50,7 +74,7 @@ Don't want to configure each plugin manually? Load a preset instead:
 | **Vivid** | LevelsPlus + Vibrance + Colourfulness | Punchy, saturated colors |
 | **HDR Look** | LevelsPlus + FakeHDR + Colourfulness | Local tone mapping + enhanced color |
 
-You can also save your own presets — **per-game** (local) or **shared across all games** (global). Use the **Quick Save** buttons if you're in VR with a gamepad and can't type a name.
+You can also save your own presets — **per-game** (local) or **shared across all games** (global).
 
 ### Other Improvements
 
@@ -64,7 +88,7 @@ You can also save your own presets — **per-game** (local) or **shared across a
 cmake --build build --config Release --target <plugin_name>
 ```
 
-Or build the full project. Plugin DLLs output to `build/Release/`. Deploy to `%APPDATA%/UnrealVRMod/uevr/Plugins/`.
+Or build the full project. Plugin DLLs output to `build/Release/`. Deploy to `%APPDATA%/UnrealVRMod/UEVR/plugins/` (global) or `%APPDATA%/UnrealVRMod/<game_executable>/plugins/` (per-game).
 
 ### Licenses
 

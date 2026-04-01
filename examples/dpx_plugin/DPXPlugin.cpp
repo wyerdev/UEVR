@@ -165,9 +165,11 @@ public:
     void on_dllmain() override {}
     void on_initialize() override { API::get()->log_info("[DPX] Plugin initialized"); load_settings(); }
 
-    std::filesystem::path get_settings_path() { return API::get()->get_persistent_dir(L"dpx_settings.txt"); }
+    std::filesystem::path get_settings_path() {
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"dpx_settings.txt";
+    }
     void save_settings() {
-        try { std::ofstream f(get_settings_path()); if (f.is_open())
+        try { std::filesystem::create_directories(get_settings_path().parent_path()); std::ofstream f(get_settings_path()); if (f.is_open())
             f << m_enabled << "\n" << m_rgb_curve[0] << " " << m_rgb_curve[1] << " " << m_rgb_curve[2] << "\n"
               << m_rgb_c[0] << " " << m_rgb_c[1] << " " << m_rgb_c[2] << "\n"
               << m_contrast << "\n" << m_saturation << "\n" << m_colorfulness << "\n" << m_strength << "\n";

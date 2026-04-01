@@ -191,10 +191,13 @@ public:
         load_settings();
     }
 
-    std::filesystem::path get_settings_path() { return API::get()->get_persistent_dir(L"liftgammagain_settings.txt"); }
+    std::filesystem::path get_settings_path() {
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"liftgammagain_settings.txt";
+    }
 
     void save_settings() {
         try {
+            std::filesystem::create_directories(get_settings_path().parent_path());
             std::ofstream f(get_settings_path());
             if (f.is_open()) f << m_enabled << "\n"
                 << m_lift[0] << " " << m_lift[1] << " " << m_lift[2] << "\n"

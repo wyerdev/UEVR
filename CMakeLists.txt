@@ -844,6 +844,132 @@ set_target_properties(dpx_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target hslshift_plugin
+set(CMKR_TARGET hslshift_plugin)
+set(hslshift_plugin_SOURCES "")
+
+list(APPEND hslshift_plugin_SOURCES
+	"examples/hslshift_plugin/HSLShiftPlugin.cpp"
+)
+
+list(APPEND hslshift_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${hslshift_plugin_SOURCES})
+add_library(hslshift_plugin SHARED)
+
+if(hslshift_plugin_SOURCES)
+	target_sources(hslshift_plugin PRIVATE ${hslshift_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${hslshift_plugin_SOURCES})
+
+target_compile_features(hslshift_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(hslshift_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(hslshift_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(hslshift_plugin PROPERTIES
+	OUTPUT_NAME
+		11_HSLShiftPlugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target filmicpass_plugin
+set(CMKR_TARGET filmicpass_plugin)
+set(filmicpass_plugin_SOURCES "")
+
+list(APPEND filmicpass_plugin_SOURCES
+	"examples/filmicpass_plugin/FilmicPassPlugin.cpp"
+)
+
+list(APPEND filmicpass_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${filmicpass_plugin_SOURCES})
+add_library(filmicpass_plugin SHARED)
+
+if(filmicpass_plugin_SOURCES)
+	target_sources(filmicpass_plugin PRIVATE ${filmicpass_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${filmicpass_plugin_SOURCES})
+
+target_compile_features(filmicpass_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(filmicpass_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(filmicpass_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(filmicpass_plugin PROPERTIES
+	OUTPUT_NAME
+		12_FilmicPassPlugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target clarity_plugin
+set(CMKR_TARGET clarity_plugin)
+set(clarity_plugin_SOURCES "")
+
+list(APPEND clarity_plugin_SOURCES
+	"examples/clarity_plugin/ClarityPlugin.cpp"
+)
+
+list(APPEND clarity_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${clarity_plugin_SOURCES})
+add_library(clarity_plugin SHARED)
+
+if(clarity_plugin_SOURCES)
+	target_sources(clarity_plugin PRIVATE ${clarity_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${clarity_plugin_SOURCES})
+
+target_compile_features(clarity_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(clarity_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(clarity_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(clarity_plugin PROPERTIES
+	OUTPUT_NAME
+		13_ClarityPlugin
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target sdk-test
 set(CMKR_TARGET sdk-test)
 set(sdk-test_SOURCES "")

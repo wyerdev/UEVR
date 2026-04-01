@@ -44,7 +44,7 @@ files needed.
 | Radius 2 | 0.87 | 0.0 – 8.0 | Outer bloom sample radius (higher = stronger + brighter) |
 
 All parameters are adjustable at runtime via the UEVR menu (Insert key → FakeHDR sidebar entry).
-Settings are auto-saved per game to `fakehdr_settings.txt`.
+Settings are auto-saved per game to `data/plugins/fakehdr_settings.txt`.
 
 ## Building
 
@@ -59,11 +59,11 @@ Output: `build/Release/05_FakeHDRPlugin.dll`
 
 ## Installation
 
-1. Copy `05_FakeHDRPlugin.dll` to `%APPDATA%/UnrealVRMod/uevr/Plugins/`
+1. Copy `05_FakeHDRPlugin.dll` to `%APPDATA%/UnrealVRMod/UEVR/plugins/` (global, all games) or `%APPDATA%/UnrealVRMod/<game_executable>/plugins/` (per-game)
 2. Launch the game with UEVR
 3. Open UEVR menu (Insert or L3+R3) → FakeHDR sidebar entry → Enable
 
-This plugin is one of 10 ReShade-ported post-processing plugins. See the [main README](../../README.md) and [technical docs](../../docs/fakehdr-vr-postprocess-plugin.md) for the full suite.
+This plugin is one of 13 ReShade-ported post-processing plugins. See the [main README](../../README.md) and [technical docs](../../docs/fakehdr-vr-postprocess-plugin.md) for the full suite.
 
 ## Credits
 

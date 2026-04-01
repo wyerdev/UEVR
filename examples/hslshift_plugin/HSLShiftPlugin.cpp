@@ -1,17 +1,17 @@
 /*
-Vibrance Plugin for UEVR
+HSLShift Plugin for UEVR
 =========================
-A UEVR C++ plugin that applies CeeJay.dk's Vibrance effect to VR frames.
-Intelligently boosts saturation — pixels with little color get a larger boost
-than pixels that are already saturated.
+A UEVR C++ plugin that applies kingeric1992's HSLShift effect to VR frames.
+Per-hue color shifting: remap individual color ranges (Red, Orange, Yellow,
+Green, Cyan, Blue, Purple, Magenta) to new hues/saturations.
 
 Applied to the UE4 scene render target in on_pre_render_vr_framework (DX11/DX12).
 
 UEVR plugin wrapper: MIT license (C++ wrapper code ONLY)
 
 Original shader:
-  Vibrance by Christian Cann Schuldt Jensen ~ CeeJay.dk
-  Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/Vibrance.fx
+  HSL Processing Shader by kingeric1992
+  Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/HSLShift.fx
   From the crosire/reshade-shaders community collection.
   No explicit license was provided in the original file or repository.
   All rights remain with the original author.
@@ -38,7 +38,7 @@ Original shader:
 using namespace uevr;
 template<typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
-static const char* g_vibrance_vs_src = R"(
+static const char* g_hslshift_vs_src = R"(
 struct VSOutput { float4 Position : SV_Position; float2 TexCoord : TEXCOORD0; };
 VSOutput main(uint vertexID : SV_VertexID) {
     VSOutput o; o.TexCoord = float2((vertexID << 1) & 2, vertexID & 2);
@@ -46,11 +46,22 @@ VSOutput main(uint vertexID : SV_VertexID) {
 }
 )";
 
-// Faithful port of CeeJay.dk's Vibrance v1.1
-static const char* g_vibrance_ps_src = R"(
-cbuffer VibranceParams : register(b0) {
-    float  Vibrance;
-    float3 VibranceRGBBalance;
+/*
+   Faithful port of kingeric1992's HSLShift.fx
+   8 hue nodes (Red, Orange, Yellow, Green, Cyan, Blue, Purple, Magenta)
+   each represented as an RGB color that defines where that hue maps to.
+   Interpolation between adjacent nodes in HSL space.
+*/
+static const char* g_hslshift_ps_src = R"(
+cbuffer HSLShiftParams : register(b0) {
+    float3 HUERed;      float _pad0;
+    float3 HUEOrange;   float _pad1;
+    float3 HUEYellow;   float _pad2;
+    float3 HUEGreen;    float _pad3;
+    float3 HUECyan;     float _pad4;
+    float3 HUEBlue;     float _pad5;
+    float3 HUEPurple;   float _pad6;
+    float3 HUEMagenta;  float _pad7;
 };
 
 Texture2D SceneTexture : register(t0);
@@ -58,27 +69,78 @@ SamplerState PointSampler : register(s0);
 
 struct PSInput { float4 Position : SV_Position; float2 TexCoord : TEXCOORD0; };
 
-float4 main(PSInput input) : SV_Target
-{
+static const float HSL_Threshold_Base  = 0.05;
+static const float HSL_Threshold_Curve = 1.0;
+
+float3 RGB_to_HSL(float3 color) {
+    float3 HSL = 0.0;
+    float M = max(color.r, max(color.g, color.b));
+    float C = M - min(color.r, min(color.g, color.b));
+    HSL.z = M - 0.5 * C;
+    if (C != 0.0) {
+        float3 Delta = (color.brg - color.rgb) / C + float3(2.0, 4.0, 6.0);
+        Delta *= step(M, color.gbr);
+        HSL.x = frac(max(Delta.r, max(Delta.g, Delta.b)) / 6.0);
+        HSL.y = (HSL.z == 1) ? 0.0 : C / (1 - abs(2 * HSL.z - 1));
+    }
+    return HSL;
+}
+
+float3 Hue_to_RGB(float h) {
+    return saturate(float3(abs(h * 6.0 - 3.0) - 1.0,
+                           2.0 - abs(h * 6.0 - 2.0),
+                           2.0 - abs(h * 6.0 - 4.0)));
+}
+
+float3 HSL_to_RGB(float3 HSL) {
+    return (Hue_to_RGB(HSL.x) - 0.5) * (1.0 - abs(2.0 * HSL.z - 1.0)) * HSL.y + HSL.z;
+}
+
+float4 main(PSInput input) : SV_Target {
     float3 color = SceneTexture.Sample(PointSampler, input.TexCoord).rgb;
+    float3 hsl = RGB_to_HSL(color);
 
-    float3 coefLuma = float3(0.212656, 0.715158, 0.072186);
-    float luma = dot(coefLuma, color);
+    // 9 nodes (last = first for wrap-around)
+    // node.rgb = target color, node.a = hue angle in degrees
+    float4 node[9];
+    node[0] = float4(HUERed,     0.0);
+    node[1] = float4(HUEOrange,  30.0);
+    node[2] = float4(HUEYellow,  60.0);
+    node[3] = float4(HUEGreen,   120.0);
+    node[4] = float4(HUECyan,    180.0);
+    node[5] = float4(HUEBlue,    240.0);
+    node[6] = float4(HUEPurple,  270.0);
+    node[7] = float4(HUEMagenta, 300.0);
+    node[8] = float4(HUERed,     360.0);
 
-    float max_color = max(color.r, max(color.g, color.b));
-    float min_color = min(color.r, min(color.g, color.b));
-    float color_saturation = max_color - min_color;
+    int base = 0;
+    for (int i = 0; i < 8; i++)
+        if (node[i].a < hsl.r * 360.0) base = i;
 
-    float3 coeffVibrance = VibranceRGBBalance * Vibrance;
-    color = lerp(luma, color, 1.0 + (coeffVibrance * (1.0 - (sign(coeffVibrance) * color_saturation))));
+    float w = saturate((hsl.r * 360.0 - node[base].a) / (node[base+1].a - node[base].a));
 
-    return float4(color, 1.0);
+    float3 H0 = RGB_to_HSL(node[base].rgb);
+    float3 H1 = RGB_to_HSL(node[base+1].rgb);
+    H1.x += (H1.x < H0.x) ? 1.0 : 0.0;
+
+    float3 shift = frac(lerp(H0, H1, w));
+    float ww = max(hsl.g, 0.0) * max(1.0 - hsl.b, 0.0);
+    shift.b = (shift.b - 0.5) * (pow(ww, HSL_Threshold_Curve) * (1.0 - HSL_Threshold_Base) + HSL_Threshold_Base) * 2.0;
+
+    float3 result = HSL_to_RGB(saturate(float3(shift.r, hsl.g * (shift.g * 2.0), hsl.b * (1.0 + shift.b))));
+    return float4(result, 1.0);
 }
 )";
 
-struct VibranceParamsCB {
-    float Vibrance;
-    float VibranceRGBBalance[3];
+struct HSLShiftParamsCB {
+    float HUERed[3];      float _pad0;
+    float HUEOrange[3];   float _pad1;
+    float HUEYellow[3];   float _pad2;
+    float HUEGreen[3];    float _pad3;
+    float HUECyan[3];     float _pad4;
+    float HUEBlue[3];     float _pad5;
+    float HUEPurple[3];   float _pad6;
+    float HUEMagenta[3];  float _pad7;
 };
 
 static DXGI_FORMAT resolve_typeless_format(DXGI_FORMAT fmt) {
@@ -95,12 +157,19 @@ static DXGI_FORMAT resolve_typeless_format(DXGI_FORMAT fmt) {
     }
 }
 
-static constexpr const char* VIB_VERSION = "1.0.0";
+static constexpr const char* HSL_VERSION = "1.0.0";
 
-class VibrancePlugin : public uevr::Plugin {
+class HSLShiftPlugin : public uevr::Plugin {
 public:
-    float m_vibrance = 0.15f;
-    float m_balance[3] = {1.0f, 1.0f, 1.0f};
+    // Default hue node colors (same as original shader defaults)
+    float m_red[3]     = {0.75f, 0.25f, 0.25f};
+    float m_orange[3]  = {0.75f, 0.50f, 0.25f};
+    float m_yellow[3]  = {0.75f, 0.75f, 0.25f};
+    float m_green[3]   = {0.25f, 0.75f, 0.25f};
+    float m_cyan[3]    = {0.25f, 0.75f, 0.75f};
+    float m_blue[3]    = {0.25f, 0.25f, 0.75f};
+    float m_purple[3]  = {0.50f, 0.25f, 0.75f};
+    float m_magenta[3] = {0.75f, 0.25f, 0.75f};
     bool  m_enabled = false;
 
     ComPtr<ID3D11DeviceContext> m_dx11_ctx;
@@ -110,8 +179,8 @@ public:
 
     struct DX11TargetState {
         ComPtr<ID3D11Texture2D> copy_tex; ComPtr<ID3D11ShaderResourceView> copy_srv; ComPtr<ID3D11RenderTargetView> rtv;
-        ID3D11Texture2D* rtv_tex = nullptr; UINT width = 0, height = 0; bool cache_hit_logged = false;
-        void reset() { copy_tex.Reset(); copy_srv.Reset(); rtv.Reset(); rtv_tex = nullptr; width = 0; height = 0; cache_hit_logged = false; }
+        ID3D11Texture2D* rtv_tex = nullptr; UINT width = 0, height = 0;
+        void reset() { copy_tex.Reset(); copy_srv.Reset(); rtv.Reset(); rtv_tex = nullptr; width = 0; height = 0; }
     };
     DX11TargetState m_dx11_targets[2];
     DX11TargetState& find_dx11_target(UINT w, UINT h) {
@@ -121,7 +190,7 @@ public:
     }
 
     ComPtr<ID3D12RootSignature> m_dx12_root_sig; ComPtr<ID3D12PipelineState> m_dx12_pso; ComPtr<ID3D12Resource> m_dx12_cb;
-    VibranceParamsCB* m_dx12_cb_mapped = nullptr; DXGI_FORMAT m_dx12_rt_format = DXGI_FORMAT_UNKNOWN; bool m_dx12_ready = false;
+    HSLShiftParamsCB* m_dx12_cb_mapped = nullptr; DXGI_FORMAT m_dx12_rt_format = DXGI_FORMAT_UNKNOWN; bool m_dx12_ready = false;
     struct DX12TargetState {
         ComPtr<ID3D12Resource> copy_tex; ComPtr<ID3D12DescriptorHeap> srv_heap; ComPtr<ID3D12DescriptorHeap> rtv_heap;
         UINT width = 0, height = 0;
@@ -135,28 +204,73 @@ public:
     }
 
     void on_dllmain() override {}
-    void on_initialize() override { API::get()->log_info("[Vibrance] Plugin initialized"); load_settings(); }
+    void on_initialize() override { API::get()->log_info("[HSLShift] Plugin initialized"); load_settings(); }
 
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"vibrance_settings.txt";
-    }
-    void save_settings() { try { std::filesystem::create_directories(get_settings_path().parent_path()); std::ofstream f(get_settings_path()); if (f.is_open()) f << m_enabled << "\n" << m_vibrance << "\n" << m_balance[0] << " " << m_balance[1] << " " << m_balance[2] << "\n"; } catch (...) {} }
-    void load_settings() {
-        try { std::ifstream f(get_settings_path()); if (f.is_open()) { int e; if (f >> e) m_enabled = (e != 0); f >> m_vibrance >> m_balance[0] >> m_balance[1] >> m_balance[2];
-            m_vibrance = max(-1.0f, min(1.0f, m_vibrance)); for (int i = 0; i < 3; i++) m_balance[i] = max(0.0f, min(10.0f, m_balance[i])); } } catch (...) {}
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"hslshift_settings.txt";
     }
 
-    void fill_cb(VibranceParamsCB* p) { p->Vibrance = m_vibrance; memcpy(p->VibranceRGBBalance, m_balance, sizeof(float)*3); }
+    void save_settings() {
+        try { std::filesystem::create_directories(get_settings_path().parent_path()); std::ofstream f(get_settings_path()); if (!f.is_open()) return;
+            f << m_enabled << "\n";
+            f << m_red[0] << " " << m_red[1] << " " << m_red[2] << "\n";
+            f << m_orange[0] << " " << m_orange[1] << " " << m_orange[2] << "\n";
+            f << m_yellow[0] << " " << m_yellow[1] << " " << m_yellow[2] << "\n";
+            f << m_green[0] << " " << m_green[1] << " " << m_green[2] << "\n";
+            f << m_cyan[0] << " " << m_cyan[1] << " " << m_cyan[2] << "\n";
+            f << m_blue[0] << " " << m_blue[1] << " " << m_blue[2] << "\n";
+            f << m_purple[0] << " " << m_purple[1] << " " << m_purple[2] << "\n";
+            f << m_magenta[0] << " " << m_magenta[1] << " " << m_magenta[2] << "\n";
+        } catch (...) {}
+    }
+
+    void load_settings() {
+        try { std::ifstream f(get_settings_path()); if (!f.is_open()) return;
+            int e; if (f >> e) m_enabled = (e != 0);
+            f >> m_red[0] >> m_red[1] >> m_red[2];
+            f >> m_orange[0] >> m_orange[1] >> m_orange[2];
+            f >> m_yellow[0] >> m_yellow[1] >> m_yellow[2];
+            f >> m_green[0] >> m_green[1] >> m_green[2];
+            f >> m_cyan[0] >> m_cyan[1] >> m_cyan[2];
+            f >> m_blue[0] >> m_blue[1] >> m_blue[2];
+            f >> m_purple[0] >> m_purple[1] >> m_purple[2];
+            f >> m_magenta[0] >> m_magenta[1] >> m_magenta[2];
+            for (float* arr : {m_red, m_orange, m_yellow, m_green, m_cyan, m_blue, m_purple, m_magenta})
+                for (int i = 0; i < 3; i++) arr[i] = max(0.0f, min(1.0f, arr[i]));
+        } catch (...) {}
+    }
+
+    void fill_cb(HSLShiftParamsCB* p) {
+        memcpy(p->HUERed, m_red, 12); memcpy(p->HUEOrange, m_orange, 12);
+        memcpy(p->HUEYellow, m_yellow, 12); memcpy(p->HUEGreen, m_green, 12);
+        memcpy(p->HUECyan, m_cyan, 12); memcpy(p->HUEBlue, m_blue, 12);
+        memcpy(p->HUEPurple, m_purple, 12); memcpy(p->HUEMagenta, m_magenta, 12);
+    }
 
     void on_draw_ui() override {
-        if (ImGui::CollapsingHeader("Vibrance Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", VIB_VERSION); bool changed = false;
-            changed |= ImGui::Checkbox("Enabled##Vib", &m_enabled);
-            changed |= ImGui::SliderFloat("Vibrance", &m_vibrance, -1.0f, 1.0f, "%.2f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Intelligently saturates (positive) or desaturates (negative)");
-            changed |= ImGui::SliderFloat3("RGB Balance", m_balance, 0.0f, 10.0f, "%.1f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-channel vibrance multiplier");
-            if (ImGui::Button("Reset##Vib")) { m_vibrance = 0.15f; m_balance[0] = m_balance[1] = m_balance[2] = 1.0f; changed = true; }
+        if (ImGui::CollapsingHeader("HSL Shift Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextDisabled("v%s", HSL_VERSION); bool changed = false;
+            changed |= ImGui::Checkbox("Enabled##HSL", &m_enabled);
+            ImGui::TextWrapped("Shift individual hue ranges. Click the color box to open widget.");
+            changed |= ImGui::ColorEdit3("Red##HSL", m_red);
+            changed |= ImGui::ColorEdit3("Orange##HSL", m_orange);
+            changed |= ImGui::ColorEdit3("Yellow##HSL", m_yellow);
+            changed |= ImGui::ColorEdit3("Green##HSL", m_green);
+            changed |= ImGui::ColorEdit3("Cyan##HSL", m_cyan);
+            changed |= ImGui::ColorEdit3("Blue##HSL", m_blue);
+            changed |= ImGui::ColorEdit3("Purple##HSL", m_purple);
+            changed |= ImGui::ColorEdit3("Magenta##HSL", m_magenta);
+            if (ImGui::Button("Reset##HSL")) {
+                m_red[0]=0.75f; m_red[1]=0.25f; m_red[2]=0.25f;
+                m_orange[0]=0.75f; m_orange[1]=0.50f; m_orange[2]=0.25f;
+                m_yellow[0]=0.75f; m_yellow[1]=0.75f; m_yellow[2]=0.25f;
+                m_green[0]=0.25f; m_green[1]=0.75f; m_green[2]=0.25f;
+                m_cyan[0]=0.25f; m_cyan[1]=0.75f; m_cyan[2]=0.75f;
+                m_blue[0]=0.25f; m_blue[1]=0.25f; m_blue[2]=0.75f;
+                m_purple[0]=0.50f; m_purple[1]=0.25f; m_purple[2]=0.75f;
+                m_magenta[0]=0.75f; m_magenta[1]=0.25f; m_magenta[2]=0.75f;
+                changed = true;
+            }
             if (changed) save_settings();
         }
     }
@@ -217,11 +331,11 @@ private:
 
     bool init_shaders_dx11(ID3D11Device* device) {
         ComPtr<ID3DBlob> vsb, vse, psb, pse;
-        if (FAILED(D3DCompile(g_vibrance_vs_src, strlen(g_vibrance_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
-        if (FAILED(D3DCompile(g_vibrance_ps_src, strlen(g_vibrance_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) { if (pse) API::get()->log_error("[Vibrance] PS: %s", (const char*)pse->GetBufferPointer()); return false; }
+        if (FAILED(D3DCompile(g_hslshift_vs_src, strlen(g_hslshift_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
+        if (FAILED(D3DCompile(g_hslshift_ps_src, strlen(g_hslshift_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) { if (pse) API::get()->log_error("[HSLShift] PS: %s", (const char*)pse->GetBufferPointer()); return false; }
         if (FAILED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &m_vs))) return false;
         if (FAILED(device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &m_ps))) return false;
-        D3D11_BUFFER_DESC cbd{}; cbd.ByteWidth = sizeof(VibranceParamsCB); cbd.Usage = D3D11_USAGE_DYNAMIC; cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        D3D11_BUFFER_DESC cbd{}; cbd.ByteWidth = sizeof(HSLShiftParamsCB); cbd.Usage = D3D11_USAGE_DYNAMIC; cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         if (FAILED(device->CreateBuffer(&cbd, nullptr, &m_cb))) return false;
         D3D11_SAMPLER_DESC sd{}; sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT; sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sd.ComparisonFunc = D3D11_COMPARISON_NEVER; sd.MaxLOD = D3D11_FLOAT32_MAX;
         if (FAILED(device->CreateSamplerState(&sd, &m_sampler))) return false;
@@ -244,7 +358,7 @@ private:
         if (!m_shader_ready && !init_shaders_dx11(device)) return;
         auto& ts = find_dx11_target(td.Width, td.Height); if (!ensure_dx11_copy(device, target, ts)) return;
         if (ts.rtv_tex != target) { ts.rtv.Reset(); D3D11_RENDER_TARGET_VIEW_DESC rd{}; rd.Format = resolve_typeless_format(td.Format); rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D; if (FAILED(device->CreateRenderTargetView(target, &rd, &ts.rtv))) return; ts.rtv_tex = target; }
-        D3D11_MAPPED_SUBRESOURCE mapped{}; if (SUCCEEDED(ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) { fill_cb((VibranceParamsCB*)mapped.pData); ctx->Unmap(m_cb.Get(), 0); }
+        D3D11_MAPPED_SUBRESOURCE mapped{}; if (SUCCEEDED(ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) { fill_cb((HSLShiftParamsCB*)mapped.pData); ctx->Unmap(m_cb.Get(), 0); }
         ctx->CopyResource(ts.copy_tex.Get(), target);
         D3D11_VIEWPORT vp{}; vp.Width = (float)ts.width; vp.Height = (float)ts.height; vp.MaxDepth = 1.0f; ctx->RSSetViewports(1, &vp);
         ID3D11RenderTargetView* rtv_raw = ts.rtv.Get(); ctx->OMSetRenderTargets(1, &rtv_raw, nullptr);
@@ -264,8 +378,8 @@ private:
         ComPtr<ID3DBlob> sb, se; if (FAILED(D3D12SerializeVersionedRootSignature(&rsd, &sb, &se))) return false;
         if (FAILED(device->CreateRootSignature(0, sb->GetBufferPointer(), sb->GetBufferSize(), IID_PPV_ARGS(&m_dx12_root_sig)))) return false;
         ComPtr<ID3DBlob> vsb, vse, psb, pse;
-        if (FAILED(D3DCompile(g_vibrance_vs_src, strlen(g_vibrance_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
-        if (FAILED(D3DCompile(g_vibrance_ps_src, strlen(g_vibrance_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) return false;
+        if (FAILED(D3DCompile(g_hslshift_vs_src, strlen(g_hslshift_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
+        if (FAILED(D3DCompile(g_hslshift_ps_src, strlen(g_hslshift_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) return false;
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{}; pd.pRootSignature = m_dx12_root_sig.Get(); pd.VS = { vsb->GetBufferPointer(), vsb->GetBufferSize() }; pd.PS = { psb->GetBufferPointer(), psb->GetBufferSize() };
         pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL; pd.SampleMask = UINT_MAX;
         pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; pd.NumRenderTargets = 1; pd.RTVFormats[0] = rt_format; pd.SampleDesc.Count = 1;
@@ -291,4 +405,4 @@ private:
     }
 };
 
-std::unique_ptr<VibrancePlugin> g_plugin{new VibrancePlugin()};
+std::unique_ptr<HSLShiftPlugin> g_plugin{new HSLShiftPlugin()};

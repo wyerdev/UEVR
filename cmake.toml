@@ -236,6 +236,30 @@ headers = ["examples/dpx_plugin/**.hpp", "examples/dpx_plugin/**.h"]
 [target.dpx_plugin.properties]
 OUTPUT_NAME = "06_DPXPlugin"
 
+[target.hslshift_plugin]
+type = "plugin"
+sources = ["examples/hslshift_plugin/HSLShiftPlugin.cpp"]
+headers = ["examples/hslshift_plugin/**.hpp", "examples/hslshift_plugin/**.h"]
+
+[target.hslshift_plugin.properties]
+OUTPUT_NAME = "11_HSLShiftPlugin"
+
+[target.filmicpass_plugin]
+type = "plugin"
+sources = ["examples/filmicpass_plugin/FilmicPassPlugin.cpp"]
+headers = ["examples/filmicpass_plugin/**.hpp", "examples/filmicpass_plugin/**.h"]
+
+[target.filmicpass_plugin.properties]
+OUTPUT_NAME = "12_FilmicPassPlugin"
+
+[target.clarity_plugin]
+type = "plugin"
+sources = ["examples/clarity_plugin/ClarityPlugin.cpp"]
+headers = ["examples/clarity_plugin/**.hpp", "examples/clarity_plugin/**.h"]
+
+[target.clarity_plugin.properties]
+OUTPUT_NAME = "13_ClarityPlugin"
+
 [target.sdk-test]
 type = "shared"
 sources = ["side-projects/sdk-test/**.cpp", "side-projects/sdk-test/**.c"]

@@ -156,9 +156,11 @@ public:
     void on_dllmain() override {}
     void on_initialize() override { API::get()->log_info("[Tonemap] Plugin initialized"); load_settings(); }
 
-    std::filesystem::path get_settings_path() { return API::get()->get_persistent_dir(L"tonemap_settings.txt"); }
+    std::filesystem::path get_settings_path() {
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"tonemap_settings.txt";
+    }
     void save_settings() {
-        try { std::ofstream f(get_settings_path()); if (f.is_open()) f << m_enabled << "\n" << m_gamma << "\n" << m_exposure << "\n" << m_saturation << "\n" << m_bleach << "\n" << m_defog << "\n" << m_fog_color[0] << " " << m_fog_color[1] << " " << m_fog_color[2] << "\n"; } catch (...) {}
+        try { std::filesystem::create_directories(get_settings_path().parent_path()); std::ofstream f(get_settings_path()); if (f.is_open()) f << m_enabled << "\n" << m_gamma << "\n" << m_exposure << "\n" << m_saturation << "\n" << m_bleach << "\n" << m_defog << "\n" << m_fog_color[0] << " " << m_fog_color[1] << " " << m_fog_color[2] << "\n"; } catch (...) {}
     }
     void load_settings() {
         try { std::ifstream f(get_settings_path()); if (f.is_open()) { int e; if (f >> e) m_enabled = (e != 0);

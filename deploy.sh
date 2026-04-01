@@ -27,7 +27,7 @@ done
 
 # Deploy plugin DLLs and their license files
 PLUGIN_SRC="$SCRIPT_DIR/build/Release"
-PLUGIN_DST="$UEVR_DATA/uevr/Plugins"
+PLUGIN_DST="$UEVR_DATA/UEVR/plugins"
 mkdir -p "$PLUGIN_DST"
 for dll in "$PLUGIN_SRC"/*Plugin.dll; do
   if [[ -f "$dll" ]]; then
@@ -46,20 +46,17 @@ for lic in "$SCRIPT_DIR"/examples/*/*-LICENSE.txt; do
   fi
 done
 
-# Deploy shipping presets (skip if preset folder already exists to preserve user edits)
+# Deploy shipping presets (always overwrite — these are built-in, not user presets)
 PRESET_SRC="$SCRIPT_DIR/presets"
-PRESET_DST="$UEVR_DATA/uevr/presets"
+PRESET_DST="$UEVR_DATA/UEVR/data/plugins/shipping_presets"
 if [[ -d "$PRESET_SRC" ]]; then
   mkdir -p "$PRESET_DST"
   for preset_dir in "$PRESET_SRC"/*/; do
     preset_name="$(basename "$preset_dir")"
-    if [[ ! -d "$PRESET_DST/$preset_name" ]]; then
-      cp -r "$preset_dir" "$PRESET_DST/$preset_name"
-      echo "  Deployed preset: $preset_name"
-      ((COPIED++))
-    else
-      echo "  Preset already exists (skipped): $preset_name"
-    fi
+    mkdir -p "$PRESET_DST/$preset_name"
+    cp -f "$preset_dir"* "$PRESET_DST/$preset_name/"
+    echo "  Deployed preset: $preset_name"
+    ((COPIED++))
   done
 fi
 

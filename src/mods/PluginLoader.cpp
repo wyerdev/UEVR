@@ -2044,7 +2044,7 @@ void PluginLoader::on_draw_ui() {
             }
             // Lowercase
             for (auto& c : core) c = (char)std::tolower(c);
-            auto settings_path = persistent_dir / (core + "_settings.txt");
+            auto settings_path = persistent_dir / "data" / "plugins" / (core + "_settings.txt");
 
             bool is_enabled = false;
             try {
@@ -2067,7 +2067,7 @@ void PluginLoader::on_draw_ui() {
 }
 
 std::filesystem::path PluginLoader::get_local_presets_dir() {
-    auto dir = Framework::get_persistent_dir() / "presets";
+    auto dir = Framework::get_persistent_dir() / "data" / "plugins" / "presets";
     std::filesystem::create_directories(dir);
     return dir;
 }
@@ -2075,8 +2075,16 @@ std::filesystem::path PluginLoader::get_local_presets_dir() {
 std::filesystem::path PluginLoader::get_global_presets_dir() {
     wchar_t app_data_path[MAX_PATH]{};
     SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
-    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "uevr" / "presets";
+    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "uevr" / "data" / "plugins" / "presets";
     std::filesystem::create_directories(dir);
+    return dir;
+}
+
+std::filesystem::path PluginLoader::get_shipping_presets_dir() {
+    wchar_t app_data_path[MAX_PATH]{};
+    SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
+    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "UEVR" / "data" / "plugins" / "shipping_presets";
+    // Don't create — this dir is managed by the release package, not created at runtime
     return dir;
 }
 
@@ -2100,8 +2108,13 @@ bool PluginLoader::save_preset(const std::filesystem::path& presets_dir, const s
         std::filesystem::create_directories(preset_path);
 
         const auto persistent_dir = Framework::get_persistent_dir();
+        const auto plugin_settings_dir = persistent_dir / "data" / "plugins";
         int count = 0;
-        for (const auto& entry : std::filesystem::directory_iterator(persistent_dir)) {
+        if (!std::filesystem::exists(plugin_settings_dir)) {
+            m_preset_status = "No plugin settings to save";
+            return false;
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(plugin_settings_dir)) {
             if (!entry.is_regular_file()) continue;
             auto fname = entry.path().filename().string();
             if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
@@ -2120,20 +2133,67 @@ bool PluginLoader::save_preset(const std::filesystem::path& presets_dir, const s
     }
 }
 
+// Active preset tracking (file-scope to avoid header/class-layout changes)
+static std::string s_active_preset_name{};
+static std::filesystem::path s_active_preset_dir{};
+static bool s_active_preset_is_builtin = false;
+static bool s_active_preset_loaded_from_disk = false;
+
+static std::filesystem::path get_active_preset_file() {
+    return Framework::get_persistent_dir() / "data" / "plugins" / "active_preset.txt";
+}
+
+static void save_active_preset_to_disk() {
+    try {
+        std::ofstream f(get_active_preset_file());
+        if (!f.is_open()) return;
+        f << s_active_preset_name << "\n";
+        f << s_active_preset_dir.string() << "\n";
+        f << (s_active_preset_is_builtin ? 1 : 0) << "\n";
+    } catch (...) {}
+}
+
+static void restore_active_preset_from_disk() {
+    if (s_active_preset_loaded_from_disk) return;
+    s_active_preset_loaded_from_disk = true;
+    try {
+        std::ifstream f(get_active_preset_file());
+        if (!f.is_open()) return;
+        std::string name, dir_str, builtin_str;
+        if (!std::getline(f, name) || name.empty()) return;
+        if (!std::getline(f, dir_str)) return;
+        if (!std::getline(f, builtin_str)) return;
+        auto dir = std::filesystem::path(dir_str);
+        // Verify the preset still exists on disk
+        if (std::filesystem::exists(dir / name)) {
+            s_active_preset_name = name;
+            s_active_preset_dir = dir;
+            s_active_preset_is_builtin = (builtin_str == "1");
+        }
+    } catch (...) {}
+}
+
 bool PluginLoader::load_preset(const std::filesystem::path& preset_path) {
     try {
         const auto persistent_dir = Framework::get_persistent_dir();
+        const auto plugin_settings_dir = persistent_dir / "data" / "plugins";
+        std::filesystem::create_directories(plugin_settings_dir);
         int count = 0;
         for (const auto& entry : std::filesystem::directory_iterator(preset_path)) {
             if (!entry.is_regular_file()) continue;
             auto fname = entry.path().filename().string();
             if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
-                std::filesystem::copy_file(entry.path(), persistent_dir / fname, std::filesystem::copy_options::overwrite_existing);
+                std::filesystem::copy_file(entry.path(), plugin_settings_dir / fname, std::filesystem::copy_options::overwrite_existing);
                 ++count;
             }
         }
 
         auto name = preset_path.filename().string();
+        s_active_preset_name = name;
+        s_active_preset_dir = preset_path.parent_path();
+        s_active_preset_is_builtin = (s_active_preset_dir == get_shipping_presets_dir());
+        save_active_preset_to_disk();
+
         m_preset_status = "Loaded \"" + name + "\" (" + std::to_string(count) + " files) - reloading plugins...";
         spdlog::info("[PluginLoader] Loaded preset '{}' ({} files), reloading plugins", name, count);
 
@@ -2155,6 +2215,11 @@ bool PluginLoader::delete_preset(const std::filesystem::path& preset_path) {
         std::filesystem::remove_all(preset_path);
         m_preset_status = "Deleted \"" + name + "\"";
         spdlog::info("[PluginLoader] Deleted preset '{}'", name);
+        if (s_active_preset_name == name && s_active_preset_dir == preset_path.parent_path()) {
+            s_active_preset_name.clear();
+            s_active_preset_dir.clear();
+            save_active_preset_to_disk();
+        }
         return true;
     } catch (const std::exception& e) {
         m_preset_status = std::string("Delete failed: ") + e.what();
@@ -2164,49 +2229,57 @@ bool PluginLoader::delete_preset(const std::filesystem::path& preset_path) {
 
 void PluginLoader::draw_preset_ui() {
     if (ImGui::CollapsingHeader("Plugin Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
-        // Auto-name helper: finds next available "Preset N" name
-        auto next_auto_name = [](const std::filesystem::path& presets_dir) -> std::string {
+        restore_active_preset_from_disk();
+        // Auto-name helper: finds next available "Preset N" name (checks both local and global)
+        auto next_auto_name = [this]() -> std::string {
+            auto local = get_local_presets_dir();
+            auto global = get_global_presets_dir();
             for (int i = 1; i < 1000; ++i) {
                 auto name = "Preset " + std::to_string(i);
-                if (!std::filesystem::exists(presets_dir / name)) {
+                if (!std::filesystem::exists(local / name) && !std::filesystem::exists(global / name)) {
                     return name;
                 }
             }
             return "Preset";
         };
 
-        // Quick Save buttons (gamepad-friendly, no typing needed)
-        if (ImGui::Button("Quick Save Local")) {
-            auto dir = get_local_presets_dir();
-            auto name = next_auto_name(dir);
-            save_preset(dir, name);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Quick Save Global")) {
-            auto dir = get_global_presets_dir();
-            auto name = next_auto_name(dir);
-            save_preset(dir, name);
+        // Active preset indicator + overwrite
+        if (!s_active_preset_name.empty()) {
+            ImGui::Text("Active: %s%s", s_active_preset_name.c_str(), s_active_preset_is_builtin ? " (built-in)" : "");
+            if (!s_active_preset_is_builtin) {
+                ImGui::SameLine();
+                if (ImGui::Button("Overwrite")) {
+                    save_preset(s_active_preset_dir, s_active_preset_name);
+                }
+            }
+        } else {
+            ImGui::TextDisabled("No preset loaded");
         }
 
         ImGui::Spacing();
-        ImGui::InputText("Preset Name", m_preset_name_buf, sizeof(m_preset_name_buf));
 
-        const bool has_name = m_preset_name_buf[0] != '\0';
-
-        if (!has_name) {
-            ImGui::BeginDisabled();
-        }
-        if (ImGui::Button("Save Local")) {
-            save_preset(get_local_presets_dir(), m_preset_name_buf);
+        // Save as new preset
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
+        ImGui::InputText("##PresetName", m_preset_name_buf, sizeof(m_preset_name_buf));
+        ImGui::SameLine();
+        if (ImGui::Button("Save")) {
+            auto dir = get_local_presets_dir();
+            std::string name = (m_preset_name_buf[0] != '\0') ? m_preset_name_buf : next_auto_name();
+            save_preset(dir, name);
+            s_active_preset_name = name;
+            s_active_preset_dir = dir;
+            s_active_preset_is_builtin = false;
+            save_active_preset_to_disk();
         }
         ImGui::SameLine();
         if (ImGui::Button("Save Global")) {
-            save_preset(get_global_presets_dir(), m_preset_name_buf);
-        }
-        if (!has_name) {
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            ImGui::TextDisabled("(enter a name or use Quick Save)");
+            auto dir = get_global_presets_dir();
+            std::string name = (m_preset_name_buf[0] != '\0') ? m_preset_name_buf : next_auto_name();
+            save_preset(dir, name);
+            s_active_preset_name = name;
+            s_active_preset_dir = dir;
+            s_active_preset_is_builtin = false;
+            save_active_preset_to_disk();
         }
 
         if (!m_preset_status.empty()) {
@@ -2235,12 +2308,31 @@ void PluginLoader::draw_preset_ui() {
         };
 
         ImGui::Spacing();
-        ImGui::Text("Local Presets (this game):");
+        ImGui::Text("Game Presets (this game):");
         draw_preset_list("local_", get_local_presets_dir());
 
         ImGui::Spacing();
         ImGui::Text("Global Presets (all games):");
         draw_preset_list("global_", get_global_presets_dir());
+
+        // Built-in presets (shipped with the release, Load-only)
+        auto shipping_dir = get_shipping_presets_dir();
+        if (std::filesystem::exists(shipping_dir) && std::filesystem::is_directory(shipping_dir)) {
+            auto shipping = list_presets(shipping_dir);
+            if (!shipping.empty()) {
+                ImGui::Spacing();
+                ImGui::Text("Built-in Presets:");
+                for (const auto& name : shipping) {
+                    ImGui::PushID(("shipping_" + name).c_str());
+                    if (ImGui::Button("Load")) {
+                        load_preset(shipping_dir / name);
+                    }
+                    ImGui::SameLine();
+                    ImGui::Text("%s", name.c_str());
+                    ImGui::PopID();
+                }
+            }
+        }
     }
 }
 
