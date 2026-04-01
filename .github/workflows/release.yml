@@ -22,17 +22,9 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Configure CMake
-        run: cmake -S ${{github.workspace}} -B ${{github.workspace}}/build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
-
-      - name: Build UEVR
-        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --target uevr
-
-      - name: Build Plugin Nullifier
-        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --target vr-plugin-nullifier
-
-      - name: Build Lua API
-        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --target LuaVR
+      - name: Build
+        run: call build.bat
+        shell: cmd
 
       - name: Read base nightly tag
         run: |
@@ -55,10 +47,42 @@ jobs:
           7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/LuaVR/LuaVR.dll
           7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/revision.txt
 
-      - name: Hash zip
+      - name: Package plugins zip
         run: |
-          $ReleaseHash = Get-FileHash -Algorithm SHA256 ${{github.workspace}}/${{env.ZIP_NAME}}.zip
-          $ReleaseHash.Hash | Out-File -FilePath ${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256
+          $staging = "${{github.workspace}}/plugins-staging"
+          New-Item -ItemType Directory -Path "$staging/plugins" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$staging/shipping_presets" -Force | Out-Null
+
+          # Copy plugin DLLs (exclude example_plugin — glob is case-insensitive on Windows)
+          Get-ChildItem "${{github.workspace}}/build/${{env.BUILD_TYPE}}/*Plugin.dll" |
+            Where-Object { $_.Name -match "^\d{2}_" } |
+            Copy-Item -Destination "$staging/plugins/"
+
+          # Copy license files
+          Get-ChildItem "${{github.workspace}}/examples" -Recurse -Filter "*-LICENSE.txt" | Copy-Item -Destination "$staging/plugins/"
+
+          # Copy shipping presets
+          Get-ChildItem "${{github.workspace}}/presets" -Directory | ForEach-Object {
+            $dst = "$staging/shipping_presets/$($_.Name)"
+            New-Item -ItemType Directory -Path $dst -Force | Out-Null
+            Copy-Item "$($_.FullName)/*" $dst
+          }
+
+          # Copy install/uninstall scripts
+          Copy-Item "${{github.workspace}}/install-plugins.bat" "$staging/"
+          Copy-Item "${{github.workspace}}/uninstall-plugins.bat" "$staging/"
+
+          # Create zip
+          7z a "${{github.workspace}}/uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip" "$staging/*"
+        shell: powershell
+
+      - name: Hash zips
+        run: |
+          $mainHash = Get-FileHash -Algorithm SHA256 ${{github.workspace}}/${{env.ZIP_NAME}}.zip
+          $mainHash.Hash | Out-File -FilePath ${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256
+          $pluginZip = "${{github.workspace}}/uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip"
+          $pluginHash = Get-FileHash -Algorithm SHA256 $pluginZip
+          $pluginHash.Hash | Out-File -FilePath "$pluginZip.sha256"
         shell: powershell
 
       - name: Generate release notes
@@ -83,7 +107,11 @@ jobs:
             "2. Extract the nightly zip to a folder.",
             "3. Download **${{env.ZIP_NAME}}.zip** from this release.",
             "4. Extract and **overwrite/replace** the files from step 2 with the files from this release.",
-            "5. Run UEVR as normal.",
+            "5. Download **uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip** and run ``install-plugins.bat`` to install plugins and presets.",
+            "   Or install manually — see [INSTALL.md](https://github.com/${{github.repository}}/blob/${{github.sha}}/docs/INSTALL.md).",
+            "6. Run UEVR as normal.",
+            "",
+            "> **Note:** The post-processing plugins require this patched fork. They will **not** load on stock UEVR nightly.",
             "",
             "## Changes",
             $log
@@ -96,7 +124,7 @@ jobs:
         with:
           tag: patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}
           name: "UEVR Patched ${{env.NIGHTLY_NUM}}-${{github.run_number}} (${{github.sha}})"
-          artifacts: "${{github.workspace}}/${{env.ZIP_NAME}}.zip,${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256"
+          artifacts: "${{github.workspace}}/${{env.ZIP_NAME}}.zip,${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256,${{github.workspace}}/uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip,${{github.workspace}}/uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip.sha256"
           bodyFile: ${{github.workspace}}/RELEASE_NOTES.md
           makeLatest: true
           token: ${{secrets.GITHUB_TOKEN}}

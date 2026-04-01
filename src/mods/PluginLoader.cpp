@@ -2094,7 +2094,9 @@ std::vector<std::string> PluginLoader::list_presets(const std::filesystem::path&
         if (!std::filesystem::exists(dir)) return result;
         for (const auto& entry : std::filesystem::directory_iterator(dir)) {
             if (entry.is_directory()) {
-                result.push_back(entry.path().filename().string());
+                auto name = entry.path().filename().string();
+                if (name == "." || name == "..") continue;
+                result.push_back(name);
             }
         }
         std::sort(result.begin(), result.end());
@@ -2261,10 +2263,21 @@ void PluginLoader::draw_preset_ui() {
         // Save as new preset
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
         ImGui::InputText("##PresetName", m_preset_name_buf, sizeof(m_preset_name_buf));
+
+        // Sanitize to a safe single filename (no path separators, no reserved chars)
+        auto sanitize_name = [](std::string s) -> std::string {
+            std::erase_if(s, [](char c) {
+                return c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|';
+            });
+            while (!s.empty() && (s.back() == '.' || s.back() == ' ')) s.pop_back();
+            while (!s.empty() && (s.front() == '.' || s.front() == ' ')) s.erase(s.begin());
+            return s;
+        };
+
         ImGui::SameLine();
         if (ImGui::Button("Save")) {
             auto dir = get_local_presets_dir();
-            std::string name = (m_preset_name_buf[0] != '\0') ? m_preset_name_buf : next_auto_name();
+            std::string name = sanitize_name((m_preset_name_buf[0] != '\0') ? m_preset_name_buf : next_auto_name());
             save_preset(dir, name);
             s_active_preset_name = name;
             s_active_preset_dir = dir;
@@ -2274,7 +2287,7 @@ void PluginLoader::draw_preset_ui() {
         ImGui::SameLine();
         if (ImGui::Button("Save Global")) {
             auto dir = get_global_presets_dir();
-            std::string name = (m_preset_name_buf[0] != '\0') ? m_preset_name_buf : next_auto_name();
+            std::string name = sanitize_name((m_preset_name_buf[0] != '\0') ? m_preset_name_buf : next_auto_name());
             save_preset(dir, name);
             s_active_preset_name = name;
             s_active_preset_dir = dir;
@@ -2333,6 +2346,9 @@ void PluginLoader::draw_preset_ui() {
                 }
             }
         }
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Tip: Select individual effects in the left menu under PluginLoader to tweak settings.");
     }
 }
 
