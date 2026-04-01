@@ -9,6 +9,7 @@ echo.
 set "UEVR_DATA=%APPDATA%\UnrealVRMod"
 set "PLUGIN_DIR=%UEVR_DATA%\UEVR\plugins"
 set "PRESET_DIR=%UEVR_DATA%\UEVR\data\plugins\shipping_presets"
+set "USER_PRESET_DIR=%UEVR_DATA%\uevr\data\plugins\presets"
 
 :: Detect if we're running from inside the plugins folder already
 set "SCRIPT_DIR=%~dp0"
@@ -46,8 +47,8 @@ echo This will remove:
 echo   - All 13 post-processing shader DLLs from global plugins
 echo   - Their license files
 echo   - Built-in shipping presets
-echo.
-echo Per-game settings and user-saved presets will NOT be removed.
+echo   - User-saved presets
+echo   - Per-game shader settings
 echo.
 set /p "CONFIRM=Are you sure? (Y/N): "
 if /i not "%CONFIRM%"=="Y" (
@@ -96,6 +97,45 @@ if exist "%PRESET_DIR%" (
     ) else (
         echo   Removed: shipping_presets
         set /a REMOVED+=1
+    )
+)
+
+:: Remove user-saved presets
+if exist "%USER_PRESET_DIR%" (
+    echo.
+    echo Removing user presets...
+    rmdir /s /q "%USER_PRESET_DIR%" >nul 2>&1
+    if errorlevel 1 (
+        echo   FAILED: Could not remove user presets folder.
+        set /a ERRORS+=1
+    ) else (
+        echo   Removed: user presets
+        set /a REMOVED+=1
+    )
+)
+
+:: Our 13 shader settings filenames (must match PluginLoader name derivation)
+set "SETTINGS=levelsplus_settings.txt liftgammagain_settings.txt tonemap_settings.txt curves_settings.txt fakehdr_settings.txt dpx_settings.txt technicolor_settings.txt colourfulness_settings.txt vibrance_settings.txt filmgrain2_settings.txt hslshift_settings.txt filmicpass_settings.txt clarity_settings.txt"
+
+echo.
+echo Removing per-game shader settings...
+for /d %%g in ("%UEVR_DATA%\*") do (
+    if exist "%%g\data\plugins" (
+        for %%s in (%SETTINGS%) do (
+            if exist "%%g\data\plugins\%%s" (
+                del /f "%%g\data\plugins\%%s" >nul 2>&1
+                if not errorlevel 1 set /a REMOVED+=1
+            )
+        )
+        if exist "%%g\data\plugins\active_preset.txt" (
+            del /f "%%g\data\plugins\active_preset.txt" >nul 2>&1
+            if not errorlevel 1 set /a REMOVED+=1
+        )
+        :: Remove per-game presets
+        if exist "%%g\data\plugins\presets" (
+            rmdir /s /q "%%g\data\plugins\presets" >nul 2>&1
+            if not errorlevel 1 set /a REMOVED+=1
+        )
     )
 )
 

@@ -20,42 +20,39 @@ Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix
 
 VR headsets often show washed-out colors and grey blacks compared to a flat monitor. This fork includes 13 ReShade shaders re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
 
+Performance impact is small on DX12 games — typically **1–2 ms**. DX11 games may see a larger hit depending on the title.
+
 #### Color Correction (start here)
 
-These fix the most common VR problems. **LevelsPlus is the single most important shader** — it fixes grey blacks, which almost every VR game suffers from.
+These fix the most common VR problems. **LevelsPlus** fixes grey blacks (the #1 VR issue) and **FakeHDR** is the easiest way to make any game look good — start with one or both. Note: correction shaders trade some shadow/highlight detail for better contrast.
 
 | # | Shader | When to Use It |
 |---|--------|----------------|
-| 01 | **LevelsPlus** | **Fix grey/washed-out blacks.** The #1 VR problem. Makes darks actually dark and whites actually bright. Also has per-channel gamma and optional ACES tone mapping. Start here. |
-| 02 | **LiftGammaGain** | Fine-tune shadows, midtones, and highlights separately. Use if LevelsPlus alone isn't enough — e.g. shadows are too blue, or highlights are too warm. |
-| 03 | **Tonemap** | Adjust overall gamma, exposure, and saturation. Also has bleach bypass (desaturated high-contrast film look) and defog (removes haze/fog). |
+| 01 | **LevelsPlus** | **Fix grey/washed-out blacks.** The #1 VR problem. Remaps black/white points so darks are actually dark and whites are actually bright. Trades some shadow detail for deeper blacks — almost always worth it. Also has per-channel gamma and optional ACES tone mapping. Start here. |
+| 02 | **LiftGammaGain** | Fine-tune shadows, midtones, and highlights separately. Use if LevelsPlus alone isn't enough — e.g. shadows are too blue, or highlights are too warm. Gain can clip highlights if pushed high. |
+| 03 | **Tonemap** | Adjust overall gamma, exposure, and saturation. Exposure can clip highlights; defog subtracts color. Also has bleach bypass (desaturated high-contrast film look). |
 
 #### Color Grading (make it look good)
 
-These change the overall look and feel of the image. Use after the correction shaders above.
+These change the overall look and feel of the image. All detail-safe — they enhance without clipping.
 
 | # | Shader | When to Use It |
 |---|--------|----------------|
-| 04 | **Curves** | Add contrast to the image using S-curves. Makes bright areas brighter and dark areas darker. Multiple curve formulas (Luma, Chroma, etc). Subtle but effective. |
-| 05 | **FakeHDR** | Makes the image look more "HDR-like" by adding local tone mapping via bloom. Brightens details in dark areas without blowing out bright areas. [Technical docs](docs/fakehdr-vr-postprocess-plugin.md). |
-| 06 | **DPX** | Emulates Cineon film stock. Gives a warm, cinematic color shift. Good for games that look too cold/digital. |
+| 04 | **Curves** | Add contrast using S-curves. Redistributes contrast within the existing range without clipping. Multiple curve formulas (Luma, Chroma, etc). Subtle but effective. |
+| 05 | **FakeHDR** | **Easiest way to make any game look good.** Local tone mapping via bloom — lifts dark areas using nearby bright areas, like real HDR. Enhances detail without clipping. [Technical docs](docs/fakehdr-vr-postprocess-plugin.md). |
+| 06 | **DPX** | Emulates Cineon film stock. Gives a warm, cinematic color shift with a strength slider. Good for games that look too cold/digital. |
 | 07 | **Technicolor** | Emulates 2-strip Technicolor (old Hollywood look). Strong color shift — teal shadows, warm highlights. Use sparingly. |
-| 08 | **Colourfulness** | Boosts color saturation while protecting already-saturated colors from clipping. Smarter than just cranking saturation. |
-| 09 | **Vibrance** | Similar to Colourfulness but works differently — it boosts unsaturated colors more than saturated ones. Good for making dull games pop without oversaturating skin tones. |
+| 08 | **Colourfulness** | Boosts color saturation with a built-in limiter that prevents clipping. Smarter than just cranking saturation. |
+| 09 | **Vibrance** | Boosts unsaturated colors more than saturated ones. Mathematically avoids clipping. Good for making dull games pop without oversaturating skin tones. |
+| 11 | **HSL Shift** | Remap individual colors to different hues. E.g. make greens more vivid, shift reds toward orange, cool down skin tones. 8 color zones you can shift independently. Changes color direction, not intensity. |
+| 12 | **Filmic Pass** | Full cinematic color processing: sigmoid curves per RGB channel, bleach bypass, fade, saturation, and per-channel gamma. More control than Tonemap — use when you want a specific film look. |
 
-#### Film Effects (finishing touches)
+#### Detail & Film Effects (finishing touches)
 
 | # | Shader | When to Use It |
 |---|--------|----------------|
 | 10 | **FilmGrain2** | Adds subtle photographic film grain. Hides color banding in dark areas (common on VR panels). Keep it subtle — high values look noisy. |
-
-#### Advanced (new)
-
-| # | Shader | When to Use It |
-|---|--------|----------------|
-| 11 | **HSL Shift** | Remap individual colors to different hues. E.g. make greens more vivid, shift reds toward orange, cool down skin tones. 8 color zones you can shift independently. For fine color work. |
-| 12 | **Filmic Pass** | Full cinematic color processing: sigmoid curves per RGB channel, bleach bypass, fade, saturation, and per-channel gamma. More control than Tonemap — use when you want a specific film look. |
-| 13 | **Clarity** | Local contrast enhancement. Makes textures and details pop without changing colors. Works like sharpening but on mid-frequency detail. Multiple blend modes (Soft Light, Overlay, Hard Light, etc). **Very effective in VR** where things often look flat. |
+| 13 | **Clarity** | Local contrast enhancement — makes textures and details pop without changing colors or clipping. Works like sharpening but on mid-frequency detail. Multiple blend modes (Soft Light, Overlay, Hard Light, etc). **Very effective in VR** where things often look flat. |
 
 All shaders are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Shaders are loaded in numeric order (01→13). Settings are saved per-game automatically.
 
@@ -73,10 +70,6 @@ Don't want to configure each shader manually? Load a preset instead:
 | **HDR Look** | LevelsPlus + FakeHDR + Colourfulness | Local tone mapping + enhanced color |
 
 You can also save your own presets — **per-game** (local) or **shared across all games** (global).
-
-### Performance
-
-The shaders can have a small performance impact on DX12 games — typically **1–2 ms**. DX11 games may see a larger hit depending on the title. Performance varies game by game.
 
 ### Other Improvements
 
