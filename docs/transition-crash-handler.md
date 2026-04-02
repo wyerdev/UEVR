@@ -139,6 +139,8 @@ The cascade counter (`veh_stats::transition_crash_count`) is:
 - **Reset to 0** on every `on_frame()` call (rendering alive = transition is over)
 - **Threshold**: 3+ crashes activates cascade mode, bypassing the `fault_address > 0x10000` filter
 
+**Note:** The `fault_address > 0x10000` filter is also bypassed entirely when HMD is null (XR nullification active). Null-derived pointer arithmetic can produce any fault address (e.g., `[null + 0xFFFFFFFFFFFFFFE8]` → fault at `0xFFFFFFFFFFFFFFFF`), so filtering by address would incorrectly reject legitimate XR crashes.
+
 ### Temporary vs Permanent Fixups
 
 The remediation section branches on `is_transition_crash`:
@@ -223,7 +225,7 @@ After:  CONTEXT.Rip = past both instructions
 |---------|------|---------|
 | `total_av_count` | `atomic<uint64_t>` | All access violations encountered |
 | `filtered_hmd_nonnull` | `atomic<uint64_t>` | Fast-path: HMD non-null and not transition crash |
-| `filtered_high_addr` | `atomic<uint64_t>` | Fast-path: fault > 0x10000 and not cascade |
+| `filtered_high_addr` | `atomic<uint64_t>` | Fast-path: fault > 0x10000, HMD valid, and not cascade |
 | `filtered_already_handled` | `atomic<uint64_t>` | Fast-path: address already permanently patched |
 | `filtered_reentrant` | `atomic<uint64_t>` | Fast-path: recursive exception guard |
 | `reached_deep_analysis` | `atomic<uint64_t>` | Entered instruction decode and stack walk |

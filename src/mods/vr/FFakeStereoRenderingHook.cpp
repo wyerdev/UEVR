@@ -4111,8 +4111,10 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
         }
 
         // FAST PATH 2: Filter by faulting memory address.
+        // Skip when HMD is null (XR nullification active) — null-derived arithmetic
+        // can produce any fault address (e.g. [null-1] = 0xFFFFFFFFFFFFFFFF).
         // Skip for transition crashes (which can have high fault addresses during cascade).
-        if (fault_address > 0x10000 && !is_transition_crash) {
+        if (fault_address > 0x10000 && hmd_is_valid && !is_transition_crash) {
             veh_stats::filtered_high_addr.fetch_add(1, std::memory_order_relaxed);
             veh_stats::record_filtered_fault(fault_address, exception->ContextRecord->Rip);
             return EXCEPTION_CONTINUE_SEARCH;
