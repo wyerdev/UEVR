@@ -119,6 +119,13 @@ jobs:
           $lines -join "`n" | Out-File -FilePath ${{github.workspace}}/RELEASE_NOTES.md -Encoding utf8
         shell: powershell
 
+      - name: Create annotated tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag -a "patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}" -m "UEVR Patched ${{env.NIGHTLY_NUM}}-${{github.run_number}}"
+          git push origin "patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}"
+
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
