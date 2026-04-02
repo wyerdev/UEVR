@@ -333,22 +333,75 @@ void CommandContext::clear_rtv(d3d12::TextureContext& tex, const float* color, D
     this->clear_rtv(tex.texture.Get(), tex.get_rtv(), color, dst_state);
 }
 
+// Isolated into a separate function because __try cannot coexist with
+// C++ objects that have destructors (like std::scoped_lock) in the same function.
+static bool execute_command_list_seh(
+    ID3D12GraphicsCommandList* cmd_list,
+    ID3D12CommandQueue* command_queue,
+    ID3D12Fence* fence,
+    UINT64& fence_value,
+    HANDLE fence_event,
+    bool& waiting_for_fence)
+{
+    __try {
+        if (FAILED(cmd_list->Close())) {
+            return false;
+        }
+
+        ID3D12CommandList* const cmd_lists[] = {cmd_list};
+        command_queue->ExecuteCommandLists(1, cmd_lists);
+        command_queue->Signal(fence, ++fence_value);
+        fence->SetEventOnCompletion(fence_value, fence_event);
+        waiting_for_fence = true;
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void CommandContext::execute() {
     std::scoped_lock _{this->mtx};
     
     if (this->has_commands) {
-        if (FAILED(this->cmd_list->Close())) {
-            spdlog::error("[VR] Failed to close command list. ({})", utility::narrow(this->internal_name));
-            return;
-        }
-        
-        auto command_queue = g_framework->get_d3d12_hook()->get_command_queue();
-        ID3D12CommandList* const cmd_lists[] = {this->cmd_list.Get()};
-        command_queue->ExecuteCommandLists(1, cmd_lists);
-        command_queue->Signal(this->fence.Get(), ++this->fence_value);
-        this->fence->SetEventOnCompletion(this->fence_value, this->fence_event);
-        this->waiting_for_fence = true;
         this->has_commands = false;
+
+        auto command_queue = g_framework->get_d3d12_hook()->get_command_queue();
+
+        if (!execute_command_list_seh(
+                this->cmd_list.Get(),
+                command_queue,
+                this->fence.Get(),
+                this->fence_value,
+                this->fence_event,
+                this->waiting_for_fence))
+        {
+            spdlog::warn("[VR] Command list execution failed or caught exception ({}), recovering.", utility::narrow(this->internal_name));
+            this->recover_from_failed_execute();
+        }
+    }
+}
+
+void CommandContext::recover_from_failed_execute() {
+    // Reset the command allocator and list into a clean open state
+    // so the next frame's wait() + recording works normally.
+    // This may fail if the device is in a removed state — that's fine,
+    // the next frame will detect it via setup() or wait().
+    if (this->cmd_allocator) {
+        this->cmd_allocator->Reset();
+    }
+    if (this->cmd_list && this->cmd_allocator) {
+        this->cmd_list->Reset(this->cmd_allocator.Get(), nullptr);
+    }
+    this->waiting_for_fence = false;
+}
+
+void CommandContext::discard() {
+    std::scoped_lock _{this->mtx};
+
+    if (this->has_commands) {
+        spdlog::info("[VR] Discarding plugin command list ({}) — scene RT invalidated.", utility::narrow(this->internal_name));
+        this->has_commands = false;
+        this->recover_from_failed_execute();
     }
 }
 }

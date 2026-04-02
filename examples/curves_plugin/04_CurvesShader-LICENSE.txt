@@ -1,0 +1,14 @@
+CurvesPlugin for UEVR
+=====================
+
+Original shader:
+  Curves by Christian Cann Schuldt Jensen ~ CeeJay.dk
+  Curves, uses S-curves to increase contrast, without clipping highlights
+  and shadows.
+  Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/Curves.fx
+  From the crosire/reshade-shaders community collection.
+  No explicit license was provided in the original file or repository.
+  All rights remain with the original author.
+
+Modifications: Ported from ReShade FX to DX11/DX12 C++ plugin with
+embedded HLSL pixel shader.

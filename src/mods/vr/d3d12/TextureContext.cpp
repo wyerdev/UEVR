@@ -25,6 +25,56 @@ bool TextureContext::setup(ID3D12Device* device, ID3D12Resource* rsrc, std::opti
     return create_rtv(device, rtv_format) && create_srv(device, srv_format);
 }
 
+bool TextureContext::update_texture(ID3D12Device* device, ID3D12Resource* rsrc, std::optional<DXGI_FORMAT> rtv_format, std::optional<DXGI_FORMAT> srv_format, const wchar_t* name) {
+    if (rsrc == nullptr) {
+        return false;
+    }
+
+    // If heaps don't exist yet, fall back to full setup.
+    if (rtv_heap == nullptr || rtv_heap->Heap() == nullptr ||
+        srv_heap == nullptr || srv_heap->Heap() == nullptr) {
+        return setup(device, rsrc, rtv_format, srv_format, name);
+    }
+
+    // Heaps already exist. Swap the texture and overwrite the view
+    // descriptors in-place — no heap allocation needed. RTV/SRV heap
+    // slots are format-agnostic; CreateRenderTargetView/CreateShaderResourceView
+    // writes the new view into the existing descriptor regardless of
+    // resource format or dimension changes.
+    texture.Reset();
+    texture = rsrc;
+    rsrc->SetName(name);
+
+    // Overwrite RTV in existing heap.
+    if (rtv_format) {
+        D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{};
+        rtv_desc.Format = (DXGI_FORMAT)*rtv_format;
+        rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        rtv_desc.Texture2D.MipSlice = 0;
+        rtv_desc.Texture2D.PlaneSlice = 0;
+        device->CreateRenderTargetView(texture.Get(), &rtv_desc, get_rtv());
+    } else {
+        device->CreateRenderTargetView(texture.Get(), nullptr, get_rtv());
+    }
+
+    // Overwrite SRV in existing heap.
+    if (srv_format) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc{};
+        srv_desc.Format = (DXGI_FORMAT)*srv_format;
+        srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv_desc.Texture2D.MipLevels = 1;
+        srv_desc.Texture2D.MostDetailedMip = 0;
+        srv_desc.Texture2D.PlaneSlice = 0;
+        srv_desc.Texture2D.ResourceMinLODClamp = 0.0f;
+        device->CreateShaderResourceView(texture.Get(), &srv_desc, get_srv_cpu());
+    } else {
+        device->CreateShaderResourceView(texture.Get(), nullptr, get_srv_cpu());
+    }
+
+    return true;
+}
+
 bool TextureContext::create_rtv(ID3D12Device* device, std::optional<DXGI_FORMAT> format) {
     spdlog::info("Creating RTV for texture context");
 
