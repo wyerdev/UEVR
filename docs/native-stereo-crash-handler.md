@@ -44,38 +44,43 @@ Exception occurs
                  │
                  ▼
 ┌─────────────────────────────────────────┐
-│ Gate 1: Deduplication (handled_addresses│
+│ Gate 1: HMD + Transition Classification │
+│   HMD valid? → only handle transition   │
+│   crashes (game DLL + null-page/cascade)│
+│   HMD null? → XR crash, continue        │
+└────────────────┬────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────┐
+│ Gate 2: Fault Address Filter            │
+│   fault > 0x10000?                      │
+│   Bypassed when HMD null (XR active) —  │
+│   null-derived arithmetic can produce   │
+│   any fault address (e.g. 0xFFFFFFFF)   │
+│   Bypassed for transition cascades      │
+└────────────────┬────────────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────┐
+│ Gate 3: Deduplication (handled_addresses│
 │   set — O(1) lookup)                    │
 │   Already processed? → CONTINUE_SEARCH  │
 └────────────────┬────────────────────────┘
                  │
                  ▼
 ┌─────────────────────────────────────────┐
-│ Gate 2: Re-entrancy Guard               │
+│ Gate 4: Re-entrancy Guard               │
 │   atomic<bool> handler_active           │
 │   Prevents recursive stack-walk crashes │
 └────────────────┬────────────────────────┘
                  │
                  ▼
 ┌─────────────────────────────────────────┐
-│ Gate 3: Basic Validation                │
+│ Gate 5: Basic Validation + Decode       │
 │   Null RIP? IsBadReadPtr? Can decode?   │
 │   Failures cached in handled_addresses  │
-└────────────────┬────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────────┐
-│ Gate 4: Instruction Analysis            │
-│   Decode with bddisasm                  │
 │   Identify REG ← MEM pattern           │
 │   Extract dest_reg for context fixup    │
-└────────────────┬────────────────────────┘
-                 │
-                 ▼
-┌─────────────────────────────────────────┐
-│ Gate 5: HMD Null Check                  │
-│   Is engine->hmd_device actually null?  │
-│   If not null → not our crash           │
 └────────────────┬────────────────────────┘
                  │
                  ▼
