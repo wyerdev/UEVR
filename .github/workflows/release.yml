@@ -108,7 +108,7 @@ jobs:
             "3. Download **${{env.ZIP_NAME}}.zip** from this release.",
             "4. Extract and **overwrite/replace** the files from step 2 with the files from this release.",
             "5. Download **uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip** and run ``install-plugins.bat`` to install shaders and presets.",
-            "   Or install manually — see [INSTALL.md](https://github.com/${{github.repository}}/blob/${{github.sha}}/docs/INSTALL.md).",
+            "   Or install manually -- see [INSTALL.md](https://github.com/${{github.repository}}/blob/${{github.sha}}/docs/INSTALL.md).",
             "6. Run UEVR as normal.",
             "",
             "> **Note:** The post-processing shaders require this patched fork. They will **not** load on stock UEVR nightly.",

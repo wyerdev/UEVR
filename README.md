@@ -7,31 +7,36 @@ Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix
 - Built on [praydog's UEVR](https://github.com/praydog/UEVR) ([Original UEVR README below](#original-uevr-readme)). 
 - Shaders ported from ReShade originals by CeeJay.dk, 3an, DKT70, Loadus, Martins Upitis, bacondither, Ioxa, and kingeric1992 ([license files](examples/)).
 
-## [How to Install](docs/INSTALL.md)
+# [How to Install](docs/INSTALL.md)
 
-## What's New in This Fork
+# What's New in This Fork
 
-### Crash Fixes
+## Crash Fixes
 
 - Fix crashes in Creatures of Ava — [technical details](docs/native-stereo-crash-handler.md)
 - Fix crashes on death in Returnal — [technical details](docs/transition-crash-handler.md)
 
-### ReShade Post-Processing Shaders
+## UEVR Plugins: ReShade Post-Processing Shaders
+- Fix washed-out colors and grey blacks
 
 VR headsets often show **washed-out colors and grey blacks** compared to a flat monitor. This fork includes 13 ReShade shaders to fix this, re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
 
-### Performance
+### **Performance**
 
-Performance impact is small — typically **1–2 ms** on DX12, more on DX11. Varies by title: some games show no loss at all, others a bit more. The visual improvement is well worth it.
+Performance impact is small (hopefully) — typically **1–2 ms** on DX12, more on DX11. 
 
-### Where to start: 
+It varies by title: some games show no loss at all, others a bit more. And maybe depends on GPU as well.
+
+The visual improvement is well worth the small performance impact.
+
+### **Where to start:** 
 - **LevelsPlus** fixes grey blacks (the #1 VR issue) and 
 - **FakeHDR** is the easiest way to make any game look good
 Try one or both.
 
-### Color Correction (fix what's broken)
+**Color Correction (fix what's broken)**
 
-These fix the most common VR problems by remapping the tonal range. Trades some shadow/highlight detail for better contrast — almost always worth it.
+These clip by design — they remap the tonal range, trading some shadow/highlight detail for better contrast. Almost always worth it.
 
 | # | Shader | When to Use It |
 |---|--------|----------------|
@@ -39,9 +44,9 @@ These fix the most common VR problems by remapping the tonal range. Trades some 
 | 02 | **LiftGammaGain** | Fine-tune shadows, midtones, and highlights separately. Use if LevelsPlus alone isn't enough — e.g. shadows are too blue, or highlights are too warm. Gain can clip highlights if pushed high. |
 | 03 | **Tonemap** | Adjust overall gamma, exposure, and saturation. Exposure can clip highlights; defog subtracts color. Also has bleach bypass (desaturated high-contrast film look). |
 
-### Color Grading (make it look good)
+**Color Grading (make it look good)**
 
-These change the overall look and feel of the image. All detail-safe — they enhance without clipping.
+These change the overall look and feel of the image. Detail-safe — they enhance without clipping (except Filmic Pass, which can clip at extreme settings).
 
 | # | Shader | When to Use It |
 |---|--------|----------------|
@@ -52,9 +57,9 @@ These change the overall look and feel of the image. All detail-safe — they en
 | 08 | **Colourfulness** | Boosts color saturation with a built-in limiter that prevents clipping. Smarter than just cranking saturation. |
 | 09 | **Vibrance** | Boosts unsaturated colors more than saturated ones. Mathematically avoids clipping. Good for making dull games pop without oversaturating skin tones. |
 | 11 | **HSL Shift** | Remap individual colors to different hues. E.g. make greens more vivid, shift reds toward orange, cool down skin tones. 8 color zones you can shift independently. Changes color direction, not intensity. |
-| 12 | **Filmic Pass** | Full cinematic color processing: sigmoid curves per RGB channel, bleach bypass, fade, saturation, and per-channel gamma. More control than Tonemap — use when you want a specific film look. |
+| 12 | **Filmic Pass** | Full cinematic color processing: sigmoid curves per RGB channel, bleach bypass, fade, saturation, and per-channel gamma. Can clip at extreme settings. More control than Tonemap — use when you want a specific film look. |
 
-### Detail & Film Effects (finishing touches)
+**Detail & Film Effects (finishing touches)**
 
 | # | Shader | When to Use It |
 |---|--------|----------------|
@@ -63,7 +68,7 @@ These change the overall look and feel of the image. All detail-safe — they en
 
 All shaders are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Shaders are loaded in numeric order (01→13). Settings are saved per-game automatically.
 
-## Presets
+### Presets
 
 Don't want to configure each shader manually? Load a preset instead:
 
@@ -78,13 +83,9 @@ Don't want to configure each shader manually? Load a preset instead:
 
 You can also save your own presets — **per-game** (local) or **shared across all games** (global).
 
-### Other Improvements
-
-- Left-aligned sidebar entries with sub-entry indentation
-
 ---
 
-## Building Plugins
+### Building Plugins
 
 ```bash
 cmake --build build --config Release --target <plugin_name>
