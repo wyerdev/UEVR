@@ -1387,7 +1387,7 @@ void Framework::draw_ui() {
 
         ImGui::BeginChild("UEVRLeftPane", ImVec2(0, 0), true);
         auto dcs = [&](const char* label, int32_t page_value) -> bool {
-            ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.5f, 0.5f));
+            ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));
             if (ImGui::Selectable(label, m_sidebar_state.selected_entry == page_value)) {
                 m_sidebar_state.selected_entry = page_value;
                 ImGui::PopStyleVar();
@@ -1440,6 +1440,7 @@ void Framework::draw_ui() {
 
             for (size_t i = 1; i < sidebar_entries.size(); ++i) {
                 if (is_advanced_mode || !sidebar_entries[i].m_advanced_entry) {
+                    bool is_sub_entry = false;
                     for (const auto& range : mod_sidebar_ranges) {
                         if (i == range.mn) {
                             // Set first entry as default ("Runtime" entry of VR mod)
@@ -1453,11 +1454,20 @@ void Framework::draw_ui() {
 
                             ImGui::Text(range.mod->get_name().data());
                         }
+                        if (range.has_sidebar_entries && i >= range.mn && i < range.mx) {
+                            is_sub_entry = true;
+                        }
                     }
 
+                    if (is_sub_entry) {
+                        ImGui::Indent(10.0f);
+                    }
                     ImGui::PushID(i);
                     dcs(sidebar_entries[i].m_label.c_str(), i);
                     ImGui::PopID();
+                    if (is_sub_entry) {
+                        ImGui::Unindent(10.0f);
+                    }
                 }
             }
 

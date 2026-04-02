@@ -35,6 +35,13 @@ struct CommandContext {
     void clear_rtv(TextureContext& tex, const float* color, D3D12_RESOURCE_STATES dst_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     void execute();
 
+    // Discard any recorded commands without submitting. Resets the command list
+    // to a clean open state for the next frame.
+    void discard();
+
+    // Reset allocator+list into clean open state after a failed execute.
+    void recover_from_failed_execute();
+
     bool ready() const {
         return this->cmd_list != nullptr && this->cmd_allocator != nullptr && this->fence != nullptr;
     }

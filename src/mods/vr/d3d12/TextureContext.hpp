@@ -14,6 +14,7 @@ struct TextureContext {
     std::unique_ptr<DirectX::DescriptorHeap> srv_heap{};
 
     bool setup(ID3D12Device* device, ID3D12Resource* rsrc, std::optional<DXGI_FORMAT> rtv_format, std::optional<DXGI_FORMAT> srv_format, const wchar_t* name = L"TextureContext object");
+    bool update_texture(ID3D12Device* device, ID3D12Resource* rsrc, std::optional<DXGI_FORMAT> rtv_format = std::nullopt, std::optional<DXGI_FORMAT> srv_format = std::nullopt, const wchar_t* name = L"TextureContext object");
     bool create_rtv(ID3D12Device* device, std::optional<DXGI_FORMAT> format = std::nullopt);
     bool create_srv(ID3D12Device* device, std::optional<DXGI_FORMAT> format = std::nullopt);
 
