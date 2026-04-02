@@ -65,9 +65,9 @@ set "ERRORS=0"
 echo Removing shaders...
 for %%f in (%PLUGINS%) do (
     if exist "%PLUGIN_DIR%\%%f" (
-        del /f "%PLUGIN_DIR%\%%f" >nul 2>&1
-        if errorlevel 1 (
-            echo   FAILED: %%f  (may be in use - close UEVR first)
+        del /f "%PLUGIN_DIR%\%%f" 2>&1
+        if exist "%PLUGIN_DIR%\%%f" (
+            echo   FAILED: %%f
             set /a ERRORS+=1
         ) else (
             echo   Removed: %%f
@@ -79,8 +79,11 @@ for %%f in (%PLUGINS%) do (
 :: Remove license files
 for %%f in (%LICENSES%) do (
     if exist "%PLUGIN_DIR%\%%f" (
-        del /f "%PLUGIN_DIR%\%%f" >nul 2>&1
-        if not errorlevel 1 (
+        del /f "%PLUGIN_DIR%\%%f" 2>&1
+        if exist "%PLUGIN_DIR%\%%f" (
+            echo   FAILED: %%f
+            set /a ERRORS+=1
+        ) else (
             set /a REMOVED+=1
         )
     )
@@ -142,7 +145,7 @@ for /d %%g in ("%UEVR_DATA%\*") do (
 echo.
 echo ============================================
 if !ERRORS! GTR 0 (
-    echo   DONE with !ERRORS! error(s). !REMOVED! items removed.
+    echo   DONE with !ERRORS! error[s]. !REMOVED! items removed.
     echo   Close UEVR and retry for locked files.
 ) else (
     echo   SUCCESS: !REMOVED! items removed.
