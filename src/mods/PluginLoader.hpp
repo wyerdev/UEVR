@@ -29,7 +29,9 @@ public:
     std::string_view get_name() const override { return "PluginLoader"; }
     bool is_advanced_mod() const override { return true; }
     std::optional<std::string> on_initialize_d3d_thread() override;
+    std::vector<SidebarEntryInfo> get_sidebar_entries() override;
     void on_draw_ui() override;
+    void on_draw_sidebar_entry(std::string_view name) override;
 
     void on_present();
     void on_device_reset() override;
@@ -37,6 +39,8 @@ public:
     void on_xinput_get_state(uint32_t* retval, uint32_t user_index, XINPUT_STATE* state) override;
     void on_xinput_set_state(uint32_t* retval, uint32_t user_index, XINPUT_VIBRATION* vibration) override;
 
+    void on_pre_render_vr_framework_dx11();
+    void on_pre_render_vr_framework_dx12();
     void on_post_render_vr_framework_dx11(ID3D11DeviceContext* context, ID3D11Texture2D*, ID3D11RenderTargetView* rtv) override;
     void on_post_render_vr_framework_dx12(ID3D12GraphicsCommandList* command_list, ID3D12Resource* rt, D3D12_CPU_DESCRIPTOR_HANDLE* rtv) override;
     
@@ -80,9 +84,12 @@ public:
     bool add_on_message(UEVR_OnMessageCb cb);
     bool add_on_xinput_get_state(UEVR_OnXInputGetStateCb cb);
     bool add_on_xinput_set_state(UEVR_OnXInputSetStateCb cb);
+    bool add_on_pre_render_vr_framework_dx11(UEVR_OnPreRenderVRFrameworkDX11Cb cb);
+    bool add_on_pre_render_vr_framework_dx12(UEVR_OnPreRenderVRFrameworkDX12Cb cb);
     bool add_on_post_render_vr_framework_dx11(UEVR_OnPostRenderVRFrameworkDX11Cb cb);
     bool add_on_post_render_vr_framework_dx12(UEVR_OnPostRenderVRFrameworkDX12Cb cb);
     bool add_on_custom_event(UEVR_OnCustomEventCb cb);
+    bool add_on_draw_ui(UEVR_OnDrawUICb cb);
 
     bool add_on_pre_engine_tick(UEVR_Engine_TickCb cb);
     bool add_on_post_engine_tick(UEVR_Engine_TickCb cb);
@@ -153,12 +160,16 @@ private:
     std::shared_mutex m_api_cb_mtx;
     std::vector<UEVR_OnPresentCb> m_on_present_cbs{};
     std::vector<UEVR_OnDeviceResetCb> m_on_device_reset_cbs{};
+    std::vector<UEVR_OnPreRenderVRFrameworkDX11Cb> m_on_pre_render_vr_framework_dx11_cbs{};
+    std::vector<UEVR_OnPreRenderVRFrameworkDX12Cb> m_on_pre_render_vr_framework_dx12_cbs{};
     std::vector<UEVR_OnPostRenderVRFrameworkDX11Cb> m_on_post_render_vr_framework_dx11_cbs{};
     std::vector<UEVR_OnPostRenderVRFrameworkDX12Cb> m_on_post_render_vr_framework_dx12_cbs{};
     std::vector<UEVR_OnMessageCb> m_on_message_cbs{};
     std::vector<UEVR_OnXInputGetStateCb> m_on_xinput_get_state_cbs{};
     std::vector<UEVR_OnXInputSetStateCb> m_on_xinput_set_state_cbs{};
     std::vector<UEVR_OnCustomEventCb> m_on_custom_event_cbs{};
+    std::vector<UEVR_OnDrawUICb> m_on_draw_ui_cbs{};
+    std::vector<std::string> m_on_draw_ui_plugin_names{};
 
     std::vector<UEVR_Engine_TickCb> m_on_pre_engine_tick_cbs{};
     std::vector<UEVR_Engine_TickCb> m_on_post_engine_tick_cbs{};
@@ -178,6 +189,8 @@ private:
         (std::vector<generic_std_function>*)&m_on_device_reset_cbs,
 
         // VR Renderer
+        (std::vector<generic_std_function>*)&m_on_pre_render_vr_framework_dx11_cbs,
+        (std::vector<generic_std_function>*)&m_on_pre_render_vr_framework_dx12_cbs,
         (std::vector<generic_std_function>*)&m_on_post_render_vr_framework_dx11_cbs,
         (std::vector<generic_std_function>*)&m_on_post_render_vr_framework_dx12_cbs,
 
@@ -188,6 +201,7 @@ private:
 
         // Custom
         (std::vector<generic_std_function>*)&m_on_custom_event_cbs,
+        (std::vector<generic_std_function>*)&m_on_draw_ui_cbs,
 
         // SDK
         (std::vector<generic_std_function>*)&m_on_pre_engine_tick_cbs,
@@ -206,6 +220,19 @@ private:
     std::map<std::string, HMODULE> m_plugins{};
     std::map<std::string, std::string> m_plugin_load_errors{};
     std::map<std::string, std::string> m_plugin_load_warnings{};
+    std::string m_current_loading_plugin{};
+
+    // Preset system
+    char m_preset_name_buf[128]{};
+    std::string m_preset_status{};
+    void draw_preset_ui();
+    std::filesystem::path get_local_presets_dir();
+    std::filesystem::path get_global_presets_dir();
+    std::filesystem::path get_shipping_presets_dir();
+    std::vector<std::string> list_presets(const std::filesystem::path& dir);
+    bool save_preset(const std::filesystem::path& presets_dir, const std::string& name);
+    bool load_preset(const std::filesystem::path& preset_path);
+    bool delete_preset(const std::filesystem::path& preset_path);
 
     struct InlineHookState {
         InlineHookState(safetyhook::InlineHook&& hook)

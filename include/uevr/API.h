@@ -36,7 +36,7 @@ SOFTWARE.
 #define UEVR_OUT
 
 #define UEVR_PLUGIN_VERSION_MAJOR 2
-#define UEVR_PLUGIN_VERSION_MINOR 39
+#define UEVR_PLUGIN_VERSION_MINOR 420
 #define UEVR_PLUGIN_VERSION_PATCH 0
 
 #define UEVR_RENDERER_D3D11 0
@@ -156,6 +156,8 @@ typedef void (*UEVR_OnPresentCb)();
 typedef void (*UEVR_OnDeviceResetCb)();
 
 /* VR Specific renderer callbacks */
+typedef void (*UEVR_OnPreRenderVRFrameworkDX11Cb)(); /* called before VR eye textures are copied/submitted */
+typedef void (*UEVR_OnPreRenderVRFrameworkDX12Cb)(); /* called before VR eye textures are copied/submitted */
 typedef void (*UEVR_OnPostRenderVRFrameworkDX11Cb)(void*, void*, void*); /* immediate_context, ID3D11Texture2D* resource, ID3D11RenderTargetView* rtv */
 /* On DX12 the resource state is D3D12_RESOURCE_STATE_RENDER_TARGET */
 typedef void (*UEVR_OnPostRenderVRFrameworkDX12Cb)(void*, void*, void*); /* command_list, ID3D12Resource* resource, D3D12_CPU_DESCRIPTOR_HANDLE* rtv */
@@ -179,6 +181,8 @@ typedef bool (*UEVR_OnPresentFn)(UEVR_OnPresentCb);
 typedef bool (*UEVR_OnDeviceResetFn)(UEVR_OnDeviceResetCb);
 
 /* VR Renderer */
+typedef bool (*UEVR_OnPreRenderVRFrameworkDX11Fn)(UEVR_OnPreRenderVRFrameworkDX11Cb);
+typedef bool (*UEVR_OnPreRenderVRFrameworkDX12Fn)(UEVR_OnPreRenderVRFrameworkDX12Cb);
 typedef bool (*UEVR_OnPostRenderVRFrameworkDX11Fn)(UEVR_OnPostRenderVRFrameworkDX11Cb);
 typedef bool (*UEVR_OnPostRenderVRFrameworkDX12Fn)(UEVR_OnPostRenderVRFrameworkDX12Cb);
 
@@ -190,6 +194,9 @@ typedef bool (*UEVR_OnXInputSetStateFn)(UEVR_OnXInputSetStateCb);
 /* Lua */
 typedef void (*UEVR_OnCustomEventCb)(const char* evt, const char* evt_data);
 typedef bool (*UEVR_OnCustomEventFn)(UEVR_OnCustomEventCb);
+
+typedef void (*UEVR_OnDrawUICb)(void* imgui_context);
+typedef bool (*UEVR_OnDrawUIFn)(UEVR_OnDrawUICb);
 
 /* Engine */
 typedef bool (*UEVR_Engine_TickFn)(UEVR_Engine_TickCb);
@@ -211,6 +218,10 @@ typedef struct {
     UEVR_OnPostRenderVRFrameworkDX11Fn on_post_render_vr_framework_dx11;
     UEVR_OnPostRenderVRFrameworkDX12Fn on_post_render_vr_framework_dx12;
     UEVR_OnCustomEventFn on_custom_event;
+    /* New entries appended at end for ABI compatibility with existing plugins */
+    UEVR_OnPreRenderVRFrameworkDX11Fn on_pre_render_vr_framework_dx11;
+    UEVR_OnPreRenderVRFrameworkDX12Fn on_pre_render_vr_framework_dx12;
+    UEVR_OnDrawUIFn on_draw_ui;
 } UEVR_PluginCallbacks;
 
 typedef struct {
@@ -426,6 +437,11 @@ typedef struct {
 typedef struct {
     UEVR_FRHITexture2DHandle (*get_scene_render_target)();
     UEVR_FRHITexture2DHandle (*get_ui_render_target)();
+    UEVR_FRHITexture2DHandle (*get_scene_capture_render_target)();
+    /* Returns the open ID3D12GraphicsCommandList* for recording during on_pre_render_vr_framework_dx12.
+       Returns NULL outside of that callback or when not using DX12.
+       Plugin records commands into this list; UEVR handles submission on the game's queue. */
+    void* (*get_pre_render_command_list)();
 } UEVR_FFakeStereoRenderingHookFunctions;
 
 typedef struct {

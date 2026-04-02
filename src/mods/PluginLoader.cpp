@@ -1,8 +1,10 @@
 #include <filesystem>
+#include <fstream>
 
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
+#include <ShlObj.h>
 #include <openvr.h>
 
 #include "Framework.hpp"
@@ -186,12 +188,36 @@ bool on_post_render_vr_framework_dx12(UEVR_OnPostRenderVRFrameworkDX12Cb cb) {
     return PluginLoader::get()->add_on_post_render_vr_framework_dx12(cb);
 }
 
+bool on_pre_render_vr_framework_dx11(UEVR_OnPreRenderVRFrameworkDX11Cb cb) {
+    if (cb == nullptr) {
+        return false;
+    }
+
+    return PluginLoader::get()->add_on_pre_render_vr_framework_dx11(cb);
+}
+
+bool on_pre_render_vr_framework_dx12(UEVR_OnPreRenderVRFrameworkDX12Cb cb) {
+    if (cb == nullptr) {
+        return false;
+    }
+
+    return PluginLoader::get()->add_on_pre_render_vr_framework_dx12(cb);
+}
+
 bool on_custom_event(UEVR_OnCustomEventCb cb) {
     if (cb == nullptr) {
         return false;
     }
 
     return PluginLoader::get()->add_on_custom_event(cb);
+}
+
+bool on_draw_ui(UEVR_OnDrawUICb cb) {
+    if (cb == nullptr) {
+        return false;
+    }
+
+    return PluginLoader::get()->add_on_draw_ui(cb);
 }
 }
 
@@ -203,7 +229,10 @@ UEVR_PluginCallbacks g_plugin_callbacks {
     uevr::on_xinput_set_state,
     uevr::on_post_render_vr_framework_dx11,
     uevr::on_post_render_vr_framework_dx12,
-    uevr::on_custom_event
+    uevr::on_custom_event,
+    uevr::on_pre_render_vr_framework_dx11,
+    uevr::on_pre_render_vr_framework_dx12,
+    uevr::on_draw_ui
 };
 
 UEVR_PluginFunctions g_plugin_functions {
@@ -1853,6 +1882,7 @@ std::optional<std::string> PluginLoader::on_initialize_d3d_thread() {
         }
 
         spdlog::info("[PluginLoader] Initializing {}...", name);
+        m_current_loading_plugin = name;
         try {
             if (!init_fn(&g_plugin_initialize_param)) {
                 spdlog::error("[PluginLoader] Failed to initialize {}", name);
@@ -1866,9 +1896,11 @@ std::optional<std::string> PluginLoader::on_initialize_d3d_thread() {
             m_plugin_load_errors.emplace(name, "Exception occurred in uevr_plugin_initialize");
             FreeLibrary(mod);
             it = m_plugins.erase(it);
+            m_current_loading_plugin.clear();
             continue;
         }
 
+        m_current_loading_plugin.clear();
         ++it;
     }
 
@@ -1882,6 +1914,7 @@ void PluginLoader::attempt_unload_plugins() {
         for (auto& callbacks : m_plugin_callback_lists) {
             callbacks->clear();
         }
+        m_on_draw_ui_plugin_names.clear();
 
         {
             std::unique_lock _{m_ufunction_hooks_mtx};
@@ -1889,6 +1922,21 @@ void PluginLoader::attempt_unload_plugins() {
             for (auto& [ufunction, hook] : m_ufunction_hooks) {
                 hook->remove_callbacks();
             }
+        }
+
+        // Drain all in-flight GPU work that may reference plugin-owned
+        // D3D12 resources (PSOs, textures, descriptor heaps, etc.).
+        // Without this, FreeLibrary destroys ComPtrs while the GPU is
+        // still executing the previous frame's command list → TDR/BSOD.
+        try {
+            if (g_framework->is_dx12()) {
+                auto vr = VR::get();
+                if (vr != nullptr) {
+                    vr->d3d12().wait_for_plugin_gpu_work();
+                }
+            }
+        } catch (...) {
+            spdlog::error("[PluginLoader] Exception while draining GPU before plugin unload");
         }
 
         for (auto& pair : m_plugins) {
@@ -1908,6 +1956,37 @@ void PluginLoader::reload_plugins() {
     on_initialize_d3d_thread();
 }
 
+std::vector<SidebarEntryInfo> PluginLoader::get_sidebar_entries() {
+    std::vector<SidebarEntryInfo> entries;
+    entries.emplace_back("PluginLoader", false);
+
+    std::shared_lock lock{m_api_cb_mtx};
+    for (size_t i = 0; i < m_on_draw_ui_cbs.size(); ++i) {
+        const auto& name = (i < m_on_draw_ui_plugin_names.size()) ? m_on_draw_ui_plugin_names[i] : std::string{"Plugin"};
+        entries.emplace_back(name, false);
+    }
+
+    return entries;
+}
+
+void PluginLoader::on_draw_sidebar_entry(std::string_view name) {
+    if (name == "PluginLoader") {
+        on_draw_ui();
+        return;
+    }
+
+    // Find and dispatch to the matching plugin's on_draw_ui callback
+    std::shared_lock lock{m_api_cb_mtx};
+    auto ctx = ImGui::GetCurrentContext();
+    for (size_t i = 0; i < m_on_draw_ui_cbs.size(); ++i) {
+        const auto& plugin_name = (i < m_on_draw_ui_plugin_names.size()) ? m_on_draw_ui_plugin_names[i] : std::string{"Plugin"};
+        if (plugin_name == name) {
+            m_on_draw_ui_cbs[i]((void*)ctx);
+            return;
+        }
+    }
+}
+
 void PluginLoader::on_draw_ui() {
     std::scoped_lock _{m_mux};
 
@@ -1918,16 +1997,6 @@ void PluginLoader::on_draw_ui() {
     if (ImGui::Button("Reload Plugins")) {
         attempt_unload_plugins();
         reload_plugins();
-    }
-
-    if (!m_plugins.empty()) {
-        ImGui::Text("Loaded plugins:");
-
-        for (auto&& [name, _] : m_plugins) {
-            ImGui::Text(name.c_str());
-        }
-    } else {
-        ImGui::Text("No plugins loaded.");
     }
 
     if (!m_plugin_load_errors.empty()) {
@@ -1944,6 +2013,353 @@ void PluginLoader::on_draw_ui() {
         for (auto&& [name, warning] : m_plugin_load_warnings) {
             ImGui::Text("%s - %s", name.c_str(), warning.c_str());
         }
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    draw_preset_ui();
+
+    // Plugin status display — drawn AFTER preset UI so loading a preset refreshes immediately
+    if (!m_plugins.empty()) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::Text("Plugin status:");
+
+        const auto persistent_dir = Framework::get_persistent_dir();
+        for (auto&& [name, _] : m_plugins) {
+            // Derive settings filename from plugin DLL name:
+            // "01_LevelsPlusShader" → strip prefix digits/underscore → "LevelsPlusShader"
+            // → strip "Shader" suffix → "LevelsPlus" → lowercase → "levelsplus_settings.txt"
+            std::string core = name;
+            // Strip leading digits and underscores (e.g. "01_")
+            size_t start = 0;
+            while (start < core.size() && (std::isdigit(core[start]) || core[start] == '_')) ++start;
+            core = core.substr(start);
+            // Strip "Shader" or "Plugin" suffix
+            const std::string shader_suffix = "Shader";
+            const std::string plugin_suffix = "Plugin";
+            if (core.size() > shader_suffix.size() && core.substr(core.size() - shader_suffix.size()) == shader_suffix) {
+                core = core.substr(0, core.size() - shader_suffix.size());
+            } else if (core.size() > plugin_suffix.size() && core.substr(core.size() - plugin_suffix.size()) == plugin_suffix) {
+                core = core.substr(0, core.size() - plugin_suffix.size());
+            }
+            // Lowercase
+            for (auto& c : core) c = (char)std::tolower(c);
+            auto settings_path = persistent_dir / "data" / "plugins" / (core + "_settings.txt");
+
+            bool is_enabled = false;
+            try {
+                std::ifstream f(settings_path);
+                if (f.is_open()) {
+                    int val = 0;
+                    if (f >> val) is_enabled = (val != 0);
+                }
+            } catch (...) {}
+
+            if (is_enabled) {
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "[ON]  %s", name.c_str());
+            } else {
+                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[OFF] %s", name.c_str());
+            }
+        }
+    } else {
+        ImGui::Text("No plugins loaded.");
+    }
+}
+
+std::filesystem::path PluginLoader::get_local_presets_dir() {
+    auto dir = Framework::get_persistent_dir() / "data" / "plugins" / "presets";
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+std::filesystem::path PluginLoader::get_global_presets_dir() {
+    wchar_t app_data_path[MAX_PATH]{};
+    SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
+    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "uevr" / "data" / "plugins" / "presets";
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+std::filesystem::path PluginLoader::get_shipping_presets_dir() {
+    wchar_t app_data_path[MAX_PATH]{};
+    SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
+    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "UEVR" / "data" / "plugins" / "shipping_presets";
+    // Don't create — this dir is managed by the release package, not created at runtime
+    return dir;
+}
+
+std::vector<std::string> PluginLoader::list_presets(const std::filesystem::path& dir) {
+    std::vector<std::string> result;
+    try {
+        if (!std::filesystem::exists(dir)) return result;
+        for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+            if (entry.is_directory()) {
+                auto name = entry.path().filename().string();
+                if (name == "." || name == "..") continue;
+                result.push_back(name);
+            }
+        }
+        std::sort(result.begin(), result.end());
+    } catch (...) {}
+    return result;
+}
+
+bool PluginLoader::save_preset(const std::filesystem::path& presets_dir, const std::string& name) {
+    try {
+        auto preset_path = presets_dir / name;
+        std::filesystem::create_directories(preset_path);
+
+        const auto persistent_dir = Framework::get_persistent_dir();
+        const auto plugin_settings_dir = persistent_dir / "data" / "plugins";
+        int count = 0;
+        if (!std::filesystem::exists(plugin_settings_dir)) {
+            m_preset_status = "No plugin settings to save";
+            return false;
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(plugin_settings_dir)) {
+            if (!entry.is_regular_file()) continue;
+            auto fname = entry.path().filename().string();
+            if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
+                std::filesystem::copy_file(entry.path(), preset_path / fname, std::filesystem::copy_options::overwrite_existing);
+                ++count;
+            }
+        }
+
+        m_preset_status = "Saved \"" + name + "\" (" + std::to_string(count) + " files)";
+        spdlog::info("[PluginLoader] Saved preset '{}' with {} settings files to {}", name, count, preset_path.string());
+        return true;
+    } catch (const std::exception& e) {
+        m_preset_status = std::string("Save failed: ") + e.what();
+        spdlog::error("[PluginLoader] Failed to save preset '{}': {}", name, e.what());
+        return false;
+    }
+}
+
+// Active preset tracking (file-scope to avoid header/class-layout changes)
+static std::string s_active_preset_name{};
+static std::filesystem::path s_active_preset_dir{};
+static bool s_active_preset_is_builtin = false;
+static bool s_active_preset_loaded_from_disk = false;
+
+static std::filesystem::path get_active_preset_file() {
+    return Framework::get_persistent_dir() / "data" / "plugins" / "active_preset.txt";
+}
+
+static void save_active_preset_to_disk() {
+    try {
+        std::ofstream f(get_active_preset_file());
+        if (!f.is_open()) return;
+        f << s_active_preset_name << "\n";
+        f << s_active_preset_dir.string() << "\n";
+        f << (s_active_preset_is_builtin ? 1 : 0) << "\n";
+    } catch (...) {}
+}
+
+static void restore_active_preset_from_disk() {
+    if (s_active_preset_loaded_from_disk) return;
+    s_active_preset_loaded_from_disk = true;
+    try {
+        std::ifstream f(get_active_preset_file());
+        if (!f.is_open()) return;
+        std::string name, dir_str, builtin_str;
+        if (!std::getline(f, name) || name.empty()) return;
+        if (!std::getline(f, dir_str)) return;
+        if (!std::getline(f, builtin_str)) return;
+        auto dir = std::filesystem::path(dir_str);
+        // Verify the preset still exists on disk
+        if (std::filesystem::exists(dir / name)) {
+            s_active_preset_name = name;
+            s_active_preset_dir = dir;
+            s_active_preset_is_builtin = (builtin_str == "1");
+        }
+    } catch (...) {}
+}
+
+bool PluginLoader::load_preset(const std::filesystem::path& preset_path) {
+    try {
+        const auto persistent_dir = Framework::get_persistent_dir();
+        const auto plugin_settings_dir = persistent_dir / "data" / "plugins";
+        std::filesystem::create_directories(plugin_settings_dir);
+        int count = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(preset_path)) {
+            if (!entry.is_regular_file()) continue;
+            auto fname = entry.path().filename().string();
+            if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
+                std::filesystem::copy_file(entry.path(), plugin_settings_dir / fname, std::filesystem::copy_options::overwrite_existing);
+                ++count;
+            }
+        }
+
+        auto name = preset_path.filename().string();
+        s_active_preset_name = name;
+        s_active_preset_dir = preset_path.parent_path();
+        s_active_preset_is_builtin = (s_active_preset_dir == get_shipping_presets_dir());
+        save_active_preset_to_disk();
+
+        m_preset_status = "Loaded \"" + name + "\" (" + std::to_string(count) + " files) - reloading plugins...";
+        spdlog::info("[PluginLoader] Loaded preset '{}' ({} files), reloading plugins", name, count);
+
+        attempt_unload_plugins();
+        reload_plugins();
+
+        m_preset_status = "Loaded \"" + name + "\" (" + std::to_string(count) + " files)";
+        return true;
+    } catch (const std::exception& e) {
+        m_preset_status = std::string("Load failed: ") + e.what();
+        spdlog::error("[PluginLoader] Failed to load preset: {}", e.what());
+        return false;
+    }
+}
+
+bool PluginLoader::delete_preset(const std::filesystem::path& preset_path) {
+    try {
+        auto name = preset_path.filename().string();
+        std::filesystem::remove_all(preset_path);
+        m_preset_status = "Deleted \"" + name + "\"";
+        spdlog::info("[PluginLoader] Deleted preset '{}'", name);
+        if (s_active_preset_name == name && s_active_preset_dir == preset_path.parent_path()) {
+            s_active_preset_name.clear();
+            s_active_preset_dir.clear();
+            save_active_preset_to_disk();
+        }
+        return true;
+    } catch (const std::exception& e) {
+        m_preset_status = std::string("Delete failed: ") + e.what();
+        return false;
+    }
+}
+
+void PluginLoader::draw_preset_ui() {
+    if (ImGui::CollapsingHeader("Plugin Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
+        restore_active_preset_from_disk();
+        // Auto-name helper: finds next available "Preset N" name (checks both local and global)
+        auto next_auto_name = [this]() -> std::string {
+            auto local = get_local_presets_dir();
+            auto global = get_global_presets_dir();
+            for (int i = 1; i < 1000; ++i) {
+                auto name = "Preset " + std::to_string(i);
+                if (!std::filesystem::exists(local / name) && !std::filesystem::exists(global / name)) {
+                    return name;
+                }
+            }
+            return "Preset";
+        };
+
+        // Active preset indicator + overwrite
+        if (!s_active_preset_name.empty()) {
+            ImGui::Text("Active: %s%s", s_active_preset_name.c_str(), s_active_preset_is_builtin ? " (built-in)" : "");
+            if (!s_active_preset_is_builtin) {
+                ImGui::SameLine();
+                if (ImGui::Button("Overwrite")) {
+                    save_preset(s_active_preset_dir, s_active_preset_name);
+                }
+            }
+        } else {
+            ImGui::TextDisabled("No preset loaded");
+        }
+
+        ImGui::Spacing();
+
+        // Save as new preset
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
+        ImGui::InputText("##PresetName", m_preset_name_buf, sizeof(m_preset_name_buf));
+
+        // Sanitize to a safe single filename (no path separators, no reserved chars)
+        auto sanitize_name = [](std::string s) -> std::string {
+            std::erase_if(s, [](char c) {
+                return c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|';
+            });
+            while (!s.empty() && (s.back() == '.' || s.back() == ' ')) s.pop_back();
+            while (!s.empty() && (s.front() == '.' || s.front() == ' ')) s.erase(s.begin());
+            return s;
+        };
+
+        ImGui::SameLine();
+        if (ImGui::Button("Save")) {
+            auto dir = get_local_presets_dir();
+            std::string name = sanitize_name((m_preset_name_buf[0] != '\0') ? m_preset_name_buf : next_auto_name());
+            if (name.empty()) {
+                m_preset_status = "Invalid preset name.";
+            } else {
+                save_preset(dir, name);
+                s_active_preset_name = name;
+                s_active_preset_dir = dir;
+                s_active_preset_is_builtin = false;
+                save_active_preset_to_disk();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Save Global")) {
+            auto dir = get_global_presets_dir();
+            std::string name = sanitize_name((m_preset_name_buf[0] != '\0') ? m_preset_name_buf : next_auto_name());
+            if (name.empty()) {
+                m_preset_status = "Invalid preset name.";
+            } else {
+                save_preset(dir, name);
+                s_active_preset_name = name;
+                s_active_preset_dir = dir;
+                s_active_preset_is_builtin = false;
+                save_active_preset_to_disk();
+            }
+        }
+
+        if (!m_preset_status.empty()) {
+            ImGui::TextWrapped("%s", m_preset_status.c_str());
+        }
+
+        auto draw_preset_list = [&](const char* section_label, const std::filesystem::path& presets_dir) {
+            auto presets = list_presets(presets_dir);
+            if (presets.empty()) {
+                ImGui::TextDisabled("  (none)");
+                return;
+            }
+            for (const auto& name : presets) {
+                ImGui::PushID((section_label + name).c_str());
+                if (ImGui::Button("Load")) {
+                    load_preset(presets_dir / name);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Delete")) {
+                    delete_preset(presets_dir / name);
+                }
+                ImGui::SameLine();
+                ImGui::Text("%s", name.c_str());
+                ImGui::PopID();
+            }
+        };
+
+        ImGui::Spacing();
+        ImGui::Text("Game Presets (this game):");
+        draw_preset_list("local_", get_local_presets_dir());
+
+        ImGui::Spacing();
+        ImGui::Text("Global Presets (all games):");
+        draw_preset_list("global_", get_global_presets_dir());
+
+        // Built-in presets (shipped with the release, Load-only)
+        auto shipping_dir = get_shipping_presets_dir();
+        if (std::filesystem::exists(shipping_dir) && std::filesystem::is_directory(shipping_dir)) {
+            auto shipping = list_presets(shipping_dir);
+            if (!shipping.empty()) {
+                ImGui::Spacing();
+                ImGui::Text("Built-in Presets:");
+                for (const auto& name : shipping) {
+                    ImGui::PushID(("shipping_" + name).c_str());
+                    if (ImGui::Button("Load")) {
+                        load_preset(shipping_dir / name);
+                    }
+                    ImGui::SameLine();
+                    ImGui::Text("%s", name.c_str());
+                    ImGui::PopID();
+                }
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Tip: Select individual effects in the left menu under PluginLoader to tweak settings.");
     }
 }
 
@@ -1982,6 +2398,41 @@ void PluginLoader::on_device_reset() {
             cb();
         } catch(...) {
             spdlog::error("[APIProxy] Exception occurred in on_device_reset callback; one of the plugins has an error.");
+        }
+    }
+}
+
+void PluginLoader::on_pre_render_vr_framework_dx11() {
+    std::shared_lock _{m_api_cb_mtx};
+
+    for (auto&& cb : m_on_pre_render_vr_framework_dx11_cbs) {
+        try {
+            cb();
+        } catch(...) {
+            spdlog::error("[APIProxy] Exception occurred in on_pre_render_vr_framework_dx11 callback; one of the plugins has an error.");
+            continue;
+        }
+    }
+}
+
+// Isolated into its own function because __try/__except cannot coexist with
+// C++ objects that have destructors (like std::shared_lock) in the same scope.
+static bool invoke_dx12_pre_render_callback_seh(UEVR_OnPreRenderVRFrameworkDX12Cb cb) {
+    __try {
+        cb();
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void PluginLoader::on_pre_render_vr_framework_dx12() {
+    std::shared_lock _{m_api_cb_mtx};
+
+    for (auto&& cb : m_on_pre_render_vr_framework_dx12_cbs) {
+        if (!invoke_dx12_pre_render_callback_seh(cb)) {
+            spdlog::error("[APIProxy] Access violation in on_pre_render_vr_framework_dx12 callback; one of the plugins has an error.");
+            continue;
         }
     }
 }
@@ -2233,10 +2684,32 @@ bool PluginLoader::add_on_post_render_vr_framework_dx12(UEVR_OnPostRenderVRFrame
     return true;
 }
 
+bool PluginLoader::add_on_pre_render_vr_framework_dx11(UEVR_OnPreRenderVRFrameworkDX11Cb cb) {
+    std::unique_lock _{m_api_cb_mtx};
+
+    m_on_pre_render_vr_framework_dx11_cbs.push_back(cb);
+    return true;
+}
+
+bool PluginLoader::add_on_pre_render_vr_framework_dx12(UEVR_OnPreRenderVRFrameworkDX12Cb cb) {
+    std::unique_lock _{m_api_cb_mtx};
+
+    m_on_pre_render_vr_framework_dx12_cbs.push_back(cb);
+    return true;
+}
+
 bool PluginLoader::add_on_custom_event(UEVR_OnCustomEventCb cb) {
     std::unique_lock _{m_api_cb_mtx};
 
     m_on_custom_event_cbs.push_back(cb);
+    return true;
+}
+
+bool PluginLoader::add_on_draw_ui(UEVR_OnDrawUICb cb) {
+    std::unique_lock _{m_api_cb_mtx};
+
+    m_on_draw_ui_cbs.push_back(cb);
+    m_on_draw_ui_plugin_names.push_back(m_current_loading_plugin.empty() ? "Plugin" : m_current_loading_plugin);
     return true;
 }
 

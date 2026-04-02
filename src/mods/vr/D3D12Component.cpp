@@ -17,6 +17,7 @@
 #include "d3d12/DirectXTK.hpp"
 
 #include "D3D12Component.hpp"
+#include "../PluginLoader.hpp"
 
 //#define AFR_DEPTH_TEMP_DISABLED
 
@@ -815,7 +816,7 @@ void D3D12Component::draw_spectator_view(ID3D12GraphicsCommandList* command_list
     const auto desc = backbuffer->GetDesc();
 
     if (backbuffer_ctx.texture.Get() != backbuffer.Get()) {
-        if (!backbuffer_ctx.setup(device, backbuffer.Get(), std::nullopt, std::nullopt, L"Backbuffer")) {
+        if (!backbuffer_ctx.update_texture(device, backbuffer.Get(), std::nullopt, std::nullopt, L"Backbuffer")) {
             spdlog::error("[VR] Failed to setup backbuffer RTV (D3D12)");
             return;
         }
@@ -998,7 +999,7 @@ void D3D12Component::clear_backbuffer() {
     auto& backbuffer_ctx = *backbuffer_ctx_ptr;
 
     if (backbuffer_ctx.texture.Get() != backbuffer.Get()) {
-        if (!backbuffer_ctx.setup(device, backbuffer.Get(), std::nullopt, std::nullopt, L"Backbuffer")) {
+        if (!backbuffer_ctx.update_texture(device, backbuffer.Get(), std::nullopt, std::nullopt, L"Backbuffer")) {
             spdlog::error("[VR] Failed to setup backbuffer RTV (D3D12)");
             return;
         }
@@ -1034,8 +1035,123 @@ void D3D12Component::on_post_present(VR* vr) {
     }
 }
 
+void D3D12Component::begin_plugin_pre_render() {
+    if (!is_plugin_dispatch_allowed()) {
+        SPDLOG_INFO_EVERY_N_SEC(1, "[VR] Plugin dispatch deferred (force_reset={})", m_force_reset);
+        return;
+    }
+
+    // Lazy setup — CommandContext::setup() only needs the device which is
+    // available via g_framework before D3D12Component::setup() runs.
+    if (!m_plugin_pre_render_ctx.ready()) {
+        if (!m_plugin_pre_render_ctx.setup(L"Plugin Pre-Render")) {
+            return;
+        }
+    }
+
+    // Wait for previous frame's GPU work on this context, then reset allocator+list.
+    m_plugin_pre_render_ctx.wait(INFINITE);
+    m_plugin_pre_render_active = true;
+}
+
+void D3D12Component::end_plugin_pre_render() {
+    if (!m_plugin_pre_render_active) {
+        return;
+    }
+
+    m_plugin_pre_render_active = false;
+
+    // Before submitting, verify the scene RT is still valid.
+    // During scene transitions (e.g. 2d mode, level loads) UE may
+    // destroy render targets between the plugin callback and submission.
+    // If the RT is gone, discard the command list instead of submitting
+    // stale GPU commands that would trigger D3D12 runtime exceptions.
+    if (m_plugin_pre_render_ctx.has_commands) {
+        const auto vr = VR::get();
+        const auto& ffsr = vr->get_fake_stereo_hook();
+        bool rt_valid = false;
+
+        if (ffsr != nullptr) {
+            if (auto rtm = ffsr->get_render_target_manager(); rtm != nullptr) {
+                if (auto rt = rtm->get_render_target(); rt != nullptr) {
+                    if (rt->get_native_resource() != nullptr) {
+                        rt_valid = true;
+                    }
+                }
+            }
+        }
+
+        if (!rt_valid) {
+            m_plugin_pre_render_ctx.discard();
+            return;
+        }
+    }
+
+    // If any plugin recorded commands, close and submit on the game's queue.
+    // CommandContext::execute() handles has_commands check internally.
+    m_plugin_pre_render_ctx.execute();
+}
+
+ID3D12GraphicsCommandList* D3D12Component::get_plugin_command_list() {
+    if (!m_plugin_pre_render_active || !m_plugin_pre_render_ctx.ready()) {
+        return nullptr;
+    }
+
+    // Mark that commands have been recorded so execute() will submit.
+    m_plugin_pre_render_ctx.has_commands = true;
+    return m_plugin_pre_render_ctx.cmd_list.Get();
+}
+
+void D3D12Component::wait_for_plugin_gpu_work() {
+    if (m_plugin_pre_render_ctx.ready()) {
+        m_plugin_pre_render_ctx.wait(INFINITE);
+    }
+}
+
+void D3D12Component::prepare_plugin_rt(ID3D12Resource* rt) {
+    if (rt == nullptr || !m_plugin_pre_render_active || !m_plugin_pre_render_ctx.ready()) {
+        return;
+    }
+
+    // Transition the scene RT from the state UE leaves it in (shader
+    // resource) to RENDER_TARGET so plugins can assume a consistent
+    // starting state.  This eliminates the resource-state mismatch
+    // that causes GPU hangs / TDR when plugins hardcode RENDER_TARGET as
+    // the "before" state in their own barriers.
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = rt;
+    barrier.Transition.StateBefore = ENGINE_SRC_COLOR;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    m_plugin_pre_render_ctx.cmd_list->ResourceBarrier(1, &barrier);
+    m_plugin_pre_render_ctx.has_commands = true;
+}
+
+void D3D12Component::restore_plugin_rt(ID3D12Resource* rt) {
+    if (rt == nullptr || !m_plugin_pre_render_active || !m_plugin_pre_render_ctx.ready()) {
+        return;
+    }
+
+    // Transition the scene RT back to ENGINE_SRC_COLOR (shader resource
+    // state) so UEVR's on_frame() copy and UE's own pipeline see the
+    // state they expect.
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = rt;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = ENGINE_SRC_COLOR;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    m_plugin_pre_render_ctx.cmd_list->ResourceBarrier(1, &barrier);
+    m_plugin_pre_render_ctx.has_commands = true;
+}
+
 void D3D12Component::on_reset(VR* vr) {
     m_force_reset = true;
+
+    // Drain plugin pre-render work before destroying resources.
+    m_plugin_pre_render_ctx.reset();
+    m_plugin_pre_render_active = false;
 
     auto runtime = vr->get_runtime();
 
@@ -1290,6 +1406,10 @@ bool D3D12Component::setup() {
 
     spdlog::info("[VR] d3d12 textures have been setup");
     m_force_reset = false;
+
+    // Notify plugins that the D3D12 pipeline was rebuilt so they can
+    // release stale resources (cached textures, descriptor heaps, etc.).
+    PluginLoader::get()->on_device_reset();
 
     return true;
 }

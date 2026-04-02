@@ -1,0 +1,30 @@
+@echo off
+setlocal
+
+:: Find cmake: prefer PATH, fall back to local VS 2026 install
+where cmake >nul 2>&1
+if %ERRORLEVEL% equ 0 (
+    set "CMAKE=cmake"
+) else (
+    set "CMAKE=C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+)
+
+:: Configure if build dir doesn't exist yet (auto-detect generator)
+if not exist "build\CMakeCache.txt" (
+    echo Configuring CMake...
+    "%CMAKE%" -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+    if %ERRORLEVEL% neq 0 (
+        echo CONFIGURE FAILED
+        exit /b %ERRORLEVEL%
+    )
+)
+
+echo Building UEVR + plugins (Release)...
+"%CMAKE%" --build build --config Release
+if %ERRORLEVEL% neq 0 (
+    echo BUILD FAILED
+    exit /b %ERRORLEVEL%
+)
+
+echo.
+echo Build succeeded.

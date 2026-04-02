@@ -1,0 +1,47 @@
+LevelsPlusPlugin for UEVR
+=========================
+
+Original shader:
+  Levels v1.8.3 by Christian Cann Schuldt Jensen ~ CeeJay.dk
+  Updated to 1.3+ by Kirill Yarovoy ~ v00d00m4n
+  Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/LevelsPlus.fx
+  From the crosire/reshade-shaders community collection.
+  No explicit license was provided for the Levels portion.
+  All rights remain with the original authors.
+
+ACES tonemapping code:
+  From Baking Lab by MJP and David Neubelt
+  http://mynameismjp.wordpress.com/
+  https://github.com/TheRealMJP/BakingLab
+  The code was originally written by Stephen Hill (@self_shadow), who
+  deserves all credit for coming up with this fit and implementing it.
+  All code licensed under the MIT license (see ACES MIT section below).
+
+Modifications: Ported from ReShade FX to DX11/DX12 C++ plugin with
+embedded HLSL pixel shader.
+
+-------------------------------------------------------------------------------
+MIT License — ACES tonemapping code (Baking Lab)
+-------------------------------------------------------------------------------
+
+Copyright (c) 2016 MJP
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT
+OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
