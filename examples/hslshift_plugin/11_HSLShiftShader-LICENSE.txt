@@ -1,10 +1,13 @@
-HSL Processing Shader
-Original author: kingeric1992
-Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/HSLShift.fx
-From the crosire/reshade-shaders community collection.
+HSLShiftPlugin for UEVR
+========================
 
-No explicit license was provided in the original file or repository.
-All rights remain with the original author.
+Original shader:
+  HSL Processing Shader by kingeric1992
+  Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/HSLShift.fx
+  From the crosire/reshade-shaders community collection.
+  No explicit license was provided in the original file or repository.
+  All rights remain with the original author.
 
-This UEVR plugin is a C++ port of the original HLSL shader.
-The C++ wrapper code is MIT-licensed.
+Modifications: Ported from ReShade FX to DX11/DX12 C++ plugin with
+embedded HLSL pixel shader.
+

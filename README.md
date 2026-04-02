@@ -5,7 +5,7 @@ Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix
 
 **Credits:** 
 - Built on [praydog's UEVR](https://github.com/praydog/UEVR) ([Original UEVR README below](#original-uevr-readme)). 
-- Shaders ported from ReShade originals by CeeJay.dk, prod80, Loadus, Martins Upitis, Jeanseb, Ioxa, and kingeric1992 ([license files](examples/)).
+- Shaders ported from ReShade originals by CeeJay.dk, 3an, DKT70, Loadus, Martins Upitis, bacondither, Ioxa, and kingeric1992 ([license files](examples/)).
 
 ## [How to Install](docs/INSTALL.md)
 

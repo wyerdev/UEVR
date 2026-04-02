@@ -1,10 +1,13 @@
-FilmicPass
-Original author: Unknown (from the standard ReShade shader pack)
-Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/FilmicPass.fx
-From the crosire/reshade-shaders community collection.
+FilmicPassPlugin for UEVR
+==========================
 
-No explicit license was provided in the original file or repository.
-All rights remain with the original author.
+Original shader:
+  FilmicPass by an unknown author (from the standard ReShade shader pack).
+  Source: https://github.com/byxor/thug-pro-reshade/blob/master/THUG%20Pro/reshade-shaders/Shaders/FilmicPass.fx
+  From the crosire/reshade-shaders community collection.
+  No explicit license was provided in the original file or repository.
+  All rights remain with the original author.
 
-This UEVR plugin is a C++ port of the original HLSL shader.
-The C++ wrapper code is MIT-licensed.
+Modifications: Ported from ReShade FX to DX11/DX12 C++ plugin with
+embedded HLSL pixel shader.
+
