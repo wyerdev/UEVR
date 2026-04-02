@@ -70,7 +70,7 @@ set "COPIED=0"
 set "ERRORS=0"
 echo Installing shaders...
 for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do (
-    copy /Y "%PLUGIN_SRC%\%%f" "%PLUGIN_DST%\" >nul 2>&1
+    copy /Y "%PLUGIN_SRC%\%%f" "%PLUGIN_DST%\" >nul
     if errorlevel 1 (
         echo   FAILED: %%f
         set /a ERRORS+=1
@@ -82,7 +82,7 @@ for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader.dll" 2^>nul ^| findstr /r
 
 :: Copy license files
 for %%f in ("%PLUGIN_SRC%\*-LICENSE.txt") do (
-    copy /Y "%%f" "%PLUGIN_DST%\" >nul 2>&1
+    copy /Y "%%f" "%PLUGIN_DST%\" >nul
     if errorlevel 1 (
         echo   FAILED: %%~nxf
         set /a ERRORS+=1
@@ -114,7 +114,7 @@ if defined PRESET_SRC (
 echo.
 echo ============================================
 if !ERRORS! GTR 0 (
-    echo   DONE with !ERRORS! error(s). !COPIED! items installed.
+    echo   DONE with !ERRORS! error[s]. !COPIED! items installed.
     echo   Some files may be in use. Close UEVR and retry.
 ) else (
     echo   SUCCESS: !COPIED! items installed.
