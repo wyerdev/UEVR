@@ -6,7 +6,7 @@
 
 - **Antivirus:** UEVR injects into game processes, which antivirus software often flags as suspicious. Your AV will likely quarantine or delete UEVR files. **Add the UEVR folder to your antivirus exclusion list** before extracting.
 - **Frame Generation:** Disable DLSS/FSR Frame Generation in-game — it causes severe issues with VR.
-- **DLSS Upscaling:** Recommended for performance. If your game supports it, enable DLSS Super Resolution. With DLSS 4, you can use [DLSS Swapper](https://github.com/beeradmoern/dlss-swapper) to upgrade the game's DLSS version.
+- **DLSS Upscaling:** Recommended for performance. If your game supports it, enable DLSS Super Resolution. With DLSS 4, you can use [DLSS Swapper](https://github.com/beeradmoore/dlss-swapper) to upgrade the game's DLSS version.
 
 ## Steps
 

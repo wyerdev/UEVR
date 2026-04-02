@@ -2281,21 +2281,29 @@ void PluginLoader::draw_preset_ui() {
         if (ImGui::Button("Save")) {
             auto dir = get_local_presets_dir();
             std::string name = sanitize_name((m_preset_name_buf[0] != '\0') ? m_preset_name_buf : next_auto_name());
-            save_preset(dir, name);
-            s_active_preset_name = name;
-            s_active_preset_dir = dir;
-            s_active_preset_is_builtin = false;
-            save_active_preset_to_disk();
+            if (name.empty()) {
+                m_preset_status = "Invalid preset name.";
+            } else {
+                save_preset(dir, name);
+                s_active_preset_name = name;
+                s_active_preset_dir = dir;
+                s_active_preset_is_builtin = false;
+                save_active_preset_to_disk();
+            }
         }
         ImGui::SameLine();
         if (ImGui::Button("Save Global")) {
             auto dir = get_global_presets_dir();
             std::string name = sanitize_name((m_preset_name_buf[0] != '\0') ? m_preset_name_buf : next_auto_name());
-            save_preset(dir, name);
-            s_active_preset_name = name;
-            s_active_preset_dir = dir;
-            s_active_preset_is_builtin = false;
-            save_active_preset_to_disk();
+            if (name.empty()) {
+                m_preset_status = "Invalid preset name.";
+            } else {
+                save_preset(dir, name);
+                s_active_preset_name = name;
+                s_active_preset_dir = dir;
+                s_active_preset_is_builtin = false;
+                save_active_preset_to_disk();
+            }
         }
 
         if (!m_preset_status.empty()) {
