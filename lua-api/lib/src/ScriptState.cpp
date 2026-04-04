@@ -99,6 +99,7 @@ void ScriptState::run_script(const std::string& p) {
         m_lua.registry()["package_path"] = m_lua["package"]["path"];
         m_lua.registry()["package_cpath"] = m_lua["package"]["cpath"];
 
+        ScopedScriptCall _sc{};
         m_lua.safe_script_file(p);
     } catch (const std::exception& e) {
         //LuaLoader::get()->spew_error(e.what());

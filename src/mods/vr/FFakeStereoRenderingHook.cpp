@@ -65,6 +65,10 @@
 FFakeStereoRenderingHook* g_hook = nullptr;
 uint32_t g_frame_count{};
 
+namespace uevr {
+    extern thread_local uint32_t g_is_in_script_call;
+}
+
 // Scan through function instructions to detect usage of double
 // floating point precision instructions.
 bool is_using_double_precision(uintptr_t addr) {
@@ -4306,11 +4310,13 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
 
             constexpr size_t MAX_HEURISTIC_PATCHES = 128;
 
-            if (is_in_game && xrsystem_patches.size() < MAX_HEURISTIC_PATCHES) {
+            if (is_in_game && xrsystem_patches.size() < MAX_HEURISTIC_PATCHES && uevr::g_is_in_script_call == 0) {
                 SPDLOG_INFO("  Heuristic: AV at fault addr {:x}, crash in game module at {:x} — "
                             "treating as XR-related crash (patch #{})",
                             accessed_address, exception_address, xrsystem_patches.size() + 1);
                 verified = true;
+            } else if (is_in_game && uevr::g_is_in_script_call > 0) {
+                SPDLOG_INFO("  Heuristic: Skipping game module AV at {:x} because we are executing a Lua script / callback", exception_address);
             } else if (!is_in_game && !hmd_is_valid && past_init) {
                 // HMD is null (XR nullification active) but crash is in dynamic memory
                 // (Blueprint VM, JIT'd code, etc.) — not in any loaded module.

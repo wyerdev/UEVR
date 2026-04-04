@@ -10,6 +10,13 @@
 #include <vector>
 
 namespace uevr {
+extern thread_local uint32_t g_is_in_script_call;
+
+struct ScopedScriptCall {
+    ScopedScriptCall() { ++g_is_in_script_call; }
+    ~ScopedScriptCall() { --g_is_in_script_call; }
+};
+
 class ScriptContext : public std::enable_shared_from_this<ScriptContext> {
 public:
     static std::shared_ptr<ScriptContext> create(lua_State* l, UEVR_PluginInitializeParam* param = nullptr) {
@@ -80,6 +87,7 @@ public:
         std::scoped_lock _{m_mtx};
 
         for (auto& cb : m_on_script_reset_callbacks) try {
+            ScopedScriptCall _sc{};
             handle_protected_result(cb());
         } catch (const std::exception& e) {
             log_error("Exception in on_script_reset: " + std::string(e.what()));
@@ -92,6 +100,7 @@ public:
         std::scoped_lock _{m_mtx};
 
         for (auto& cb : m_on_frame_callbacks) try {
+            ScopedScriptCall _sc{};
             handle_protected_result(cb());
         } catch (const std::exception& e) {
             log_error("Exception in on_frame: " + std::string(e.what()));
@@ -104,6 +113,7 @@ public:
         std::scoped_lock _{m_mtx};
 
         for (auto& cb : m_on_draw_ui_callbacks) try {
+            ScopedScriptCall _sc{};
             handle_protected_result(cb());
         } catch (const std::exception& e) {
             log_error("Exception in on_draw_ui: " + std::string(e.what()));
@@ -116,6 +126,7 @@ public:
         std::scoped_lock _{m_mtx};
 
         for (auto& cb : m_on_lua_event_callbacks) try {
+            ScopedScriptCall _sc{};
             handle_protected_result(cb(event_name, event_data));
         } catch (const std::exception& e) {
             log_error("Exception in on_lua_event: " + std::string(e.what()));
