@@ -4123,10 +4123,55 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
         auto* ctx = exception->ContextRecord;
         const auto exception_address = ctx->Rip;
 
-        // Fast early-out: already patched this address
+        // Fast early-out: already permanently patched this address
         if (handled_addresses.contains(exception_address)) {
             veh_stats::filtered_already_handled.fetch_add(1, std::memory_order_relaxed);
             return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // Fast early-out: already rejected this address (not XR-related)
+        // Separate from handled_addresses to avoid confusion: rejected addresses
+        // return CONTINUE_SEARCH instantly, patched addresses also return
+        // CONTINUE_SEARCH (the code is rewritten so the fault doesn't recur).
+        static std::unordered_set<uintptr_t> rejected_addresses{};
+        if (rejected_addresses.contains(exception_address)) {
+            veh_stats::filtered_already_handled.fetch_add(1, std::memory_order_relaxed);
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // Fast path: temporary fixup cache for transition and dynamic-code addresses.
+        // These can't be permanently patched (transition: code is correct normally;
+        // dynamic: heap memory may be freed). Cache the decoded info for fast
+        // repeat handling without full re-analysis.
+        struct TempFixupInfo {
+            uint8_t length;
+            bool has_reg_dest;
+            uint8_t dest_reg;
+        };
+        static std::unordered_map<uintptr_t, TempFixupInfo> temp_fixup_cache{};
+
+        {
+            auto it = temp_fixup_cache.find(exception_address);
+            if (it != temp_fixup_cache.end()) {
+                auto* ctx_fast = exception->ContextRecord;
+                const auto& info = it->second;
+
+                if (info.has_reg_dest) {
+                    switch (info.dest_reg) {
+                    case NDR_RAX: ctx_fast->Rax = 0; break; case NDR_RCX: ctx_fast->Rcx = 0; break;
+                    case NDR_RDX: ctx_fast->Rdx = 0; break; case NDR_RBX: ctx_fast->Rbx = 0; break;
+                    case NDR_RSI: ctx_fast->Rsi = 0; break; case NDR_RDI: ctx_fast->Rdi = 0; break;
+                    case NDR_R8:  ctx_fast->R8  = 0; break; case NDR_R9:  ctx_fast->R9  = 0; break;
+                    case NDR_R10: ctx_fast->R10 = 0; break; case NDR_R11: ctx_fast->R11 = 0; break;
+                    case NDR_R12: ctx_fast->R12 = 0; break; case NDR_R13: ctx_fast->R13 = 0; break;
+                    case NDR_R14: ctx_fast->R14 = 0; break; case NDR_R15: ctx_fast->R15 = 0; break;
+                    }
+                }
+
+                ctx_fast->Rip = exception_address + info.length;
+                veh_stats::filtered_already_handled.fetch_add(1, std::memory_order_relaxed);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
         }
 
         // Re-entrancy guard: prevent recursive exceptions during our stack walk
@@ -4241,79 +4286,20 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             }
         }
 
-        // Step B: Walk the stack for caller return addresses.
-        // Only consider addresses in the game module (not system DLLs).
-        // For each valid return address (preceded by a CALL), find the function
-        // start and FORWARD-scan the entire function body for XR offset loads.
-        if (!verified) {
-            static const auto game_module = utility::get_executable();
-            static const auto game_base = (uintptr_t)game_module;
-            static const auto game_size = utility::get_module_size(game_module).value_or(0);
-
-            const auto rsp = ctx->Rsp;
-            constexpr size_t STACK_SCAN_QWORDS = 48;
-            constexpr size_t MAX_FORWARD_INSTRUCTIONS = 500;
-            constexpr size_t MAX_CALLERS_TO_SCAN = 8;
-            size_t callers_scanned = 0;
-            std::unordered_set<uintptr_t> scanned_functions{};
-
-            for (size_t qi = 0; qi < STACK_SCAN_QWORDS && !verified; ++qi) {
-                const auto stack_entry_addr = rsp + qi * sizeof(uintptr_t);
-                if (IsBadReadPtr((void*)stack_entry_addr, sizeof(uintptr_t))) break;
-
-                const auto candidate = *(uintptr_t*)stack_entry_addr;
-
-                // Only consider addresses within the game executable module
-                if (candidate < game_base || candidate >= game_base + game_size) continue;
-
-                // Verify this is a real return address: instruction before it should be a CALL
-                const auto call_resolved = utility::resolve_instruction(candidate - 1);
-                if (!call_resolved) continue;
-                if (!std::string_view{call_resolved->instrux.Mnemonic}.starts_with("CALL")) continue;
-
-                // Find the function containing this CALL instruction
-                const auto func_start = utility::find_function_start(call_resolved->addr);
-                if (!func_start) continue;
-
-                // Skip already-scanned functions
-                if (scanned_functions.contains(*func_start)) continue;
-                scanned_functions.insert(*func_start);
-
-                if (++callers_scanned > MAX_CALLERS_TO_SCAN) break;
-
-                SPDLOG_INFO("  Stack qword {}: scanning caller func {:x} -> {:x}",
-                            qi, *func_start, candidate);
-
-                // Forward-scan from function start up to the call instruction
-                auto scan_addr = *func_start;
-                for (size_t fi = 0; fi < MAX_FORWARD_INSTRUCTIONS && !verified; ++fi) {
-                    if (scan_addr >= candidate) break;
-
-                    const auto instr = utility::decode_one((uint8_t*)scan_addr);
-                    if (!instr) break;
-
-                    for (uint8_t op_i = 0; op_i < instr->OperandsCount && !verified; ++op_i) {
-                        const auto& operand = instr->Operands[op_i];
-                        if (operand.Type == ND_OP_MEM &&
-                            operand.Info.Memory.HasDisp &&
-                            is_xr_offset((uint64_t)operand.Info.Memory.Disp))
-                        {
-                            SPDLOG_INFO("  Found [reg + {:x}] at {:x} (caller func {:x}, stack qword {})",
-                                        (uint64_t)operand.Info.Memory.Disp, scan_addr, *func_start, qi);
-                            verified = true;
-                        }
-                    }
-
-                    scan_addr += instr->Length;
-                }
-            }
-        }
+        // Step B (stack walk verification) was removed — it decoded up to
+        // 8 callers × 500 instructions per VEH exception, causing severe stutter
+        // when many crash sites are discovered simultaneously. The heuristic
+        // (Step C) handles all cases that Step A doesn't catch.
 
         // Step C: Heuristic fallback — when our XR nullification is active and the
         // crash is in a game module (exe or any game DLL in the same directory),
         // it's overwhelmingly likely caused by our nullification propagating through
         // deep call chains. The null XR pointer can result in either null-page
-        // accesses OR stale/garbage pointer values derived from the null.
+        // accesses OR stale/garbage pointer values derived from the null chain
+        // (e.g. 0xb87944ec from freed heap, 0x1000000010 from shifted addresses).
+        static bool is_dynamic_xr_crash = false;
+        is_dynamic_xr_crash = false;
+
         if (!verified) {
             const auto accessed_address = exception->ExceptionRecord->ExceptionInformation[1];
             const bool is_in_game = is_in_game_directory(exception_address);
@@ -4321,9 +4307,17 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             constexpr size_t MAX_HEURISTIC_PATCHES = 128;
 
             if (is_in_game && xrsystem_patches.size() < MAX_HEURISTIC_PATCHES) {
-                SPDLOG_INFO("  Heuristic: null-page AV at addr {:x}, crash in game module at {:x} — "
+                SPDLOG_INFO("  Heuristic: AV at fault addr {:x}, crash in game module at {:x} — "
                             "treating as XR-related crash (patch #{})",
                             accessed_address, exception_address, xrsystem_patches.size() + 1);
+                verified = true;
+            } else if (!is_in_game && !hmd_is_valid && past_init) {
+                // HMD is null (XR nullification active) but crash is in dynamic memory
+                // (Blueprint VM, JIT'd code, etc.) — not in any loaded module.
+                // Requires past_init (120+ frames) to avoid intercepting early-init exceptions.
+                SPDLOG_INFO("  Heuristic: XR-caused crash in dynamic code at {:x} (fault {:x})",
+                            exception_address, accessed_address);
+                is_dynamic_xr_crash = true;
                 verified = true;
             } else if (!is_in_game) {
                 SPDLOG_INFO("  Heuristic: crash at {:x} is outside game directory — not our crash",
@@ -4338,25 +4332,29 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             SPDLOG_INFO("Could not verify as XR null-deref — passing through");
             spdlog::default_logger()->flush();
             veh_stats::rejected_not_xr.fetch_add(1, std::memory_order_relaxed);
-            // Write crash dump since this is a real AV we're not handling
             veh_stats::write_crash_dump(EXCEPTION_ACCESS_VIOLATION, exception_address,
                 exception->ExceptionRecord->ExceptionInformation[1]);
-            // Cache rejected addresses so we don't re-analyze them on every fault.
-            // Without this, the same unhandled crash loops through deep analysis
-            // indefinitely (praydog's original cached all addresses up front).
-            handled_addresses.insert(exception_address);
+            // Do NOT add to handled_addresses — use rejected_addresses so
+            // subsequent faults at this address skip deep analysis entirely.
+            rejected_addresses.insert(exception_address);
             cleanup();
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
-        SPDLOG_INFO("Verified crash at {:x} — applying {}",
-                     exception_address, is_transition_crash ? "temporary context fixup" : "permanent patch");
-
         // --- REMEDIATION ---
-        // For transition crashes: only modify CONTEXT (temporary). The code is correct
-        // normally — objects are only null during the death/level transition. On respawn,
-        // objects will be valid again and the original instructions must still work.
-        // For XR null-deref crashes: permanent patches (the XR device is always null).
+        // All game-module XR crash sites get permanent patches:
+        // - REG-dest (mov rax,[null_chain]): xor reg,reg + NOP — load from null = null
+        // - Non-REG-dest (CMP/CALL/store through null_chain): NOP — the target is
+        //   always derived from the null XR pointer, so the instruction can never
+        //   succeed. NOP is correct and eliminates per-frame VEH overhead.
+        // Transition crashes (HMD valid) and dynamic code: temp fixups only.
+        const bool temporary_fixup = is_transition_crash || is_dynamic_xr_crash;
+
+        SPDLOG_INFO("Verified crash at {:x} — applying {}",
+                     exception_address,
+                     is_transition_crash ? "temporary context fixup (transition)" :
+                     is_dynamic_xr_crash ? "temporary context fixup (dynamic code)" :
+                     "permanent patch");
 
         auto set_context_reg = [](CONTEXT* c, uint8_t reg, DWORD64 val) {
             switch (reg) {
@@ -4385,8 +4383,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
 
             SPDLOG_INFO("Zeroed register {} in context, advanced RIP to {:x}", dest_reg, ctx->Rip);
 
-            if (!is_transition_crash) {
-                // Permanent patch: xor dest_reg, dest_reg + NOP padding
+            if (!temporary_fixup) {
                 const uint8_t reg_bits = dest_reg & 0x7;
                 const uint8_t modrm = 0xC0 | (reg_bits << 3) | reg_bits;
 
@@ -4416,14 +4413,15 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
                             decoded->Length > 3 ? decoded->Length - 3 : 0);
             }
         } else {
-            // Non REG<-MEM instruction: advance RIP past it
+            // Non-REG-dest (CMP, CALL, store): advance RIP past it, zero RAX
+            // for null-check safety after skipped CALLs.
+            ctx->Rax = 0;
             ctx->Rip = exception_address + decoded->Length;
 
-            SPDLOG_INFO("Advanced RIP past non-REG-dest instruction at {:x} ({} bytes) to {:x}",
-                        exception_address, decoded->Length, ctx->Rip);
+            SPDLOG_INFO("Advanced RIP past non-REG-dest instruction '{}' at {:x} ({} bytes) to {:x}",
+                        decoded->Mnemonic, exception_address, decoded->Length, ctx->Rip);
 
-            if (!is_transition_crash) {
-                // Permanent NOP patch
+            if (!temporary_fixup) {
                 std::vector<int16_t> nop_bytes;
                 for (size_t i = 0; i < decoded->Length; ++i) {
                     nop_bytes.push_back(0x90);
@@ -4432,36 +4430,28 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             }
         }
 
-        // If the next instruction is a CALL (vtable dispatch), also skip it
-        const auto next_addr = exception_address + decoded->Length;
-        const auto next_instr = utility::decode_one((uint8_t*)next_addr);
-
-        if (next_instr && std::string_view{next_instr->Mnemonic}.starts_with("CALL")) {
-            ctx->Rip = next_addr + next_instr->Length;
-
-            SPDLOG_INFO("Skipped following CALL at {:x} ({} bytes), RIP now {:x}",
-                        next_addr, next_instr->Length, ctx->Rip);
-
-            if (!is_transition_crash) {
-                std::vector<int16_t> call_nops;
-                for (size_t i = 0; i < next_instr->Length; ++i) {
-                    call_nops.push_back(0x90);
-                }
-                xrsystem_patches.push_back(Patch::create(next_addr, call_nops));
-            }
-        }
+        // NOTE: We do NOT proactively skip following CALL instructions.
+        // If a CALL faults after we zero its base register (e.g. call [rax]
+        // where rax=0), it will trigger its own VEH exception and be handled
+        // individually. Proactively NOP'ing CALLs removed function calls with
+        // important side effects and caused state corruption.
 
         SPDLOG_INFO("Crash handled successfully, continuing execution");
-        spdlog::default_logger()->flush();
+        // NOTE: no flush() here — sync disk I/O on every VEH invocation caused
+        // significant stutter during crash cascades. Logs flush on their own schedule.
         veh_stats::patched_count.fetch_add(1, std::memory_order_relaxed);
 
         if (is_transition_crash) {
-            // Track cascade state — don't cache address (it will fault again next transition)
             const auto new_count = veh_stats::transition_crash_count.fetch_add(1, std::memory_order_relaxed) + 1;
             if (new_count == 1) {
                 veh_stats::transition_cascade_start_tick.store(GetTickCount64(), std::memory_order_relaxed);
             }
+        } else if (temporary_fixup) {
+            // Cache for fast repeat handling (transition + dynamic only)
+            temp_fixup_cache[exception_address] = {(uint8_t)decoded->Length, has_reg_dest, dest_reg};
         } else {
+            // Permanently patched — the code itself is rewritten, so future faults
+            // will either not occur or will be at the next instruction
             handled_addresses.insert(exception_address);
         }
 

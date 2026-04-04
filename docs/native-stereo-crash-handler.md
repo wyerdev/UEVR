@@ -1,5 +1,7 @@
 # Native Stereo Crash Handler — Technical Documentation
 
+This document covers the VEH-based Native Stereo crash handling path. The separate D3D12 load/transition hardening added later in `D3D12Component.cpp` is related, but it is outside the scope of this document.
+
 This fixes the crashes in: Creatures of Ava
 In the first room where we meet the NPC.
 
@@ -62,9 +64,18 @@ Exception occurs
                  │
                  ▼
 ┌─────────────────────────────────────────┐
-│ Gate 3: Deduplication (handled_addresses│
-│   set — O(1) lookup)                    │
-│   Already processed? → CONTINUE_SEARCH  │
+│ Gate 3a: handled_addresses              │
+│   Already permanently patched?          │
+│   → CONTINUE_SEARCH (code rewritten)    │
+├─────────────────────────────────────────┤
+│ Gate 3b: rejected_addresses             │
+│   Already rejected as non-XR?           │
+│   → CONTINUE_SEARCH (instant)           │
+├─────────────────────────────────────────┤
+│ Gate 3c: temp_fixup_cache               │
+│   Transition/dynamic fixup cached?      │
+│   → Zero reg, advance RIP,             │
+│     CONTINUE_EXECUTION (fast path)      │
 └────────────────┬────────────────────────┘
                  │
                  ▼
@@ -88,12 +99,17 @@ Exception occurs
         │ VERIFICATION STEPS │
         └────────┬───────────┘
                  │
-    ┌────────────┼────────────────┐
-    ▼            ▼                ▼
-  Step A      Step B           Step C
- Backward    Stack Walk      Heuristic
- Reg Trace   + Forward Scan   Fallback
+    ┌────────────┼───────────┐
+    ▼                        ▼
+  Step A                  Step C
+ Backward              Heuristic
+ Reg Trace              Fallback
+ (20 instr)        (game module check)
 ```
+
+**Note:** Step B (stack walk + forward scan of up to 8 callers × 500 instructions) was
+removed — it was the primary cause of stutter during crash cascades. See
+[VEH Iteration History](veh-iteration-history.md) for details.
 
 ### Step A: Backward Register Trace
 
@@ -103,26 +119,22 @@ Walks **backward** up to 20 instructions from the crash site within the same fun
 
 **When it fails:** The null was passed as a function argument, stored in a local variable across a call boundary, or the load happened in a completely different function.
 
-### Step B: Stack Walk + Forward Scan
+### Step B: Stack Walk + Forward Scan (REMOVED)
 
-Scans the stack for return addresses (up to 48 qwords, 8 unique callers). For each valid return address:
-
-1. Verifies it's preceded by a `CALL` instruction
-2. Finds the function start using `utility::find_function_start()`
-3. Forward-scans up to 500 instructions looking for any memory operand referencing an XR offset
-
-**When it works:** One of the callers in the chain originally loaded the XR pointer.
-
-**When it fails:** The call chain is deeper than 8 unique callers, or the XR load happened in a function that has already returned and been popped from the stack.
+This step was removed because it was the primary cause of stutter during crash cascades. It decoded up to 8 functions × 500 instructions = 4,000 instruction decodes per VEH exception. With 45 crash sites discovered simultaneously, that was ~180,000 instruction decodes in a single frame. See [VEH Iteration History](veh-iteration-history.md) for the full analysis.
 
 ### Step C: Heuristic Fallback
 
-If Steps A and B fail, the handler applies a heuristic: **if our XR nullification is active AND the crash is in the game executable module**, it is overwhelmingly likely to be caused by our nullification.
+If Steps A and B fail, the handler applies a heuristic based on crash location:
+
+**Game module crashes:** If our XR nullification is active AND the crash is in the game executable or any DLL in the game directory, it is overwhelmingly likely to be caused by our nullification. A cap of **128 heuristic patches** prevents runaway patching.
+
+**Dynamic code crashes:** UE also runs code in dynamically allocated memory (Blueprint VM, JIT'd code). When HMD is null and a crash occurs at a non-module address, the handler applies a **temporary context fixup** (no permanent patch to heap memory). These are capped at **64 dynamic fixups** and the address is cached so deep analysis only runs once per site.
 
 This is sound because:
 - The handler only activates when `engine->hmd_device == nullptr` (Gate 5)
 - Crashes in the game module during XR nullification are almost always from propagated null dereferences
-- A cap of **128 heuristic patches** prevents runaway patching
+- A cap of **128 heuristic patches** (game modules) and **64 dynamic fixups** (non-module code) prevents runaway patching
 
 **When it fails:** Extremely rare — a genuine engine bug that coincidentally crashes while XR is nullified. These would be caught by the 128-patch limit.
 
@@ -140,24 +152,30 @@ BEFORE: 48 8B 41 10    mov rax, [rcx+0x10]     ← crashes
 AFTER:  48 31 C0 90    xor rax, rax; nop        ← returns 0, never faults again
 ```
 
-### For Other Instructions (e.g., `cmp [rax+0x8], rcx`)
+### For Other Instructions (e.g., `cmp [rax+0x8], rcx`, `call [rax+0x30]`)
 
-1. **NOP the entire instruction** (replace all bytes with `0x90`)
-2. **Advance RIP** past it
+1. **Context fixup:** Zero RAX (for null-safety after skipped CALLs), advance RIP
+2. **Permanent patch:** NOP the entire instruction (replace all bytes with `0x90`)
 
-### Following CALL Suppression
+This is correct because these instructions always operate through the null XR pointer chain. Since UEVR keeps the XR pointers permanently null, the target memory is always unmapped.
 
-If the instruction immediately after the patched one is a `CALL` (common pattern: load vtable pointer, then call through it), the CALL is also NOP'd to prevent calling through a null vtable.
+### Proactive CALL Skip (REMOVED)
+
+Earlier versions proactively NOP'd the CALL instruction following a patched load (e.g., `mov rax, [rcx]; call [rax+0x20]`). This was removed because it caused state corruption — the CALL may have had important side effects (state updates, lock releases) and NOP'ing it broke save/load and menu operations. Each instruction now faults independently and gets its own VEH invocation.
 
 ## Safety Properties
 
 ### What Prevents False Positives?
 
-1. **Gate 5 (HMD null check):** Handler only activates when UEVR has actually nullified the XR pointers
+1. **Gate 1 (HMD null check):** Handler only activates for XR patches when UEVR has actually nullified the XR pointers
 2. **Game module check:** Only patches crashes in the game executable, never in system DLLs or the OS
-3. **Steps A & B:** Provide high-confidence causal verification when they succeed
+3. **Step A:** Provides high-confidence causal verification when it succeeds
 4. **128-patch cap on heuristic:** Limits exposure from Step C
-5. **One-shot semantics:** Each address is processed exactly once — all exit paths (successful patch, rejected by deep analysis, validation failure) insert into `handled_addresses` before returning
+5. **One-shot semantics:** Each address is processed exactly once:
+   - Permanently patched addresses → `handled_addresses` (CONTINUE_SEARCH, code rewritten)
+   - Rejected addresses → `rejected_addresses` (CONTINUE_SEARCH, instant)
+   - Transition/dynamic addresses → `temp_fixup_cache` (CONTINUE_EXECUTION, fast path)
+   - Validation failures → `handled_addresses` (CONTINUE_SEARCH)
 
 ### What About Real Crashes?
 
@@ -176,27 +194,45 @@ Real crashes will still propagate normally, with one caveat: during active XR nu
 
 ## Performance Characteristics
 
-- **No per-frame cost:** The handler only runs on actual exceptions (hardware trap)
-- **Once-per-address:** Each crash site is patched permanently; subsequent executions hit NOP/xor (zero overhead)
-- **Typical session:** 9–30 patches total, all applied in the first few seconds of gameplay
-- **Stack walk:** O(48 × 500) instruction decodes in worst case, but only on first occurrence of each crash site
+- **No per-frame cost:** Permanently patched addresses never fault again (code is rewritten)
+- **Once-per-address deep analysis:** Each crash site goes through full decode/trace/heuristic once
+- **Rejected addresses bypass instantly:** Separate `rejected_addresses` set — no re-analysis
+- **Temp fixups are fast:** Transition/dynamic addresses cached in `temp_fixup_cache`, ~3μs per fault
+- **No sync disk I/O on success path:** `spdlog::flush()` removed from success path to prevent stutter
+- **Step A only:** ~20 instruction backward scan (µs), no stack walk
+- **Typical session:** 8–15 permanent patches, all applied in the first few seconds of gameplay
 
-## Current Status and Known Limitations
+## Current Status (April 2026)
 
 ### Working
 
 - Gameplay is stable — all XR null-deref crashes during normal gameplay are caught and patched
-- No progressive stutter or frame drops from patched code
+- No stutter or frame drops from the VEH handler
 - Handler correctly passes through non-XR crashes
+- Rejected system DLL addresses cached for instant bypass
+- Menu open/close works (no NOP'd CALLs breaking state)
 
-### Known Issue: Save/Load Crash
+### Known Issue: System DLL Crash During Load Transitions
 
-When loading a new save file, the game crashes after approximately 27 patches. The crash manifests as a **silent process termination** — the last log entry is "Crash handled successfully" with no further handler activity. Possible causes under investigation:
+When loading a save file (especially the 3rd+ load in a session), the game intermittently crashes at a system DLL address (`0x7FFF118E2A96`, fault `0x7FFF0058`). This crash:
 
-1. **Different exception type** not caught by Gate 0 (e.g., C++ exception, SEH from save system)
-2. **Different thread** where the handler's re-entrancy guard is blocking processing
-3. **State corruption** from NOP'd instructions that only manifests during save/load (different code path uses the same patched functions but expects non-null return values)
-4. **Windows Error Reporting** or the CRT terminating the process before VEH runs
+- Is **correctly rejected** by the VEH handler (not in game directory)
+- Has **nothing to do with our permanent patches** (occurred with 0 patches and 14 patches alike)
+- Is likely an XR runtime or driver issue during resource teardown/reload
+- Happens in the same system DLL every time, suggesting a specific API call fails intermittently
+- May be related to D3D Present hook loss ("Windows message hook still intact" loop follows)
+
+This is **not fixable** in the VEH handler alone — it's outside our modules and outside our control.
+
+Later work added conservative D3D12-side hardening in `D3D12Component.cpp` to better survive stale native render-target/resource access during load transitions. That improves some load scenarios, but it does not change the VEH classification logic described here.
+
+### Known Issue: D3D Hook Loss During Load
+
+After load transitions, UEVR sometimes loses its D3D Present hook. The log shows repeated "Windows message hook is still intact, ignoring..." and "Last chance encountered for hooking" messages. The game freezes (rendering stops). This is a pre-existing UEVR issue in the D3D hook recovery subsystem, separate from the VEH handler.
+
+## Iteration History
+
+See [VEH Iteration History](veh-iteration-history.md) for a detailed record of all VEH approaches tried, what worked, what failed, and why.
 
 ## Bug Fixes
 
@@ -204,16 +240,13 @@ When loading a new save file, the game crashes after approximately 27 patches. T
 
 **Problem:** The deep analysis rejection path and Gate 3 validation failures returned `EXCEPTION_CONTINUE_SEARCH` without inserting the exception address into `handled_addresses`. When a crash address was repeatedly rejected (e.g., a crash in a system DLL outside the game directory), the VEH handler would re-analyze the same address on every fault — an infinite loop that hung the game.
 
-This was discovered because **The Callisto Protocol** crashed on startup: 108 AVs with the same RIP (`0x7ffd5ea42a96`, outside the game directory) hitting the handler repeatedly, with `rejected_not_xr` climbing and the game frozen.
+**Fix:** Added `rejected_addresses` set (separate from `handled_addresses`). Rejected addresses are cached for instant CONTINUE_SEARCH on subsequent faults. Validation failures are still cached in `handled_addresses`.
 
-Praydog's original handler cached addresses at the top (`ignored_addresses.insert(exception_address)` before any analysis), giving one-shot semantics. Our rewritten handler only inserted on the success/patch path.
+### High-Address Filter Bypass (Creatures of Ava Fix)
 
-**Fix:** Added `handled_addresses.insert(exception_address)` in three rejection paths:
-1. Gate 3: `IsBadReadPtr` or null RIP → cache and `CONTINUE_SEARCH`
-2. Gate 3: Instruction decode failure → cache and `CONTINUE_SEARCH`
-3. Deep analysis rejection (`!verified`) → cache and `CONTINUE_SEARCH`
+**Problem:** The `fault_address > 0x10000` filter rejected legitimate XR crashes where null-derived pointer arithmetic produced non-null-page fault addresses (e.g., `0xFFFFFFFFFFFFFFFF` from `[null + -1]`).
 
-This ensures every address is processed at most once, matching the documented one-shot safety property.
+**Fix:** Added `&& hmd_is_valid` to the high-address filter. When HMD is null (XR nullification active), the filter is bypassed entirely — any fault address is accepted for further analysis.
 
 ## File Location
 
@@ -223,5 +256,5 @@ Handler code: `src/mods/vr/FFakeStereoRenderingHook.cpp`, starting at the `AddVe
 
 - **bddisasm:** x86 instruction decoder (NDR_RAX..NDR_R15, ND_OP_MEM, ND_OP_REG, ND_REG_GPR)
 - **kananlib:** `utility::decode_one()`, `utility::resolve_instruction()`, `utility::find_function_start()`, `utility::get_executable()`, `utility::get_module_size()`
-- **spdlog:** Logging with explicit flush at critical points
+- **spdlog:** Logging, including rate-limited recovery diagnostics on noisy paths
 - **Patch::create():** UEVR's memory patching utility (handles VirtualProtect, stores original bytes for cleanup)
