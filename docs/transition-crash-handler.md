@@ -323,7 +323,7 @@ All 168 crashes occurred within a single millisecond (`10:02:20.862` - `10:02:20
 
 ### D3D12 Rehook Loop Prevention
 
-`MAX_POST_INIT_REHOOK_ATTEMPTS` set to 0 in `Framework.cpp`. Returnal's Streamline (DLSS Frame Generation) swapchain interposer causes UEVR's D3D12 hook validation to detect a "different" Present pointer after initialization, triggering an infinite rehook loop. Disabling post-init rehooks prevents this.
+`MAX_POST_INIT_REHOOK_ATTEMPTS` set to 0 in `Framework.cpp`. Returnal's Streamline runtime DLL wraps the DXGI swapchain vtable even when Frame Generation is not active. This causes UEVR's D3D12 hook validation to detect a "different" Present pointer after initialization, triggering an infinite rehook loop. Disabling post-init rehooks prevents this.
 
 ### Non-AV Exception Diagnostics
 
