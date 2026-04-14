@@ -15,6 +15,8 @@ extern thread_local uint32_t g_is_in_script_call;
 struct ScopedScriptCall {
     ScopedScriptCall() { ++g_is_in_script_call; }
     ~ScopedScriptCall() { --g_is_in_script_call; }
+    ScopedScriptCall(const ScopedScriptCall&) = delete;
+    ScopedScriptCall& operator=(const ScopedScriptCall&) = delete;
 };
 
 class ScriptContext : public std::enable_shared_from_this<ScriptContext> {
