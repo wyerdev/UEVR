@@ -25,12 +25,27 @@ These crashes are not caused by a single callsite. The null pointer propagates t
 - The offsets vary by UE version, so a static list of addresses is not viable
 - The crash sites are in compiled engine code (not modifiable source), often inlined or optimized
 
+## Crash Handler Modes
+
+The VEH crash handler is configurable via the UEVR menu -> Debug, under **Stereo Hook Options → Crash Handler Mode** (requires restart to take effect):
+
+| Mode | Value | Behavior |
+|------|-------|----------|
+| **Original (Nightly)** | 0 | Praydog's stock VEH handler from upstream UEVR. No transition crash handling, no ScopedScriptCall guard, no diagnostics. |
+| **Enhanced (Experimental)** | 1 | Full enhanced handler as described below: transition crash support, ScopedScriptCall guard, rejected/temp-fixup caches, game-directory module detection. |
+| **Enhanced (Experimental, Debug)** | 2 | Same as Enhanced, plus periodic VEH stats dumped to the log every ~5 seconds (300 frames). |
+| **Disabled** | 3 | No VEH handler registered at all. Game will crash on any XR null dereference. For debugging only. |
+
+Default is **Original (Nightly)** (mode 0). The architecture described in this document applies to modes 1 and 2 (Enhanced).
+
 ## Solution: Vectored Exception Handler with Multi-Stage Verification
 
 A **Vectored Exception Handler (VEH)** is registered at UEVR startup. When any access violation occurs, the handler runs a verification pipeline to determine if the crash was caused by UEVR's XR nullification. If verified, it:
 
 1. Fixes the CPU context so execution can continue safely
 2. Permanently patches the faulting instruction so it never crashes again
+
+> **Note:** The architecture below describes the **Enhanced** handler (modes 1–2). The Original handler (mode 0) uses praydog's upstream logic with a simpler pipeline.
 
 ### Handler Architecture
 
@@ -127,7 +142,7 @@ This step was removed because it was the primary cause of stutter during crash c
 
 If Step A fails, the handler applies a heuristic based on crash location:
 
-**Game module crashes:** If our XR nullification is active AND the crash is in the game executable or any DLL in the game directory, it is overwhelmingly likely to be caused by our nullification. A cap of **128 heuristic patches** prevents runaway patching.
+**Game module crashes:** If our XR nullification is active AND the crash is in the game executable or any DLL in the game directory, it is overwhelmingly likely to be caused by our nullification. A cap of **128 heuristic patches** prevents runaway patching. Additionally, the heuristic is suppressed when inside a Lua script call (`uevr::g_is_in_script_call > 0`, tracked by `ScopedScriptCall` in the Lua API). AVs during script execution are more likely caused by bad Lua property access than XR nullification, so they are rejected and cached in `rejected_addresses` instead of permanently patched.
 
 **Dynamic code crashes:** UE also runs code in dynamically allocated memory (Blueprint VM, JIT'd code). When HMD is null and a crash occurs at a non-module address, the handler applies a **temporary context fixup** (no permanent patch to heap memory). These are capped at **256 dynamic fixups** and the address is cached so deep analysis only runs once per site.
 
@@ -250,7 +265,7 @@ See [VEH Iteration History](veh-iteration-history.md) for a detailed record of a
 
 ## File Location
 
-Handler code: `src/mods/vr/FFakeStereoRenderingHook.cpp`, starting at the `AddVectoredExceptionHandler` call (approximately line 4168 for the enhanced handler).
+Handler code: `src/mods/vr/FFakeStereoRenderingHook.cpp`, starting at the `AddVectoredExceptionHandler` calls in `setup_view_extensions()`. Search for `AddVectoredExceptionHandler` — there are two registrations (original and enhanced), selected by `m_crash_handler_mode`.
 
 ## Dependencies
 

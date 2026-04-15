@@ -223,6 +223,7 @@ After:  CONTEXT.Rip = past both instructions
 
 | Counter | Type | Purpose |
 |---------|------|---------|
+| `total_veh_invocations` | `atomic<uint64_t>` | All exceptions entering the VEH handler (before any filtering) |
 | `total_av_count` | `atomic<uint64_t>` | All access violations encountered |
 | `filtered_hmd_nonnull` | `atomic<uint64_t>` | Fast-path: HMD non-null and not transition crash |
 | `filtered_high_addr` | `atomic<uint64_t>` | Fast-path: fault > 0x10000, HMD valid, and not cascade |

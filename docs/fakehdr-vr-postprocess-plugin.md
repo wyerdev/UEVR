@@ -49,14 +49,14 @@ All plugins share the same architecture:
 
 Plugins are loaded in DLL name alphabetical order. Numeric prefixes (`01_` through `13_`) ensure:
 - Color correction runs first (01–03)
-- Color grading runs in the middle (04–09)
-- Detail & film effects run last (10–13): FilmGrain2 → HSL Shift → Filmic Pass → Clarity
+- Color grading runs in the middle (04–09, 11–12): Curves → FakeHDR → DPX → Technicolor → Colourfulness → Vibrance → HSL Shift → Filmic Pass
+- Detail & film effects run last (10, 13): FilmGrain2 → Clarity
 
 ### Preset System
 
 The PluginLoader manages a preset system for saving/loading all plugin settings at once:
 - **Local presets**: `%APPDATA%/UnrealVRMod/<game>/data/plugins/presets/<name>/` — per-game
-- **Global presets**: `%APPDATA%/UnrealVRMod/uevr/data/plugins/presets/<name>/` — shared across games
+- **Global presets**: `%APPDATA%/UnrealVRMod/UEVR/data/plugins/presets/<name>/` — shared across games
 - **Built-in presets**: `%APPDATA%/UnrealVRMod/UEVR/data/plugins/shipping_presets/` — read-only, overwritten on update
 - Each preset folder contains copies of all `*_settings.txt` files
 - Active preset tracking persists per game via `active_preset.txt`

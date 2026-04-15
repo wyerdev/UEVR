@@ -53,7 +53,7 @@ Historical note: the "Steps" section below is the original plan as written durin
 
 2. **Wrap `VR::on_present()` D3D12 plugin dispatch in `__try/__except`**
    - The `main_native_rt` resolution already has null checks, but SEH catches dangling-pointer cases
-   - On exception: skip plugin dispatch, log, continue to `on_frame()` 
+   - On exception: skip plugin dispatch, log, continue to `on_frame()`
 
 3. **Wrap `D3D12Component::on_frame()` scene capture access in `__try/__except`**
    - `scene_capture->get_native_resource()` can fault if the scene capture UTexture was GC'd between the `valid()` check and the call
@@ -79,7 +79,7 @@ Historical note: the "Steps" section below is the original plan as written durin
    - If counter > 30 → we're in a transition, log this state
 
 7. **During transition: destroy scene capture proactively**
-   - When transition detected, call `rtm->destroy_scene_capture()` 
+   - When transition detected, call `rtm->destroy_scene_capture()`
    - Set a "recreate after N stable frames" flag to avoid immediate re-creation attempts during the transition
 
 8. **OpenXR frame keepalive during load stalls**
