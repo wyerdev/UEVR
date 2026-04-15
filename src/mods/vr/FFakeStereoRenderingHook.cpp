@@ -5,6 +5,7 @@
 
 #include <asmjit/asmjit.h>
 #include <future>
+#include <mutex>
 
 #include <spdlog/spdlog.h>
 #include <utility/Memory.hpp>
@@ -4168,6 +4169,11 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
         static std::vector<Patch::Ptr> xrsystem_patches{};
         static std::unordered_set<uintptr_t> handled_addresses{};
         static std::atomic<bool> handler_active{false};
+        // Mutex protecting all non-atomic shared state: handled_addresses,
+        // rejected_addresses, temp_fixup_cache, xrsystem_patches.
+        // Uncontended in practice (single faulting thread), but eliminates
+        // theoretical UB from concurrent access during crash cascades.
+        static std::mutex veh_mtx{};
 
         // Cache the game executable's directory (e.g. "A:\...\Binaries\Win64\").
         // Used to check if a crash address is in any game DLL (not just the main exe).
@@ -4280,9 +4286,12 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
         const auto exception_address = ctx->Rip;
 
         // Fast early-out: already permanently patched this address
-        if (handled_addresses.contains(exception_address)) {
-            veh_stats::filtered_already_handled.fetch_add(1, std::memory_order_relaxed);
-            return EXCEPTION_CONTINUE_SEARCH;
+        {
+            std::lock_guard<std::mutex> lock{veh_mtx};
+            if (handled_addresses.contains(exception_address)) {
+                veh_stats::filtered_already_handled.fetch_add(1, std::memory_order_relaxed);
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
         }
 
         // Fast early-out: already rejected this address (not XR-related)
@@ -4290,9 +4299,12 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
         // return CONTINUE_SEARCH instantly, patched addresses also return
         // CONTINUE_SEARCH (the code is rewritten so the fault doesn't recur).
         static std::unordered_set<uintptr_t> rejected_addresses{};
-        if (rejected_addresses.contains(exception_address)) {
-            veh_stats::filtered_already_handled.fetch_add(1, std::memory_order_relaxed);
-            return EXCEPTION_CONTINUE_SEARCH;
+        {
+            std::lock_guard<std::mutex> lock{veh_mtx};
+            if (rejected_addresses.contains(exception_address)) {
+                veh_stats::filtered_already_handled.fetch_add(1, std::memory_order_relaxed);
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
         }
 
         // Fast path: temporary fixup cache for transition and dynamic-code addresses.
@@ -4307,6 +4319,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
         static std::unordered_map<uintptr_t, TempFixupInfo> temp_fixup_cache{};
 
         {
+            std::lock_guard<std::mutex> lock{veh_mtx};
             auto it = temp_fixup_cache.find(exception_address);
             if (it != temp_fixup_cache.end()) {
                 auto* ctx_fast = exception->ContextRecord;
@@ -4339,20 +4352,24 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
 
         veh_stats::reached_deep_analysis.fetch_add(1, std::memory_order_relaxed);
 
-        // RAII guard to release the re-entrancy lock on all exit paths
-        auto cleanup = [&]() { handler_active.store(false); };
+        // RAII scope guard to release the re-entrancy lock on ALL exit paths,
+        // including if an insert() throws std::bad_alloc under memory pressure.
+        struct HandlerGuard {
+            std::atomic<bool>& active;
+            ~HandlerGuard() { active.store(false); }
+        } guard{handler_active};
 
         if (exception_address == 0 || IsBadReadPtr((void*)exception_address, 16)) {
+            std::lock_guard<std::mutex> lock{veh_mtx};
             rejected_addresses.insert(exception_address);
-            cleanup();
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
         const auto decoded = utility::decode_one((uint8_t*)exception_address);
 
         if (!decoded) {
+            std::lock_guard<std::mutex> lock{veh_mtx};
             rejected_addresses.insert(exception_address);
-            cleanup();
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
@@ -4461,15 +4478,20 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
 
             constexpr size_t MAX_HEURISTIC_PATCHES = 128;
 
-            if (is_in_game && xrsystem_patches.size() < MAX_HEURISTIC_PATCHES && uevr::g_is_in_script_call == 0) {
+            size_t current_patch_count;
+            {
+                std::lock_guard<std::mutex> lock{veh_mtx};
+                current_patch_count = xrsystem_patches.size();
+            }
+            if (is_in_game && current_patch_count < MAX_HEURISTIC_PATCHES && uevr::g_is_in_script_call == 0) {
                 SPDLOG_INFO("  Heuristic: AV at fault addr {:x}, crash in game module at {:x} — "
                             "treating as XR-related crash (patch #{})",
-                            accessed_address, exception_address, xrsystem_patches.size() + 1);
+                            accessed_address, exception_address, current_patch_count + 1);
                 verified = true;
             } else if (is_in_game && uevr::g_is_in_script_call > 0) {
                 SPDLOG_INFO("  Heuristic: Skipping game module AV at {:x} because we are executing a Lua script / callback", exception_address);
+                std::lock_guard<std::mutex> lock{veh_mtx};
                 rejected_addresses.insert(exception_address);
-                cleanup();
                 return EXCEPTION_CONTINUE_SEARCH;
             } else if (!is_in_game && !hmd_is_valid && past_init) {
                 // HMD is null (XR nullification active) but crash is in dynamic memory
@@ -4484,7 +4506,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
                             exception_address);
             } else {
                 SPDLOG_INFO("  Heuristic: patch limit reached ({}) — not patching further",
-                            xrsystem_patches.size());
+                            current_patch_count);
             }
         }
 
@@ -4496,8 +4518,10 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
                 exception->ExceptionRecord->ExceptionInformation[1]);
             // Do NOT add to handled_addresses — use rejected_addresses so
             // subsequent faults at this address skip deep analysis entirely.
-            rejected_addresses.insert(exception_address);
-            cleanup();
+            {
+                std::lock_guard<std::mutex> lock{veh_mtx};
+                rejected_addresses.insert(exception_address);
+            }
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
@@ -4534,6 +4558,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             case NDR_R13: c->R13 = val; break;
             case NDR_R14: c->R14 = val; break;
             case NDR_R15: c->R15 = val; break;
+            default: SPDLOG_WARN("[VEH] Unknown register index {} in set_context_reg", reg); break;
             }
         };
 
@@ -4566,7 +4591,10 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
                     }
                 }
 
-                xrsystem_patches.push_back(Patch::create(exception_address, patch_bytes));
+                {
+                    std::lock_guard<std::mutex> lock{veh_mtx};
+                    xrsystem_patches.push_back(Patch::create(exception_address, patch_bytes));
+                }
 
                 SPDLOG_INFO("Permanent patch {:x} with xor r{}, r{} + {} NOP(s)",
                             exception_address, dest_reg, dest_reg,
@@ -4586,7 +4614,10 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
                 for (size_t i = 0; i < decoded->Length; ++i) {
                     nop_bytes.push_back(0x90);
                 }
-                xrsystem_patches.push_back(Patch::create(exception_address, nop_bytes));
+                {
+                    std::lock_guard<std::mutex> lock{veh_mtx};
+                    xrsystem_patches.push_back(Patch::create(exception_address, nop_bytes));
+                }
             }
         }
 
@@ -4608,14 +4639,19 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             }
         } else if (temporary_fixup) {
             // Cache for fast repeat handling (transition + dynamic only)
-            temp_fixup_cache[exception_address] = {(uint8_t)decoded->Length, has_reg_dest, dest_reg};
+            std::lock_guard<std::mutex> lock{veh_mtx};
+            constexpr size_t MAX_TEMP_FIXUP_ENTRIES = 256;
+            if (temp_fixup_cache.size() < MAX_TEMP_FIXUP_ENTRIES) {
+                temp_fixup_cache[exception_address] = {(uint8_t)decoded->Length, has_reg_dest, dest_reg};
+            }
         } else {
             // Permanently patched — the code itself is rewritten, so future faults
             // will either not occur or will be at the next instruction
+            std::lock_guard<std::mutex> lock{veh_mtx};
             handled_addresses.insert(exception_address);
         }
 
-        cleanup();
+        // guard destructor releases handler_active
         return EXCEPTION_CONTINUE_EXECUTION;
     });
         } // else (enhanced experimental handler)
