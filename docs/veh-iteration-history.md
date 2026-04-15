@@ -16,13 +16,15 @@ Creatures of Ava crashed at a specific point (meeting an NPC in the first room) 
 
 **Result:** Fixed the original Creatures of Ava crash. This fix is correct and committed.
 
-### Fix 2: Dynamic Code Handling (Heap/JIT Crashes) ❌ REMOVED
+### Fix 2: Dynamic Code Handling (Heap/JIT Crashes) — Original Form ❌ REMOVED, Simpler Form Re-added
 
-**Change:** Added `is_dynamic_xr_crash` flag — when HMD is null and crash is at a non-module address (Blueprint VM, JIT), apply temporary context fixup. Capped at 64 dynamic fixups.
+**Change:** Added `is_dynamic_xr_crash` flag — when HMD is null and crash is at a non-module address (Blueprint VM, JIT), apply temporary context fixup. Originally capped at 64 dynamic fixups.
 
 **Result:** Game ran handling 35 crashes, then crashed during save game load. The temp fixups were firing VEH exceptions every frame forever, and skipping individual instructions in dynamic code left corrupted registers that cascaded into fatal crashes.
 
-**Lesson:** Don't try to handle dynamic code crashes by skipping individual instructions. The instruction stream in heap memory is unpredictable.
+**Current status:** The original aggressive form was removed and replaced with a simpler version: non-module crashes when HMD is null are classified as `is_dynamic_xr_crash`, receive a temporary context fixup (not permanent patch), and are cached in `temp_fixup_cache`. Capped at **256 entries**. This simpler form avoids the cascade issues because it doesn't attempt deep analysis or function-level bailouts.
+
+**Lesson:** Don't try to handle dynamic code crashes by skipping individual instructions. The instruction stream in heap memory is unpredictable. Simple temp fixups with caching are the sustainable approach.
 
 ### Fix 3: Bad Call Target Handler ❌ REMOVED
 
@@ -164,7 +166,7 @@ Deep Analysis (once per address):
 
 ## Post-VEH Follow-Up: D3D12 Hardening
 
-After the VEH work hit a limit, the release path moved to conservative D3D12 hardening in `src/mods/vr/D3D12Component.cpp` instead of more VEH experimentation.
+After the VEH work hit a limit, the release path moved to conservative D3D12 hardening in `src/mods/vr/D3D12Component.cpp` instead of more VEH experimentation. See [ATTEMPT_3_LOAD_CRASH_FIX_PLAN.md](ATTEMPT_3_LOAD_CRASH_FIX_PLAN.md) for the full plan and results.
 
 Implemented:
 - safe native-resource lookups for `FRHITexture2D` targets

@@ -90,8 +90,8 @@ Exception occurs
         ┌───────▼──────────────────┐
         │  Deep Analysis:          │
         │  Decode instruction,     │
-        │  trace registers,        │
-        │  stack walk              │
+        │  backward register trace │
+        │  (20 instr), heuristic   │
         └───────┬──────────────────┘
                 │
         ┌───────▼──────────────────┐
@@ -228,7 +228,7 @@ After:  CONTEXT.Rip = past both instructions
 | `filtered_high_addr` | `atomic<uint64_t>` | Fast-path: fault > 0x10000, HMD valid, and not cascade |
 | `filtered_already_handled` | `atomic<uint64_t>` | Fast-path: address already permanently patched |
 | `filtered_reentrant` | `atomic<uint64_t>` | Fast-path: recursive exception guard |
-| `reached_deep_analysis` | `atomic<uint64_t>` | Entered instruction decode and stack walk |
+| `reached_deep_analysis` | `atomic<uint64_t>` | Entered instruction decode and heuristic analysis |
 | `patched_count` | `atomic<uint64_t>` | Successfully handled (fixup or patch) |
 | `rejected_not_xr` | `atomic<uint64_t>` | Deep analysis rejected as unrelated |
 | `non_av_exceptions` | `atomic<uint64_t>` | Non-AV exception codes seen |
@@ -270,7 +270,7 @@ A `SetUnhandledExceptionFilter` in `Framework.cpp` writes a stack-based (no heap
 
 ## Performance Impact
 
-Negligible. 99.95%+ of access violations are filtered at the first pointer check (Gate 1: HMD non-null) in ~1 nanosecond. Only actual transition crashes (~42 per death, 0 during normal gameplay) reach the instruction decode and stack walk path.
+Negligible. 99.95%+ of access violations are filtered at the first pointer check (Gate 1: HMD non-null) in ~1 nanosecond. Only actual transition crashes (~42 per death, 0 during normal gameplay) reach the instruction decode and heuristic analysis path.
 
 The `on_frame` cascade reset is a single atomic store — zero overhead during normal gameplay.
 
@@ -314,9 +314,7 @@ All 168 crashes occurred within a single millisecond (`10:02:20.862` - `10:02:20
 | Null page ceiling | `0x10000` | Fault addresses below this are null-page dereferences |
 | Max heuristic patches | 128 | Safety cap before heuristic stops accepting |
 | Stats dump interval | 300 frames | ~5 seconds between diagnostic log dumps |
-| Stack scan depth | 48 QWORDs | RSP scan range for return address detection |
-| Max callers scanned | 8 | Depth of stack walk for XR offset analysis |
-| Max forward instructions | 500 | Instructions scanned per caller function |
+| Max temp fixup entries | 256 | Maximum cached temporary fixup addresses |
 | Rendering stopped threshold | 3000ms | Max time without on_frame before non-AV crash dumps |
 
 ## Related Fixes (Returnal-specific)

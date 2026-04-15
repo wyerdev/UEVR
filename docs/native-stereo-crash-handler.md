@@ -82,7 +82,7 @@ Exception occurs
 ┌─────────────────────────────────────────┐
 │ Gate 4: Re-entrancy Guard               │
 │   atomic<bool> handler_active           │
-│   Prevents recursive stack-walk crashes │
+│   Prevents recursive handler crashes    │
 └────────────────┬────────────────────────┘
                  │
                  ▼
@@ -125,16 +125,16 @@ This step was removed because it was the primary cause of stutter during crash c
 
 ### Step C: Heuristic Fallback
 
-If Steps A and B fail, the handler applies a heuristic based on crash location:
+If Step A fails, the handler applies a heuristic based on crash location:
 
 **Game module crashes:** If our XR nullification is active AND the crash is in the game executable or any DLL in the game directory, it is overwhelmingly likely to be caused by our nullification. A cap of **128 heuristic patches** prevents runaway patching.
 
-**Dynamic code crashes:** UE also runs code in dynamically allocated memory (Blueprint VM, JIT'd code). When HMD is null and a crash occurs at a non-module address, the handler applies a **temporary context fixup** (no permanent patch to heap memory). These are capped at **64 dynamic fixups** and the address is cached so deep analysis only runs once per site.
+**Dynamic code crashes:** UE also runs code in dynamically allocated memory (Blueprint VM, JIT'd code). When HMD is null and a crash occurs at a non-module address, the handler applies a **temporary context fixup** (no permanent patch to heap memory). These are capped at **256 dynamic fixups** and the address is cached so deep analysis only runs once per site.
 
 This is sound because:
-- The handler only activates when `engine->hmd_device == nullptr` (Gate 5)
+- The handler only activates when `engine->hmd_device == nullptr` (Gate 1)
 - Crashes in the game module during XR nullification are almost always from propagated null dereferences
-- A cap of **128 heuristic patches** (game modules) and **64 dynamic fixups** (non-module code) prevents runaway patching
+- A cap of **128 heuristic patches** (game modules) and **256 dynamic fixups** (non-module code) prevents runaway patching
 
 **When it fails:** Extremely rare — a genuine engine bug that coincidentally crashes while XR is nullified. These would be caught by the 128-patch limit.
 
@@ -168,7 +168,7 @@ Earlier versions proactively NOP'd the CALL instruction following a patched load
 ### What Prevents False Positives?
 
 1. **Gate 1 (HMD null check):** Handler only activates for XR patches when UEVR has actually nullified the XR pointers
-2. **Game module check:** Only patches crashes in the game executable, never in system DLLs or the OS
+2. **Game module check:** Only patches crashes in game modules (executable and DLLs in the game directory), never in system DLLs or the OS
 3. **Step A:** Provides high-confidence causal verification when it succeeds
 4. **128-patch cap on heuristic:** Limits exposure from Step C
 5. **One-shot semantics:** Each address is processed exactly once:
@@ -182,8 +182,8 @@ Earlier versions proactively NOP'd the CALL instruction following a patched load
 | Scenario | Handler Behavior |
 |----------|-----------------|
 | Crash outside game module | Passed through (Gate: game module check) |
-| HMD pointer is not null | Passed through (Gate 5) |
-| Verified as non-XR by trace/stack walk | Passed through |
+| HMD pointer is not null | Passed through (Gate 1) |
+| Verified as non-XR by backward trace | Passed through |
 | Non-AV exception (stack overflow, heap corruption) | Logged and passed through (Gate 0) |
 | AV in game module while HMD is null, but genuine bug | Potentially caught by heuristic — risk bounded by 128-patch cap |
 
@@ -250,7 +250,7 @@ See [VEH Iteration History](veh-iteration-history.md) for a detailed record of a
 
 ## File Location
 
-Handler code: `src/mods/vr/FFakeStereoRenderingHook.cpp`, starting at the `AddVectoredExceptionHandler` call (approximately line 3830).
+Handler code: `src/mods/vr/FFakeStereoRenderingHook.cpp`, starting at the `AddVectoredExceptionHandler` call (approximately line 4168 for the enhanced handler).
 
 ## Dependencies
 
