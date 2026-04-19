@@ -154,8 +154,8 @@ float4 main(PSInput input) : SV_Target
     if (EnableLevels)
     {
         OutputColor = pow(
-            abs(((InputColor + (ColorRangeShift * ColorRangeShiftSw)) - InputBlackPoint)
-                / (InputWhitePoint - InputBlackPoint)),
+            max(((InputColor + (ColorRangeShift * ColorRangeShiftSw)) - InputBlackPoint)
+                / (InputWhitePoint - InputBlackPoint), 0.0),
             InputGamma
         ) * (OutputWhitePoint - OutputBlackPoint) + OutputBlackPoint;
     }
@@ -425,6 +425,7 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("LevelsPlus Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", LEVELSPLUS_VERSION);
+            ImGui::TextWrapped("Fix grey/washed-out blacks. Remaps black/white points so darks are actually dark. Start here.");
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);

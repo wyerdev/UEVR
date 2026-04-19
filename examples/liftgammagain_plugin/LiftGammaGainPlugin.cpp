@@ -232,6 +232,7 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Lift Gamma Gain", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", LGG_VERSION);
+            ImGui::TextWrapped("Fine-tune shadows, midtones, and highlights separately per RGB channel.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##LGG", &m_enabled);
             changed |= ImGui::SliderFloat3("Lift (Shadows)", m_lift, 0.0f, 2.0f, "%.2f");

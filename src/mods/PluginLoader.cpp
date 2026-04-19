@@ -2390,8 +2390,55 @@ void PluginLoader::on_present() {
     }
 }
 
+// D3D11 pipeline state objects — created once, bound before every plugin
+// dispatch so plugins inherit a known-good baseline regardless of what
+// state the UE renderer left on the immediate context.
+static Microsoft::WRL::ComPtr<ID3D11RasterizerState>   s_plugin_rasterizer;
+static Microsoft::WRL::ComPtr<ID3D11DepthStencilState> s_plugin_depth_stencil;
+static Microsoft::WRL::ComPtr<ID3D11BlendState>        s_plugin_blend;
+static bool s_plugin_dx11_state_ready = false;
+
+static bool ensure_plugin_dx11_state(ID3D11Device* device) {
+    if (s_plugin_dx11_state_ready) return true;
+    if (!device) return false;
+
+    D3D11_RASTERIZER_DESC rd{};
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;
+    rd.DepthClipEnable = TRUE;
+    rd.ScissorEnable = FALSE;
+    if (FAILED(device->CreateRasterizerState(&rd, &s_plugin_rasterizer))) return false;
+
+    D3D11_DEPTH_STENCIL_DESC dd{};
+    dd.DepthEnable = FALSE;
+    dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    dd.StencilEnable = FALSE;
+    if (FAILED(device->CreateDepthStencilState(&dd, &s_plugin_depth_stencil))) return false;
+
+    D3D11_BLEND_DESC bd{};
+    bd.RenderTarget[0].BlendEnable = FALSE;
+    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    if (FAILED(device->CreateBlendState(&bd, &s_plugin_blend))) return false;
+
+    s_plugin_dx11_state_ready = true;
+    return true;
+}
+
+static void bind_plugin_dx11_state(ID3D11DeviceContext* ctx) {
+    ctx->RSSetState(s_plugin_rasterizer.Get());
+    ctx->OMSetDepthStencilState(s_plugin_depth_stencil.Get(), 0);
+    float blend_factor[4] = {0, 0, 0, 0};
+    ctx->OMSetBlendState(s_plugin_blend.Get(), blend_factor, 0xFFFFFFFF);
+}
+
 void PluginLoader::on_device_reset() {
     std::shared_lock _{m_api_cb_mtx};
+
+    // Release framework-managed D3D11 state objects — they hold refs to the old device.
+    s_plugin_rasterizer.Reset();
+    s_plugin_depth_stencil.Reset();
+    s_plugin_blend.Reset();
+    s_plugin_dx11_state_ready = false;
 
     for (auto&& cb : m_on_device_reset_cbs) {
         try {
@@ -2404,6 +2451,21 @@ void PluginLoader::on_device_reset() {
 
 void PluginLoader::on_pre_render_vr_framework_dx11() {
     std::shared_lock _{m_api_cb_mtx};
+
+    // Establish clean D3D11 state before dispatching to plugins.
+    // UE5 games can leave scissor test, depth test, or exotic blend modes
+    // active on the immediate context, which breaks fullscreen shader draws.
+    if (auto& hook = g_framework->get_d3d11_hook(); hook != nullptr) {
+        if (auto* device = hook->get_device(); device != nullptr) {
+            if (ensure_plugin_dx11_state(device)) {
+                Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx;
+                device->GetImmediateContext(&ctx);
+                if (ctx) {
+                    bind_plugin_dx11_state(ctx.Get());
+                }
+            }
+        }
+    }
 
     for (auto&& cb : m_on_pre_render_vr_framework_dx11_cbs) {
         try {

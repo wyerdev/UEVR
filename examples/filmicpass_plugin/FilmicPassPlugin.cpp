@@ -289,7 +289,9 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Filmic Pass Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", FP_VERSION); bool changed = false;
+            ImGui::TextDisabled("v%s", FP_VERSION);
+            ImGui::TextWrapped("Full cinematic color processing: sigmoid curves, bleach bypass, fade, saturation, and per-channel gamma.");
+            bool changed = false;
             changed |= ImGui::Checkbox("Enabled##FP", &m_enabled);
             changed |= ImGui::SliderFloat("Strength##FP", &m_strength, 0.05f, 1.5f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Strength of the color curve altering");

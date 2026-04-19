@@ -191,7 +191,9 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("DPX Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", DPX_VERSION); bool changed = false;
+            ImGui::TextDisabled("v%s", DPX_VERSION);
+            ImGui::TextWrapped("Emulates Cineon film stock. Gives a warm, cinematic color shift with adjustable strength.");
+            bool changed = false;
             changed |= ImGui::Checkbox("Enabled##DPX", &m_enabled);
             changed |= ImGui::SliderFloat3("RGB Curve", m_rgb_curve, 1.0f, 15.0f, "%.1f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cineon curve steepness per channel");
