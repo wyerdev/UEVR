@@ -4307,10 +4307,11 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             }
         }
 
-        // Fast path: temporary fixup cache for transition and dynamic-code addresses.
-        // These can't be permanently patched (transition: code is correct normally;
-        // dynamic: heap memory may be freed). Cache the decoded info for fast
-        // repeat handling without full re-analysis.
+        // Fast path: temporary fixup cache for dynamic-code addresses.
+        // These can't be permanently patched (heap memory may be freed/relocated).
+        // Cache the decoded info for fast repeat handling without full re-analysis.
+        // Note: transition crashes are NOT cached — they re-analyze each time
+        // because the code is valid between transitions.
         struct TempFixupInfo {
             uint8_t length;
             bool has_reg_dest;
@@ -4638,7 +4639,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
                 veh_stats::transition_cascade_start_tick.store(GetTickCount64(), std::memory_order_relaxed);
             }
         } else if (temporary_fixup) {
-            // Cache for fast repeat handling (transition + dynamic only)
+            // Cache for fast repeat handling (dynamic-code only)
             std::lock_guard<std::mutex> lock{veh_mtx};
             constexpr size_t MAX_TEMP_FIXUP_ENTRIES = 256;
             if (temp_fixup_cache.size() < MAX_TEMP_FIXUP_ENTRIES) {

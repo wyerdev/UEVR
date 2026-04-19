@@ -88,7 +88,7 @@ Exception occurs
 │   → CONTINUE_SEARCH (instant)           │
 ├─────────────────────────────────────────┤
 │ Gate 3c: temp_fixup_cache               │
-│   Transition/dynamic fixup cached?      │
+│   Dynamic-code fixup cached?            │
 │   → Zero reg, advance RIP,             │
 │     CONTINUE_EXECUTION (fast path)      │
 └────────────────┬────────────────────────┘
@@ -189,7 +189,8 @@ Earlier versions proactively NOP'd the CALL instruction following a patched load
 5. **One-shot semantics:** Each address is processed exactly once:
    - Permanently patched addresses → `handled_addresses` (CONTINUE_SEARCH, code rewritten)
    - Rejected addresses → `rejected_addresses` (CONTINUE_SEARCH, instant)
-   - Transition/dynamic addresses → `temp_fixup_cache` (CONTINUE_EXECUTION, fast path)
+   - Transition addresses → re-analyzed each time (code is valid between transitions)
+   - Dynamic-code addresses → `temp_fixup_cache` (CONTINUE_EXECUTION, fast path)
    - Validation failures → `handled_addresses` (CONTINUE_SEARCH)
 
 ### What About Real Crashes?
@@ -212,7 +213,7 @@ Real crashes will still propagate normally, with one caveat: during active XR nu
 - **No per-frame cost:** Permanently patched addresses never fault again (code is rewritten)
 - **Once-per-address deep analysis:** Each crash site goes through full decode/trace/heuristic once
 - **Rejected addresses bypass instantly:** Separate `rejected_addresses` set — no re-analysis
-- **Temp fixups are fast:** Transition/dynamic addresses cached in `temp_fixup_cache`, ~3μs per fault
+- **Temp fixups are fast:** Dynamic-code addresses cached in `temp_fixup_cache`, ~3μs per fault
 - **No sync disk I/O on success path:** `spdlog::flush()` removed from success path to prevent stutter
 - **Step A only:** ~20 instruction backward scan (µs), no stack walk
 - **Typical session:** 8–15 permanent patches, all applied in the first few seconds of gameplay

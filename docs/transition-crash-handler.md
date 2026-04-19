@@ -97,8 +97,7 @@ Exception occurs
         ┌───────▼──────────────────┐
         │  TEMPORARY FIXUP:        │
         │  Zero dest register,     │
-        │  advance RIP,            │
-        │  skip following CALL     │
+        │  advance RIP             │
         │  (NO permanent patches)  │
         │  (NO address caching)    │
         └───────┬──────────────────┘
@@ -210,12 +209,7 @@ Before: cmp [rax+0x10], rbx   ; rax is null, access violation
 After:  CONTEXT.Rip += len    ; skip the instruction entirely
 ```
 
-If the next instruction is a CALL (vtable dispatch on the now-null value), it's also skipped:
-```
-Before: mov rax, [rcx+0x38]   ; null deref
-        call [rax+0x20]        ; would deref the zeroed rax
-After:  CONTEXT.Rip = past both instructions
-```
+Each CALL that dereferences a zeroed register will trigger its own VEH exception and be handled individually.
 
 ## VEH Stats Namespace
 
@@ -265,7 +259,7 @@ A `SetUnhandledExceptionFilter` in `Framework.cpp` writes a stack-based (no heap
 
 | File | Written By | When |
 |------|-----------|------|
-| `veh_crash_dump.txt` | VEH handler | Deep analysis rejects a crash |
+| `veh_crash_dump.txt` | VEH handler | Deep analysis rejects a crash, or a fatal non-AV exception is encountered |
 | `crash.dmp` | `SetUnhandledExceptionFilter` (upstream `ExceptionHandler.cpp`) | Exception escapes all handlers (MiniDumpWriteDump) |
 | `unhandled_crash.txt` | `SetUnhandledExceptionFilter` (fork, Framework constructor) | Only during early init before `setup_exception_handler()` replaces it |
 
