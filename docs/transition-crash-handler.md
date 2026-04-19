@@ -266,8 +266,8 @@ A `SetUnhandledExceptionFilter` in `Framework.cpp` writes a stack-based (no heap
 | File | Written By | When |
 |------|-----------|------|
 | `veh_crash_dump.txt` | VEH handler | Deep analysis rejects a crash |
-| `unhandled_crash.txt` | SetUnhandledExceptionFilter | Exception escapes all handlers |
-| `crash.dmp` | VEH handler | MiniDumpWriteDump for post-mortem |
+| `crash.dmp` | `SetUnhandledExceptionFilter` (upstream `ExceptionHandler.cpp`) | Exception escapes all handlers (MiniDumpWriteDump) |
+| `unhandled_crash.txt` | `SetUnhandledExceptionFilter` (fork, Framework constructor) | Only during early init before `setup_exception_handler()` replaces it |
 
 ## Performance Impact
 
