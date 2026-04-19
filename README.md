@@ -13,8 +13,10 @@ Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix
 
 ## Crash Fixes
 
-- Fix crashes in Creatures of Ava — [technical details](docs/native-stereo-crash-handler.md)
+- Fix the main Native Stereo crash in Creatures of Ava and improve D3D12 load/transition resilience — [technical details](docs/native-stereo-crash-handler.md) and [load-transition notes](docs/ATTEMPT_3_LOAD_CRASH_FIX_PLAN.md)
 - Fix crashes on death in Returnal — [technical details](docs/transition-crash-handler.md)
+
+Rare cutscene or 3P transition crashes may still remain in some games. The D3D12 work in this fork is defensive hardening, not a blanket fix for every transition failure mode.
 
 ## UEVR Plugins: ReShade Post-Processing Shaders
 - Fix washed-out colors and grey blacks

@@ -590,13 +590,30 @@ private:
     const ModToggle::Ptr m_asynchronous_scan{ ModToggle::create("VR_AsynchronousScan", true) };
     // Off by default because it can cause issues with some games
     const ModToggle::Ptr m_use_fmalloc_scene_view_extensions{ ModToggle::create("VR_UseFMallocSceneViewExtensions", false) };
+    // Crash handler mode for XR null-dereference patches. Requires restart to take effect.
+    //   0 = Original (Nightly) — praydog's original simple handler (default)
+    //   1 = Enhanced (Experimental) — heuristic patching, transition detection, no periodic stats logging
+    //   2 = Enhanced (Experimental, Debug) — same + periodic VEH stats in log every ~5s
+    //   3 = Disabled — no VEH handler at all (game will crash on XR null derefs)
+    static constexpr int CRASH_HANDLER_ORIGINAL = 0;
+    static constexpr int CRASH_HANDLER_ENHANCED = 1;
+    static constexpr int CRASH_HANDLER_ENHANCED_DEBUG = 2;
+    static constexpr int CRASH_HANDLER_DISABLED = 3;
+    static const inline std::vector<std::string> s_crash_handler_mode_names{
+        "Original (Nightly)",
+        "Enhanced (Experimental)",
+        "Enhanced (Experimental, Debug)",
+        "Disabled",
+    };
+    const ModCombo::Ptr m_crash_handler_mode{ ModCombo::create("VR_CrashHandlerMode", s_crash_handler_mode_names, CRASH_HANDLER_ORIGINAL) };
 
     void setup_options() {
         m_options = {
             *m_recreate_textures_on_reset,
             *m_frame_delay_compensation,
             *m_asynchronous_scan,
-            *m_use_fmalloc_scene_view_extensions
+            *m_use_fmalloc_scene_view_extensions,
+            *m_crash_handler_mode
         };
     }
 
