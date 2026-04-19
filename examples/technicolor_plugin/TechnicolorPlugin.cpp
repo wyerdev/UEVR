@@ -265,6 +265,7 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Technicolor Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", PLUGIN_VERSION);
+            ImGui::TextWrapped("Emulates 2-strip Technicolor (old Hollywood look). Teal shadows, warm highlights. Use sparingly.");
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled##tech", &m_enabled);

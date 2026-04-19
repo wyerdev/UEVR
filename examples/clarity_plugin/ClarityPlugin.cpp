@@ -273,7 +273,9 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Clarity Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", CL_VERSION); bool changed = false;
+            ImGui::TextDisabled("v%s", CL_VERSION);
+            ImGui::TextWrapped("Local contrast enhancement. Makes textures and details pop without changing colors. Very effective in VR.");
+            bool changed = false;
             changed |= ImGui::Checkbox("Enabled##Clarity", &m_enabled);
             changed |= ImGui::SliderInt("Radius##Clarity", &m_radius, 0, 4);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Higher = larger blur radius for the clarity mask");

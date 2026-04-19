@@ -341,6 +341,7 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Curves Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", CURVES_VERSION);
+            ImGui::TextWrapped("Add contrast using S-curves without clipping highlights or shadows. Multiple curve formulas.");
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);

@@ -305,6 +305,7 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("FakeHDR Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", FAKEHDR_VERSION);
+            ImGui::TextWrapped("Easiest way to make any game look good. Deepens darks and makes colors pop via local tone mapping bloom.");
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);
