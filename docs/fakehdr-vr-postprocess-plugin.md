@@ -1,8 +1,8 @@
 # VR Post-Processing Shaders — Technical Documentation
 
-13 UEVR C++ shaders that apply ReShade-based post-processing effects directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), these shaders modify the UE render target **before** UEVR copies it to VR, so effects are visible in-headset.
+15 UEVR C++ shaders that apply ReShade-based post-processing effects directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), these shaders modify the UE render target **before** UEVR copies it to VR, so effects are visible in-headset.
 
-The plugin architecture, DX11/DX12 rendering pipeline, and UEVR core API changes were designed for FakeHDR (CeeJay.dk's FakeHDR.fx) and are shared by all 13 plugins.
+The plugin architecture, DX11/DX12 rendering pipeline, and UEVR core API changes were designed for FakeHDR (CeeJay.dk's FakeHDR.fx) and are shared by all 15 plugins.
 
 Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and `on_draw_ui`) and several DX12 workarounds for UE's TYPELESS render targets and missing `ALLOW_RENDER_TARGET` flag.
 
@@ -35,6 +35,8 @@ Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and
 |---|--------|----------|--------------|----------------|
 | 10 | FilmGrain2 | FilmGrain2.fx (Martins Upitis) | Photographic film grain overlay | Hide color banding in dark areas (common on VR panels). Keep subtle. |
 | 13 | Clarity | Clarity.fx (Ioxa) | Local contrast enhancement with blend mode selection | Makes textures/details pop without changing colors. **Very effective in VR** where things look flat. |
+| 14 | CAS | CAS.fx (AMD, SLSNe, Marty McFly, CeeJay.dk) | Contrast-adaptive sharpening (FidelityFX) | Per-pixel adaptive sharpening — sharpens flat areas more, high-contrast edges less. No halos. |
+| 15 | LumaSharpen | LumaSharpen.fx (CeeJay.dk) | Unsharp mask in luminance space | Sharpens in luma only to avoid color fringing. 4 sampling patterns, adjustable strength and clamp. |
 
 All plugins share the same architecture:
 - DX11 and DX12 dual-path rendering
@@ -47,10 +49,10 @@ All plugins share the same architecture:
 
 ### Plugin Load Order
 
-Plugins are loaded in DLL name alphabetical order. Numeric prefixes (`01_` through `13_`) ensure:
+Plugins are loaded in DLL name alphabetical order. Numeric prefixes (`01_` through `15_`) ensure:
 - Color correction runs first (01–03)
 - Color grading runs in the middle (04–09, 11–12): Curves → FakeHDR → DPX → Technicolor → Colourfulness → Vibrance → HSL Shift → Filmic Pass
-- Detail & film effects run last (10, 13): FilmGrain2 → Clarity
+- Detail, sharpening & film effects run last (10, 13–15): FilmGrain2 → Clarity → CAS → LumaSharpen
 
 ### Preset System
 
@@ -464,6 +466,8 @@ examples/
     hslshift_plugin/         — HSLShiftPlugin.cpp + 11_HSLShiftShader-LICENSE.txt
     filmicpass_plugin/       — FilmicPassPlugin.cpp + 12_FilmicPassShader-LICENSE.txt
     clarity_plugin/          — ClarityPlugin.cpp + 13_ClarityShader-LICENSE.txt
+    cas_plugin/              — CASPlugin.cpp + 14_CASShader-LICENSE.txt
+    lumasharpen_plugin/      — LumaSharpenPlugin.cpp + 15_LumaSharpenShader-LICENSE.txt
     example_plugin/          — Developer example (not deployed as a shader plugin)
     renderlib/               — Shared render utilities (not deployed)
 
@@ -486,7 +490,7 @@ src/
                 CommandContext.cpp  — SEH-wrapped execute + recover + discard
                 TextureContext.cpp  — update_texture() for in-place heap reuse
 
-cmake.toml                   — All 13 plugin targets with numeric-prefixed OUTPUT_NAMEs
+cmake.toml                   — All 15 plugin targets with numeric-prefixed OUTPUT_NAMEs
 deploy.sh                    — Build deployment script (DLLs + plugins + licenses + presets)
 ```
 
@@ -503,7 +507,7 @@ cmake --build build --config Release
 cmake --build build --config Release --target uevr --clean-first
 ```
 
-Output: `build/Release/01_LevelsPlusShader.dll` through `build/Release/13_ClarityShader.dll`
+Output: `build/Release/01_LevelsPlusShader.dll` through `build/Release/15_LumaSharpenShader.dll`
 
 Deploy plugins + licenses + presets:
 ```bash

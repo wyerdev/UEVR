@@ -62,7 +62,7 @@ Output: `build/Release/05_FakeHDRShader.dll`
 2. Launch the game with UEVR
 3. Open UEVR menu (Insert or L3+R3) → FakeHDR sidebar entry → Enable
 
-This plugin is one of 13 ReShade-ported post-processing plugins. See the [main README](../../README.md) and [technical docs](../../docs/fakehdr-vr-postprocess-plugin.md) for the full suite.
+This plugin is one of 15 ReShade-ported post-processing plugins. See the [main README](../../README.md) and [technical docs](../../docs/fakehdr-vr-postprocess-plugin.md) for the full suite.
 
 ## Credits
 

@@ -260,6 +260,22 @@ headers = ["examples/clarity_plugin/**.hpp", "examples/clarity_plugin/**.h"]
 [target.clarity_plugin.properties]
 OUTPUT_NAME = "13_ClarityShader"
 
+[target.cas_plugin]
+type = "plugin"
+sources = ["examples/cas_plugin/CASPlugin.cpp"]
+headers = ["examples/cas_plugin/**.hpp", "examples/cas_plugin/**.h"]
+
+[target.cas_plugin.properties]
+OUTPUT_NAME = "14_CASShader"
+
+[target.lumasharpen_plugin]
+type = "plugin"
+sources = ["examples/lumasharpen_plugin/LumaSharpenPlugin.cpp"]
+headers = ["examples/lumasharpen_plugin/**.hpp", "examples/lumasharpen_plugin/**.h"]
+
+[target.lumasharpen_plugin.properties]
+OUTPUT_NAME = "15_LumaSharpenShader"
+
 [target.sdk-test]
 type = "shared"
 sources = ["side-projects/sdk-test/**.cpp", "side-projects/sdk-test/**.c"]
