@@ -111,6 +111,15 @@ if defined PRESET_SRC (
     )
 )
 
+:: Copy uninstall script to plugins folder so users can run it from there
+if exist "%SCRIPT_DIR%uninstall-plugins.bat" (
+    copy /Y "%SCRIPT_DIR%uninstall-plugins.bat" "%PLUGIN_DST%\" >nul 2>&1
+    if not errorlevel 1 (
+        echo.
+        echo Uninstaller copied to: %PLUGIN_DST%\uninstall-plugins.bat
+    )
+)
+
 echo.
 echo ============================================
 if !ERRORS! GTR 0 (

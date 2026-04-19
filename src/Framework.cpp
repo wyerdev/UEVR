@@ -40,7 +40,7 @@ using namespace std::literals;
 // Only accessed from hook_monitor (monitor thread) and on_post_present callbacks (render thread).
 // Set to 0: after init, NEVER rehook. The DXGI vtable hooks persist even when Present
 // isn't called (game transitions, death screens, loading). Rehooking is destructive
-// (creates dummy devices, tears down Streamline/DLSSFG interposer hooks) and causes
+// (creates dummy devices, tears down Streamline swapchain interposer hooks) and causes
 // fatal errors during game transitions that temporarily stop rendering.
 static uint32_t s_consecutive_rehook_attempts{0};
 static constexpr uint32_t MAX_POST_INIT_REHOOK_ATTEMPTS{0};

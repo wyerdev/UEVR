@@ -2078,7 +2078,7 @@ std::filesystem::path PluginLoader::get_local_presets_dir() {
 std::filesystem::path PluginLoader::get_global_presets_dir() {
     wchar_t app_data_path[MAX_PATH]{};
     SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
-    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "uevr" / "data" / "plugins" / "presets";
+    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "UEVR" / "data" / "plugins" / "presets";
     std::filesystem::create_directories(dir);
     return dir;
 }

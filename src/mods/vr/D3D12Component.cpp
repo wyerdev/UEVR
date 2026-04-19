@@ -25,6 +25,44 @@ constexpr auto ENGINE_SRC_DEPTH = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOUR
 constexpr auto ENGINE_SRC_COLOR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
 namespace vrmod {
+namespace {
+struct NativeRtTracking {
+    ID3D12Resource* scene_rt{};
+    ID3D12Resource* scene_capture_rt{};
+};
+
+static NativeRtTracking g_native_rt_tracking{};
+
+void reset_native_rt_tracking() noexcept {
+    g_native_rt_tracking = {};
+}
+
+ID3D12Resource* safe_get_native_resource(FRHITexture2D* texture) noexcept {
+    if (texture == nullptr) {
+        return nullptr;
+    }
+
+    __try {
+        return (ID3D12Resource*)texture->get_native_resource();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+bool safe_get_resource_desc(ID3D12Resource* resource, D3D12_RESOURCE_DESC& out_desc) noexcept {
+    if (resource == nullptr) {
+        return false;
+    }
+
+    __try {
+        out_desc = resource->GetDesc();
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+}
+
 vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     if (m_force_reset || m_last_afr_state != vr->is_using_afr()) {
         if (!setup()) {
@@ -37,6 +75,40 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     }
 
     auto& hook = g_framework->get_d3d12_hook();
+    const auto& ffsr = VR::get()->m_fake_stereo_hook;
+
+    auto invalidate_rt_state = [&](const char* reason) {
+        SPDLOG_WARNING_EVERY_N_SEC(1, "[VR] Invalidating D3D12 render target state: {}", reason);
+        m_game_tex.reset();
+        m_game_ui_tex.reset();
+        m_scene_capture_tex.reset();
+        m_last_checked_native = nullptr;
+        m_force_reset = true;
+
+        if (ffsr != nullptr) {
+            ffsr->set_should_recreate_textures(true);
+        }
+    };
+
+    auto invalidate_ui_state = [&](const char* reason) {
+        SPDLOG_WARNING_EVERY_N_SEC(1, "[VR] Invalidating D3D12 UI state: {}", reason);
+        m_game_ui_tex.reset();
+        m_last_checked_native = nullptr;
+        m_force_reset = true;
+
+        if (ffsr != nullptr) {
+            ffsr->set_should_recreate_textures(true);
+        }
+    };
+
+    auto invalidate_scene_capture_state = [&](const char* reason) {
+        SPDLOG_WARNING_EVERY_N_SEC(1, "[VR] Invalidating D3D12 scene capture state: {}", reason);
+        m_scene_capture_tex.reset();
+
+        if (ffsr != nullptr) {
+            ffsr->set_should_recreate_textures(true);
+        }
+    };
 
     hook->set_next_present_interval(0); // disable vsync for vr
     
@@ -52,10 +124,32 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     // get back buffer
     ComPtr<ID3D12Resource> backbuffer{};
     ComPtr<ID3D12Resource> real_backbuffer{};
-    auto ue4_texture = VR::get()->m_fake_stereo_hook->get_render_target_manager()->get_render_target();
+    auto ue4_texture = ffsr->get_render_target_manager()->get_render_target();
 
     if (ue4_texture != nullptr) {
-        backbuffer = (ID3D12Resource*)ue4_texture->get_native_resource();
+        backbuffer = safe_get_native_resource(ue4_texture);
+
+        if (backbuffer == nullptr) {
+            invalidate_rt_state("UE render target native resource is null or faulted");
+            return vr::VRCompositorError_None;
+        }
+    }
+
+    const auto native_scene_rt = backbuffer.Get();
+
+    if (native_scene_rt != nullptr &&
+        m_game_tex.texture.Get() != nullptr &&
+        g_native_rt_tracking.scene_rt != nullptr &&
+        native_scene_rt != g_native_rt_tracking.scene_rt)
+    {
+        SPDLOG_INFO_EVERY_N_SEC(1, "[VR] UE render target native resource changed, forcing D3D12 rebuild");
+        g_native_rt_tracking.scene_rt = native_scene_rt;
+        invalidate_rt_state("UE render target native resource changed");
+        return vr::VRCompositorError_None;
+    }
+
+    if (native_scene_rt != nullptr) {
+        g_native_rt_tracking.scene_rt = native_scene_rt;
     }
 
     if (FAILED(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&real_backbuffer)))) {
@@ -91,8 +185,8 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         runtime->fix_frame();
     }
 
-    const auto& ffsr = VR::get()->m_fake_stereo_hook;
     const auto ui_target = ffsr->get_render_target_manager()->get_ui_target();
+    const auto ui_target_native = safe_get_native_resource(ui_target);
 
     const auto frame_count = vr->m_render_frame_count;
 
@@ -105,7 +199,11 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
         heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
 
-        auto desc = backbuffer->GetDesc();
+        D3D12_RESOURCE_DESC desc{};
+        if (!safe_get_resource_desc(backbuffer.Get(), desc)) {
+            invalidate_rt_state("backbuffer descriptor faulted");
+            return vr::VRCompositorError_None;
+        }
         desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         desc.Flags &= ~D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
 
@@ -149,7 +247,22 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
 
     if (vr->is_native_stereo_fix_enabled()) {
         const auto scene_capture = ffsr->get_render_target_manager()->get_scene_capture_render_target();
-        const auto scene_capture_rt = scene_capture != nullptr ? (ID3D12Resource*)scene_capture->get_native_resource() : nullptr;
+        const auto scene_capture_rt = safe_get_native_resource(scene_capture);
+
+        if (scene_capture != nullptr && scene_capture_rt == nullptr) {
+            invalidate_scene_capture_state("scene capture native resource is null or faulted");
+        }
+
+        if (scene_capture_rt != nullptr &&
+            m_scene_capture_tex.texture.Get() != nullptr &&
+            g_native_rt_tracking.scene_capture_rt != nullptr &&
+            scene_capture_rt != g_native_rt_tracking.scene_capture_rt)
+        {
+            SPDLOG_INFO_EVERY_N_SEC(1, "[VR] Scene capture native resource changed, rebuilding scene capture state");
+            invalidate_scene_capture_state("scene capture native resource changed");
+        }
+
+        g_native_rt_tracking.scene_capture_rt = scene_capture_rt;
 
         if (scene_capture_rt != nullptr && m_scene_capture_tex.texture.Get() != scene_capture_rt) {
             spdlog::info("[VR] Setting up scene capture texture as reference to original");
@@ -219,9 +332,14 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     }
 
     if (ui_target != nullptr) {
-        if (m_game_ui_tex.texture.Get() != ui_target->get_native_resource()) {
+        if (ui_target_native == nullptr) {
+            invalidate_ui_state("UI native resource is null or faulted");
+            return vr::VRCompositorError_None;
+        }
+
+        if (m_game_ui_tex.texture.Get() != ui_target_native) {
             if (!m_game_ui_tex.setup(device, 
-                (ID3D12Resource*)ui_target->get_native_resource(), 
+                ui_target_native,
                 DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM,
                 L"Game UI Texture"))
             {
@@ -232,12 +350,15 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
 
         // Recreate UI texture if needed
         if (!vr->is_extreme_compatibility_mode_enabled()) {
-            const auto native = (ID3D12Resource*)ui_target->get_native_resource();
-            const auto is_same_native = native == m_last_checked_native;
-            m_last_checked_native = native;
+            const auto is_same_native = ui_target_native == m_last_checked_native;
+            m_last_checked_native = ui_target_native;
 
-            if (native != nullptr && !is_same_native) {
-                const auto desc = native->GetDesc();
+            if (!is_same_native) {
+                D3D12_RESOURCE_DESC desc{};
+                if (!safe_get_resource_desc(ui_target_native, desc)) {
+                    invalidate_ui_state("UI resource descriptor faulted");
+                    return vr::VRCompositorError_None;
+                }
 
                 if (runtime->is_openxr()) {
                     if (auto it = vr->m_openxr->swapchains.find((uint32_t)runtimes::OpenXR::SwapchainIndex::UI);
@@ -259,9 +380,6 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                         ffsr->set_should_recreate_textures(true);
                     }
                 }
-            } else if (native == nullptr) {
-                spdlog::error("[VR] Recreating UI texture because native resource is null");
-                ffsr->set_should_recreate_textures(true);
             }
         }
     } else {
@@ -369,7 +487,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
             if (is_2d_screen) {
                 m_openvr.ui_tex.commands.copy(m_2d_screen_tex[0].texture.Get(), m_openvr.ui_tex.texture.Get(), ENGINE_SRC_COLOR);
             } else if (ui_target != nullptr) {
-                m_openvr.ui_tex.commands.copy((ID3D12Resource*)ui_target->get_native_resource(), m_openvr.ui_tex.texture.Get(), ENGINE_SRC_COLOR);
+                m_openvr.ui_tex.commands.copy(ui_target_native, m_openvr.ui_tex.texture.Get(), ENGINE_SRC_COLOR);
             }
         } else if (is_2d_screen) {
             m_openvr.ui_tex.commands.copy(m_2d_screen_tex[0].texture.Get(), m_openvr.ui_tex.texture.Get(), ENGINE_SRC_COLOR);
@@ -387,7 +505,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                     m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::UI_RIGHT, m_2d_screen_tex[1].texture.Get(), std::nullopt, clear_rt, ENGINE_SRC_COLOR);
                 }
             } else if (ui_target != nullptr) {
-                m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::UI, (ID3D12Resource*)ui_target->get_native_resource(), draw_2d_view, clear_rt, ENGINE_SRC_COLOR);
+                m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::UI, ui_target_native, draw_2d_view, clear_rt, ENGINE_SRC_COLOR);
             }
 
             auto fw_rt = g_framework->get_rendertarget_d3d12();
@@ -1074,7 +1192,7 @@ void D3D12Component::end_plugin_pre_render() {
         if (ffsr != nullptr) {
             if (auto rtm = ffsr->get_render_target_manager(); rtm != nullptr) {
                 if (auto rt = rtm->get_render_target(); rt != nullptr) {
-                    if (rt->get_native_resource() != nullptr) {
+                    if (safe_get_native_resource(rt) != nullptr) {
                         rt_valid = true;
                     }
                 }
@@ -1148,6 +1266,8 @@ void D3D12Component::restore_plugin_rt(ID3D12Resource* rt) {
 
 void D3D12Component::on_reset(VR* vr) {
     m_force_reset = true;
+    m_last_checked_native = nullptr;
+    reset_native_rt_tracking();
 
     // Drain plugin pre-render work before destroying resources.
     m_plugin_pre_render_ctx.reset();
@@ -1197,11 +1317,15 @@ void D3D12Component::on_reset(VR* vr) {
         bool needs_depth_resize = false;
 
         if (scene_depth_tex != nullptr) {
-            const auto desc = scene_depth_tex->GetDesc();
-            needs_depth_resize = vr->m_openxr->needs_depth_resize(desc.Width, desc.Height);
+            D3D12_RESOURCE_DESC desc{};
+            if (safe_get_resource_desc(scene_depth_tex.Get(), desc)) {
+                needs_depth_resize = vr->m_openxr->needs_depth_resize(desc.Width, desc.Height);
 
-            if (needs_depth_resize) {
-                spdlog::info("[VR] SceneDepthZ needs resize ({}x{})", desc.Width, desc.Height);
+                if (needs_depth_resize) {
+                    spdlog::info("[VR] SceneDepthZ needs resize ({}x{})", desc.Width, desc.Height);
+                }
+            } else {
+                spdlog::warn("[VR] SceneDepthZ descriptor faulted during reset");
             }
         }
 
@@ -1245,7 +1369,7 @@ bool D3D12Component::setup() {
     auto ue4_texture = vr->m_fake_stereo_hook->get_render_target_manager()->get_render_target();
 
     if (ue4_texture != nullptr) {
-        backbuffer = (ID3D12Resource*)ue4_texture->get_native_resource();
+        backbuffer = safe_get_native_resource(ue4_texture);
     }
 
     ComPtr<ID3D12Resource> real_backbuffer{};
@@ -1267,9 +1391,17 @@ bool D3D12Component::setup() {
         m_graphics_memory = std::make_unique<DirectX::DX12::GraphicsMemory>(device);
     }
 
-    const auto real_backbuffer_desc = real_backbuffer->GetDesc();
+    D3D12_RESOURCE_DESC real_backbuffer_desc{};
+    if (!safe_get_resource_desc(real_backbuffer.Get(), real_backbuffer_desc)) {
+        spdlog::error("[VR] Failed to get real back buffer descriptor (D3D12).");
+        return false;
+    }
 
-    auto backbuffer_desc = backbuffer->GetDesc();
+    D3D12_RESOURCE_DESC backbuffer_desc{};
+    if (!safe_get_resource_desc(backbuffer.Get(), backbuffer_desc)) {
+        spdlog::error("[VR] Failed to get back buffer descriptor (D3D12).");
+        return false;
+    }
 
     spdlog::info("[VR] D3D12 Real backbuffer width: {}, height: {}, format: {}", real_backbuffer_desc.Width, real_backbuffer_desc.Height, (uint32_t)real_backbuffer_desc.Format);
 
@@ -1459,7 +1591,7 @@ std::optional<std::string> D3D12Component::OpenXR::create_swapchains() {
         auto ue4_texture = vr->m_fake_stereo_hook->get_render_target_manager()->get_render_target();
 
         if (ue4_texture != nullptr) {
-            backbuffer = (ID3D12Resource*)ue4_texture->get_native_resource();
+            backbuffer = safe_get_native_resource(ue4_texture);
             has_actual_vr_backbuffer = backbuffer != nullptr;
         }
     }

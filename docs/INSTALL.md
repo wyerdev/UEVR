@@ -48,7 +48,7 @@ Instead of `install-plugins.bat`, you can copy files manually:
 
 ## Uninstalling
 
-Run `uninstall-plugins.bat` from the release folder or from `%APPDATA%\UnrealVRMod\UEVR\plugins\`. Removes all shader DLLs, licenses, built-in presets, **user-saved presets, per-game shader settings, and active preset selections**.
+Run `uninstall-plugins.bat` from the release folder or from `%APPDATA%\UnrealVRMod\UEVR\plugins\` (copied there by the installer). Removes all shader DLLs, licenses, built-in presets, **user-saved presets, per-game shader settings, and active preset selections**.
 
 ## Updating
 
