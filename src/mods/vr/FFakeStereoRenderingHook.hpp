@@ -595,13 +595,17 @@ private:
     //   1 = Enhanced (Experimental) — heuristic patching, transition detection, no periodic stats logging
     //   2 = Enhanced (Experimental, Debug) — same + periodic VEH stats in log every ~5s
     //   3 = Disabled — no VEH handler at all (game will crash on XR null derefs)
+    static constexpr int CRASH_HANDLER_ORIGINAL = 0;
+    static constexpr int CRASH_HANDLER_ENHANCED = 1;
+    static constexpr int CRASH_HANDLER_ENHANCED_DEBUG = 2;
+    static constexpr int CRASH_HANDLER_DISABLED = 3;
     static const inline std::vector<std::string> s_crash_handler_mode_names{
         "Original (Nightly)",
         "Enhanced (Experimental)",
         "Enhanced (Experimental, Debug)",
         "Disabled",
     };
-    const ModCombo::Ptr m_crash_handler_mode{ ModCombo::create("VR_CrashHandlerMode", s_crash_handler_mode_names, 0) };
+    const ModCombo::Ptr m_crash_handler_mode{ ModCombo::create("VR_CrashHandlerMode", s_crash_handler_mode_names, CRASH_HANDLER_ORIGINAL) };
 
     void setup_options() {
         m_options = {

@@ -10,6 +10,10 @@
 #include <vector>
 
 namespace uevr {
+// Thread-local nesting counter for active script calls on the current thread.
+// The VEH handler consults this to distinguish access violations triggered by
+// script execution from legitimate XR/runtime crashes. This must be modified
+// only via ScopedScriptCall so nested script calls remain correctly balanced.
 extern thread_local uint32_t g_is_in_script_call;
 
 struct ScopedScriptCall {

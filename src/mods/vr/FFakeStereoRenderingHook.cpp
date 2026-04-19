@@ -243,8 +243,8 @@ void FFakeStereoRenderingHook::on_frame() {
     veh_stats::initialize_crash_dump_path();
 
     // Periodically dump VEH handler stats (every ~5 seconds based on frame count)
-    // Only in Enhanced (Experimental, Debug) mode — mode 2.
-    if (m_crash_handler_mode->value() == 2) {
+    // Only in Enhanced (Experimental, Debug) mode.
+    if (m_crash_handler_mode->value() == CRASH_HANDLER_ENHANCED_DEBUG) {
         static uint32_t frame_counter = 0;
         if (++frame_counter >= 300) { // ~5s at 60fps
             frame_counter = 0;
@@ -4032,12 +4032,12 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
         s_veh_registered = true;
         const auto crash_handler_mode = m_crash_handler_mode->value();
 
-        if (crash_handler_mode == 3) {
+        if (crash_handler_mode == CRASH_HANDLER_DISABLED) {
             // --- DISABLED ---
             spdlog::warn("[VR] Crash handler DISABLED (VR_CrashHandlerMode=Disabled). "
                          "No VEH handler registered. XR null-dereference crashes will NOT be caught. "
                          "Restart to change mode.");
-        } else if (crash_handler_mode == 0) {
+        } else if (crash_handler_mode == CRASH_HANDLER_ORIGINAL) {
             // --- PRAYDOG'S ORIGINAL VEH HANDLER (upstream/master) ---
             // Simple: check previous instruction for HMD offset, NOP the faulting instruction + following CALL.
             spdlog::info("[VR] Using original (nightly) VEH crash handler. "
@@ -4161,10 +4161,10 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
 
                 return EXCEPTION_CONTINUE_SEARCH;
             });
-        } else { // crash_handler_mode == 1 (Enhanced Experimental) or 2 (Enhanced Experimental Debug)
+        } else { // CRASH_HANDLER_ENHANCED or CRASH_HANDLER_ENHANCED_DEBUG
             // --- ENHANCED (EXPERIMENTAL) VEH HANDLER ---
             spdlog::info("[VR] Registering enhanced (experimental) VEH crash handler (mode={}). Restart to switch mode.",
-                         crash_handler_mode == 2 ? "Enhanced Experimental Debug" : "Enhanced Experimental");
+                         crash_handler_mode == CRASH_HANDLER_ENHANCED_DEBUG ? "Enhanced Experimental Debug" : "Enhanced Experimental");
             AddVectoredExceptionHandler(1, [](PEXCEPTION_POINTERS exception) -> LONG {
         static std::vector<Patch::Ptr> xrsystem_patches{};
         static std::unordered_set<uintptr_t> handled_addresses{};
