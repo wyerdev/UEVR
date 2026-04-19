@@ -9,7 +9,7 @@ echo.
 set "UEVR_DATA=%APPDATA%\UnrealVRMod"
 set "PLUGIN_DIR=%UEVR_DATA%\UEVR\plugins"
 set "PRESET_DIR=%UEVR_DATA%\UEVR\data\plugins\shipping_presets"
-set "USER_PRESET_DIR=%UEVR_DATA%\uevr\data\plugins\presets"
+set "USER_PRESET_DIR=%UEVR_DATA%\UEVR\data\plugins\presets"
 
 :: Detect if we're running from inside the plugins folder already
 set "SCRIPT_DIR=%~dp0"

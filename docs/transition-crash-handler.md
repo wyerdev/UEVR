@@ -90,15 +90,14 @@ Exception occurs
         ┌───────▼──────────────────┐
         │  Deep Analysis:          │
         │  Decode instruction,     │
-        │  trace registers,        │
-        │  stack walk              │
+        │  backward register trace │
+        │  (20 instr), heuristic   │
         └───────┬──────────────────┘
                 │
         ┌───────▼──────────────────┐
         │  TEMPORARY FIXUP:        │
         │  Zero dest register,     │
-        │  advance RIP,            │
-        │  skip following CALL     │
+        │  advance RIP             │
         │  (NO permanent patches)  │
         │  (NO address caching)    │
         └───────┬──────────────────┘
@@ -210,12 +209,7 @@ Before: cmp [rax+0x10], rbx   ; rax is null, access violation
 After:  CONTEXT.Rip += len    ; skip the instruction entirely
 ```
 
-If the next instruction is a CALL (vtable dispatch on the now-null value), it's also skipped:
-```
-Before: mov rax, [rcx+0x38]   ; null deref
-        call [rax+0x20]        ; would deref the zeroed rax
-After:  CONTEXT.Rip = past both instructions
-```
+Each CALL that dereferences a zeroed register will trigger its own VEH exception and be handled individually.
 
 ## VEH Stats Namespace
 
@@ -223,12 +217,13 @@ After:  CONTEXT.Rip = past both instructions
 
 | Counter | Type | Purpose |
 |---------|------|---------|
+| `total_veh_invocations` | `atomic<uint64_t>` | All exceptions entering the VEH handler (before any filtering) |
 | `total_av_count` | `atomic<uint64_t>` | All access violations encountered |
 | `filtered_hmd_nonnull` | `atomic<uint64_t>` | Fast-path: HMD non-null and not transition crash |
 | `filtered_high_addr` | `atomic<uint64_t>` | Fast-path: fault > 0x10000, HMD valid, and not cascade |
 | `filtered_already_handled` | `atomic<uint64_t>` | Fast-path: address already permanently patched |
 | `filtered_reentrant` | `atomic<uint64_t>` | Fast-path: recursive exception guard |
-| `reached_deep_analysis` | `atomic<uint64_t>` | Entered instruction decode and stack walk |
+| `reached_deep_analysis` | `atomic<uint64_t>` | Entered instruction decode and heuristic analysis |
 | `patched_count` | `atomic<uint64_t>` | Successfully handled (fixup or patch) |
 | `rejected_not_xr` | `atomic<uint64_t>` | Deep analysis rejected as unrelated |
 | `non_av_exceptions` | `atomic<uint64_t>` | Non-AV exception codes seen |
@@ -264,13 +259,13 @@ A `SetUnhandledExceptionFilter` in `Framework.cpp` writes a stack-based (no heap
 
 | File | Written By | When |
 |------|-----------|------|
-| `veh_crash_dump.txt` | VEH handler | Deep analysis rejects a crash |
-| `unhandled_crash.txt` | SetUnhandledExceptionFilter | Exception escapes all handlers |
-| `crash.dmp` | VEH handler | MiniDumpWriteDump for post-mortem |
+| `veh_crash_dump.txt` | VEH handler | Deep analysis rejects a crash, or a fatal non-AV exception is encountered |
+| `crash.dmp` | `SetUnhandledExceptionFilter` (upstream `ExceptionHandler.cpp`) | Exception escapes all handlers (MiniDumpWriteDump) |
+| `unhandled_crash.txt` | `SetUnhandledExceptionFilter` (fork, Framework constructor) | Only during early init before `setup_exception_handler()` replaces it |
 
 ## Performance Impact
 
-Negligible. 99.95%+ of access violations are filtered at the first pointer check (Gate 1: HMD non-null) in ~1 nanosecond. Only actual transition crashes (~42 per death, 0 during normal gameplay) reach the instruction decode and stack walk path.
+Negligible. 99.95%+ of access violations are filtered at the first pointer check (Gate 1: HMD non-null) in ~1 nanosecond. Only actual transition crashes (~42 per death, 0 during normal gameplay) reach the instruction decode and heuristic analysis path.
 
 The `on_frame` cascade reset is a single atomic store — zero overhead during normal gameplay.
 
@@ -314,16 +309,14 @@ All 168 crashes occurred within a single millisecond (`10:02:20.862` - `10:02:20
 | Null page ceiling | `0x10000` | Fault addresses below this are null-page dereferences |
 | Max heuristic patches | 128 | Safety cap before heuristic stops accepting |
 | Stats dump interval | 300 frames | ~5 seconds between diagnostic log dumps |
-| Stack scan depth | 48 QWORDs | RSP scan range for return address detection |
-| Max callers scanned | 8 | Depth of stack walk for XR offset analysis |
-| Max forward instructions | 500 | Instructions scanned per caller function |
+| Max temp fixup entries | 256 | Maximum cached temporary fixup addresses |
 | Rendering stopped threshold | 3000ms | Max time without on_frame before non-AV crash dumps |
 
 ## Related Fixes (Returnal-specific)
 
 ### D3D12 Rehook Loop Prevention
 
-`MAX_POST_INIT_REHOOK_ATTEMPTS` set to 0 in `Framework.cpp`. Returnal's Streamline (DLSS Frame Generation) swapchain interposer causes UEVR's D3D12 hook validation to detect a "different" Present pointer after initialization, triggering an infinite rehook loop. Disabling post-init rehooks prevents this.
+`MAX_POST_INIT_REHOOK_ATTEMPTS` set to 0 in `Framework.cpp`. Returnal's Streamline runtime DLL wraps the DXGI swapchain vtable even when Frame Generation is not active. This causes UEVR's D3D12 hook validation to detect a "different" Present pointer after initialization, triggering an infinite rehook loop. Disabling post-init rehooks prevents this.
 
 ### Non-AV Exception Diagnostics
 

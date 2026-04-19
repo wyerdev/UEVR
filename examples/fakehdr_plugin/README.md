@@ -23,8 +23,8 @@ Standard ReShade has several issues with VR:
 
 ## How it works
 
-This shader hooks into UEVR's `on_pre_render_vr_framework_dx11` callback,
-which fires **per-eye** after the engine renders but before submission to the VR
+This shader hooks into UEVR's `on_pre_render_vr_framework_dx11/dx12` callbacks,
+which fire **per-eye** after the engine renders but before submission to the VR
 compositor. For each eye:
 
 1. Copies the eye texture to a staging SRV (so we can sample it)
