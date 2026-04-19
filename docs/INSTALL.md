@@ -34,7 +34,7 @@ Instead of `install-plugins.bat`, you can copy files manually:
 
 **Per-game (one game only):** Copy them to `%APPDATA%\UnrealVRMod\<game_executable>\plugins\` instead (e.g. `Oregon-Win64-Shipping\plugins\`)
 
-**Presets:** Copy the `shipping_presets` folder to `%APPDATA%\UnrealVRMod\UEVR\data\plugins\shipping_presets\`
+**Presets:** Copy the `shipping_presets` folder to `%APPDATA%\UnrealVRMod\UEVR\data\plugins\`
 
 ## File Locations
 
