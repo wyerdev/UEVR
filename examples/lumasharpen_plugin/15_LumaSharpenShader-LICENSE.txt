@@ -1,0 +1,11 @@
+LumaSharpenPlugin for UEVR
+===========================
+
+Original shader:
+  LumaSharpen v1.5.0 by Christian Cann Schuldt Jensen ~ CeeJay.dk
+  Source: https://github.com/CeeJayDK/SweetFX/blob/master/Shaders/SweetFX/LumaSharpen.fx
+  No explicit license was provided in the original file or repository.
+  All rights remain with the original author.
+
+Modifications: Ported from ReShade FX to DX11/DX12 C++ plugin with
+embedded HLSL pixel shader.

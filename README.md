@@ -5,7 +5,7 @@ Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix
 
 **Credits:** 
 - Built on [praydog's UEVR](https://github.com/praydog/UEVR) ([Original UEVR README below](#original-uevr-readme)). 
-- Shaders ported from ReShade originals by CeeJay.dk, 3an, DKT70, Loadus, Martins Upitis, bacondither, Ioxa, and kingeric1992 ([license files](examples/)).
+- Shaders ported from ReShade originals by CeeJay.dk, AMD, SLSNe, Marty McFly, 3an, DKT70, Loadus, Martins Upitis, bacondither, Ioxa, and kingeric1992 ([license files](examples/)).
 
 # [How to Install](docs/INSTALL.md)
 
@@ -21,7 +21,7 @@ Rare cutscene or 3P transition crashes may still remain in some games. The D3D12
 ## UEVR Plugins: ReShade Post-Processing Shaders
 - Fix washed-out colors and grey blacks
 
-VR headsets often show **washed-out colors and grey blacks** compared to a flat monitor. This fork includes 13 ReShade shaders to fix this, re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
+VR headsets often show **washed-out colors and grey blacks** compared to a flat monitor. This fork includes 15 ReShade shaders to fix this, re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
 
 ### **Performance**
 
@@ -61,14 +61,16 @@ These change the overall look and feel of the image. Detail-safe — they enhanc
 | 11 | **HSL Shift** | Remap individual colors to different hues. E.g. make greens more vivid, shift reds toward orange, cool down skin tones. 8 color zones you can shift independently. Changes color direction, not intensity. |
 | 12 | **Filmic Pass** | Full cinematic color processing: sigmoid curves per RGB channel, bleach bypass, fade, saturation, and per-channel gamma. Can clip at extreme settings. More control than Tonemap — use when you want a specific film look. |
 
-**Detail & Film Effects (finishing touches)**
+**Detail, Sharpening & Film Effects (finishing touches)**
 
 | # | Shader | When to Use It |
 |---|--------|----------------|
 | 10 | **FilmGrain2** | Adds subtle photographic film grain. Hides color banding in dark areas (common on VR panels). Keep it subtle — high values look noisy. |
 | 13 | **Clarity** | Local contrast enhancement — makes textures and details pop without changing colors or clipping. Works like sharpening but on mid-frequency detail. Multiple blend modes (Soft Light, Overlay, Hard Light, etc). **Very effective in VR** where things often look flat. |
+| 14 | **CAS** | AMD FidelityFX Contrast Adaptive Sharpening. Adapts sharpening per-pixel based on local contrast — sharpens flat areas more, high-contrast edges less. No halos. Good general-purpose sharpener. |
+| 15 | **LumaSharpen** | Sharpens in luminance only (unsharp mask on luma), avoiding color fringing. 4 sampling patterns, adjustable strength and halo clamp. Best for fine detail recovery on top of CAS. |
 
-All shaders are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Shaders are loaded in numeric order (01→13). Settings are saved per-game automatically.
+All shaders are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Shaders are loaded in numeric order (01→15). Settings are saved per-game automatically.
 
 ### Presets
 

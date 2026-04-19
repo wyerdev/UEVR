@@ -970,6 +970,90 @@ set_target_properties(clarity_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target cas_plugin
+set(CMKR_TARGET cas_plugin)
+set(cas_plugin_SOURCES "")
+
+list(APPEND cas_plugin_SOURCES
+	"examples/cas_plugin/CASPlugin.cpp"
+)
+
+list(APPEND cas_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${cas_plugin_SOURCES})
+add_library(cas_plugin SHARED)
+
+if(cas_plugin_SOURCES)
+	target_sources(cas_plugin PRIVATE ${cas_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${cas_plugin_SOURCES})
+
+target_compile_features(cas_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(cas_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(cas_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(cas_plugin PROPERTIES
+	OUTPUT_NAME
+		14_CASShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target lumasharpen_plugin
+set(CMKR_TARGET lumasharpen_plugin)
+set(lumasharpen_plugin_SOURCES "")
+
+list(APPEND lumasharpen_plugin_SOURCES
+	"examples/lumasharpen_plugin/LumaSharpenPlugin.cpp"
+)
+
+list(APPEND lumasharpen_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${lumasharpen_plugin_SOURCES})
+add_library(lumasharpen_plugin SHARED)
+
+if(lumasharpen_plugin_SOURCES)
+	target_sources(lumasharpen_plugin PRIVATE ${lumasharpen_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${lumasharpen_plugin_SOURCES})
+
+target_compile_features(lumasharpen_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(lumasharpen_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(lumasharpen_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(lumasharpen_plugin PROPERTIES
+	OUTPUT_NAME
+		15_LumaSharpenShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target sdk-test
 set(CMKR_TARGET sdk-test)
 set(sdk-test_SOURCES "")
