@@ -249,9 +249,10 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("HSL Shift Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", HSL_VERSION); bool changed = false;
+            ImGui::TextDisabled("v%s", HSL_VERSION);
+            ImGui::TextWrapped("Remap individual colors to different hues. 8 color zones you can shift independently.");
+            bool changed = false;
             changed |= ImGui::Checkbox("Enabled##HSL", &m_enabled);
-            ImGui::TextWrapped("Shift individual hue ranges. Click the color box to open widget.");
             changed |= ImGui::ColorEdit3("Red##HSL", m_red);
             changed |= ImGui::ColorEdit3("Orange##HSL", m_orange);
             changed |= ImGui::ColorEdit3("Yellow##HSL", m_yellow);

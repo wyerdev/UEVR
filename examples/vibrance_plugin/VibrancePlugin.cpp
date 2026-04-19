@@ -150,7 +150,9 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Vibrance Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", VIB_VERSION); bool changed = false;
+            ImGui::TextDisabled("v%s", VIB_VERSION);
+            ImGui::TextWrapped("Boosts unsaturated colors more than saturated ones. Good for making dull games pop without oversaturating skin tones.");
+            bool changed = false;
             changed |= ImGui::Checkbox("Enabled##Vib", &m_enabled);
             changed |= ImGui::SliderFloat("Vibrance", &m_vibrance, -1.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Intelligently saturates (positive) or desaturates (negative)");

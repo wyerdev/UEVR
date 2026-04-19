@@ -366,6 +366,7 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("FilmGrain2 Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", FILMGRAIN2_VERSION);
+            ImGui::TextWrapped("Adds subtle film grain. Hides color banding in dark areas (common on VR panels). Keep it subtle.");
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);

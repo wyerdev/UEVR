@@ -53,7 +53,7 @@ These change the overall look and feel of the image. Detail-safe — they enhanc
 | # | Shader | When to Use It |
 |---|--------|----------------|
 | 04 | **Curves** | Add contrast using S-curves. Redistributes contrast within the existing range without clipping. Multiple curve formulas (Luma, Chroma, etc). Subtle but effective. |
-| 05 | **FakeHDR** | **Easiest way to make any game look good.** Local tone mapping via bloom — lifts dark areas using nearby bright areas, like real HDR. Enhances detail without clipping. [Technical docs](docs/fakehdr-vr-postprocess-plugin.md). |
+| 05 | **FakeHDR** | **Easiest way to make any game look good.** Deepens darks and makes colors pop via local tone mapping bloom. Enhances detail without clipping. [Technical docs](docs/fakehdr-vr-postprocess-plugin.md). |
 | 06 | **DPX** | Emulates Cineon film stock. Gives a warm, cinematic color shift with a strength slider. Good for games that look too cold/digital. |
 | 07 | **Technicolor** | Emulates 2-strip Technicolor (old Hollywood look). Strong color shift — teal shadows, warm highlights. Use sparingly. |
 | 08 | **Colourfulness** | Boosts color saturation with a built-in limiter that prevents clipping. Smarter than just cranking saturation. |

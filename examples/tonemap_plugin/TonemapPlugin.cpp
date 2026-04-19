@@ -68,7 +68,7 @@ float4 main(PSInput input) : SV_Target
 
     color = saturate(color - Defog * FogColor * 2.55); // Defog
     color *= pow(2.0f, Exposure); // Exposure
-    color = pow(abs(color), Gamma); // Gamma
+    color = pow(color, Gamma); // Gamma
 
     const float3 coefLuma = float3(0.2126, 0.7152, 0.0722);
     float lum = dot(coefLuma, color);
@@ -173,7 +173,9 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Tonemap Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", TM_VERSION); bool changed = false;
+            ImGui::TextDisabled("v%s", TM_VERSION);
+            ImGui::TextWrapped("Adjust gamma, exposure, and saturation. Also has bleach bypass (desaturated high-contrast film look).");
+            bool changed = false;
             changed |= ImGui::Checkbox("Enabled##TM", &m_enabled);
             changed |= ImGui::SliderFloat("Gamma", &m_gamma, 0.0f, 2.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjust midtones. 1.0 is neutral.");

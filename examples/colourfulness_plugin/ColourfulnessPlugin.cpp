@@ -110,7 +110,7 @@ float3 wpmean(float3 a, float3 b, float w)
 {
     float3 sa = sqrt(abs(a));
     float3 sb = sqrt(abs(b));
-    return pow(abs(abs(w) * sa + abs(1.0 - w) * sb), 2.0);
+    return pow(abs(w) * sa + abs(1.0 - w) * sb, 2.0);
 }
 
 // Mean of Rec. 709 & 601 luma coefficients
@@ -135,9 +135,8 @@ float4 main(PSInput input) : SV_Target
         float3 rlc_diff = clamp((c_diff * 1.2) + c0, -0.0001, 1.0001) - c0;
 
         // Calc max saturation-increase without altering RGB ratios
-        float3 ad = abs(diff_luma);
-        float maxC = max(ad.r, max(ad.g, ad.b));
-        float minC = min(ad.r, min(ad.g, ad.b));
+        float maxC = abs(max(diff_luma.r, max(diff_luma.g, diff_luma.b)));
+        float minC = abs(min(diff_luma.r, min(diff_luma.g, diff_luma.b)));
 
         float poslim = (1.0002 - luma) / (maxC + 0.0001);
         float neglim = (luma + 0.0002) / (minC + 0.0001);
@@ -353,6 +352,7 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Colourfulness Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", COLOURFULNESS_VERSION);
+            ImGui::TextWrapped("Boosts color saturation with a built-in limiter that prevents clipping. Smarter than just cranking saturation.");
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);
