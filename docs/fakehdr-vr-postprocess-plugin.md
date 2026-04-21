@@ -1,8 +1,8 @@
 # VR Post-Processing Shaders — Technical Documentation
 
-15 UEVR C++ shaders that apply ReShade-based post-processing effects directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), these shaders modify the UE render target **before** UEVR copies it to VR, so effects are visible in-headset.
+16 UEVR C++ shaders that apply ReShade-based post-processing effects directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), these shaders modify the UE render target **before** UEVR copies it to VR, so effects are visible in-headset.
 
-The plugin architecture, DX11/DX12 rendering pipeline, and UEVR core API changes were designed for FakeHDR (CeeJay.dk's FakeHDR.fx) and are shared by all 15 plugins.
+The plugin architecture, DX11/DX12 rendering pipeline, and UEVR core API changes were designed for FakeHDR (CeeJay.dk's FakeHDR.fx) and are shared by all 16 plugins.
 
 Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and `on_draw_ui`) and several DX12 workarounds for UE's TYPELESS render targets and missing `ALLOW_RENDER_TARGET` flag.
 
@@ -38,6 +38,54 @@ Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and
 | 14 | CAS | CAS.fx (AMD, SLSNe, Marty McFly, CeeJay.dk) | Contrast-adaptive sharpening (FidelityFX) | Per-pixel adaptive sharpening — sharpens flat areas more, high-contrast edges less. No halos. |
 | 15 | LumaSharpen | LumaSharpen.fx (CeeJay.dk) | Unsharp mask in luminance space | Sharpens in luma only to avoid color fringing. 4 sampling patterns, adjustable strength and clamp. |
 
+### Cleanup & Correction
+
+| # | Shader | Based On | What It Does | When to Use It |
+|---|--------|----------|--------------|----------------|
+| 16 | Deband | Deband.fx (haasn/JPulowski, CeeJay.dk dithering) | Banding detection + smoothing + ordered dithering | Remove color banding in gradients (common on VR panels). |
+
+### Shader Comparison, Performance & Stacking Guide
+
+See the [README](../README.md#which-shader-should-i-use) for user-facing guidance: which shader to pick for each problem, what not to stack, and performance cost tiers.
+
+### Sharpening: UE Built-In vs Our Plugins (Technical Detail)
+
+UE exposes `r.Tonemapper.Sharpen` as a CVar — UEVR already surfaces it in the CVar menu (float, 0.0–10.0). Technical comparison:
+
+| | UE Tonemapper Sharpen | CAS (#14) | LumaSharpen (#15) |
+|---|---|---|---|
+| Algorithm | Cross 4-tap unsharp mask | 3×3 adaptive contrast sharpening | Unsharp mask on luma only |
+| Taps | 4 (cross pattern) | 9 (full 3×3 neighborhood) | 4–12 (configurable pattern) |
+| Adapts to edges? | No | Yes (per-pixel contrast) | No |
+| Color fringing? | Possible at high values | No (contrast-aware) | No (luma-only) |
+
+**Color fringing** = colored halos along high-contrast edges. Happens when a sharpening filter boosts R, G, B channels independently — each channel's edge lands at a slightly different intensity, creating visible color shifts. CAS avoids this by adapting per-pixel; LumaSharpen avoids it by sharpening only luminance while leaving chrominance untouched.
+
+### Per-Shader Cost Breakdown (Technical Detail)
+
+The main cost driver is **texture samples per pixel** (memory bandwidth). ALU (math) is secondary. All 16 shaders are single-pass, single draw call.
+
+*All times below are rough estimates based on shader complexity (tap count + ALU), not measured benchmarks. Actual cost varies by GPU, resolution, and game.*
+
+| Tier | Shader | Taps/pixel | ALU | Detail |
+|---|---|---|---|---|
+| **Free** | LiftGammaGain (#02) | 1 | Trivial | pow + multiply — cheapest shader |
+| **Free** | Vibrance (#09) | 1 | Trivial | Dot product + lerp |
+| **Free** | Technicolor (#07) | 1 | Trivial | Dot products + multiply-add |
+| **Free** | LevelsPlus (#01) | 1 | Light | pow + ACES tone curve |
+| **Free** | Tonemap (#03) | 1 | Light | pow + bleach bypass + saturation |
+| **Free** | Curves (#04) | 1 | Light | One formula path (sin/exp/sqrt) |
+| **Free** | HSL Shift (#11) | 1 | Light | RGB↔HSL conversion + zone lookup |
+| **Free** | DPX (#06) | 1 | Moderate | exp + pow + 3×3 matrix multiplies |
+| **Free** | Colourfulness (#08) | 1 | Moderate | rsqrt + pow + sigmoid |
+| **Cheap** | FilmGrain2 (#10) | 1 | **Heavy** | Only 1 texture read, but Perlin noise (12+ sin/frac calls) |
+| **Cheap** | FilmicPass (#12) | 1 | **Heavy** | 4× sigmoid exp, 3× pow, soft-light blend |
+| **Light** | LumaSharpen (#15) | 3–5 | Light | Pattern-dependent (default pattern=1: 5 taps) |
+| **Light** | Deband (#16) | 5 | Light | 1 center + 4 directional + dither math |
+| **Medium** | CAS (#14) | 9 | Moderate | Full 3×3 neighborhood + adaptive contrast |
+| **Heavy** | FakeHDR (#05) | 17 | Moderate | 1 center + 8×2 bloom radii — **most expensive** |
+| **Heavy** | Clarity (#13) | 18 | Heavy | Two 9-tap Gaussian blurs (H+V) + blend modes |
+
 All plugins share the same architecture:
 - DX11 and DX12 dual-path rendering
 - 2-slot texture cache (copy + result) with `PointSampler` and fullscreen triangle vertex shader
@@ -49,10 +97,11 @@ All plugins share the same architecture:
 
 ### Plugin Load Order
 
-Plugins are loaded in DLL name alphabetical order. Numeric prefixes (`01_` through `15_`) ensure:
+Plugins are loaded in DLL name alphabetical order. Numeric prefixes (`01_` through `16_`) ensure:
 - Color correction runs first (01–03)
 - Color grading runs in the middle (04–09, 11–12): Curves → FakeHDR → DPX → Technicolor → Colourfulness → Vibrance → HSL Shift → Filmic Pass
 - Detail, sharpening & film effects run last (10, 13–15): FilmGrain2 → Clarity → CAS → LumaSharpen
+- Cleanup runs after all effects (16): Deband
 
 ### Preset System
 
@@ -468,6 +517,7 @@ examples/
     clarity_plugin/          — ClarityPlugin.cpp + 13_ClarityShader-LICENSE.txt
     cas_plugin/              — CASPlugin.cpp + 14_CASShader-LICENSE.txt
     lumasharpen_plugin/      — LumaSharpenPlugin.cpp + 15_LumaSharpenShader-LICENSE.txt
+    deband_plugin/           — DebandPlugin.cpp + 16_DebandShader-LICENSE.txt
     example_plugin/          — Developer example (not deployed as a shader plugin)
     renderlib/               — Shared render utilities (not deployed)
 
@@ -490,7 +540,7 @@ src/
                 CommandContext.cpp  — SEH-wrapped execute + recover + discard
                 TextureContext.cpp  — update_texture() for in-place heap reuse
 
-cmake.toml                   — All 15 plugin targets with numeric-prefixed OUTPUT_NAMEs
+cmake.toml                   — All 16 plugin targets with numeric-prefixed OUTPUT_NAMEs
 deploy.sh                    — Build deployment script (DLLs + plugins + licenses + presets)
 ```
 
@@ -507,7 +557,7 @@ cmake --build build --config Release
 cmake --build build --config Release --target uevr --clean-first
 ```
 
-Output: `build/Release/01_LevelsPlusShader.dll` through `build/Release/15_LumaSharpenShader.dll`
+Output: `build/Release/01_LevelsPlusShader.dll` through `build/Release/16_DebandShader.dll`
 
 Deploy plugins + licenses + presets:
 ```bash

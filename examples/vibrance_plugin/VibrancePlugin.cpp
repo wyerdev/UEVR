@@ -138,7 +138,7 @@ public:
     void on_initialize() override { API::get()->log_info("[Vibrance] Plugin initialized"); load_settings(); }
 
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"vibrance_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"vibrance_settings.txt";
     }
     void save_settings() { try { std::filesystem::create_directories(get_settings_path().parent_path()); std::ofstream f(get_settings_path()); if (f.is_open()) f << m_enabled << "\n" << m_vibrance << "\n" << m_balance[0] << " " << m_balance[1] << " " << m_balance[2] << "\n"; } catch (...) {} }
     void load_settings() {
@@ -151,12 +151,12 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Vibrance Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", VIB_VERSION);
-            ImGui::TextWrapped("Boosts unsaturated colors more than saturated ones. Good for making dull games pop without oversaturating skin tones.");
+            ImGui::TextWrapped("Boosts unsaturated colors more than saturated ones. Avoids clipping. Good for making dull games pop without oversaturating skin tones.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##Vib", &m_enabled);
-            changed |= ImGui::SliderFloat("Vibrance", &m_vibrance, -1.0f, 1.0f, "%.2f");
+            changed |= ImGui::DragFloat("Vibrance", &m_vibrance, 0.01f, -1.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Intelligently saturates (positive) or desaturates (negative)");
-            changed |= ImGui::SliderFloat3("RGB Balance", m_balance, 0.0f, 10.0f, "%.1f");
+            changed |= ImGui::DragFloat3("RGB Balance", m_balance, 0.1f, 0.0f, 10.0f, "%.1f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-channel vibrance multiplier");
             if (ImGui::Button("Reset##Vib")) { m_vibrance = 0.15f; m_balance[0] = m_balance[1] = m_balance[2] = 1.0f; changed = true; }
             if (changed) save_settings();

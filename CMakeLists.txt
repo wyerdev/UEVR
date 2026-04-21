@@ -1054,6 +1054,48 @@ set_target_properties(lumasharpen_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target deband_plugin
+set(CMKR_TARGET deband_plugin)
+set(deband_plugin_SOURCES "")
+
+list(APPEND deband_plugin_SOURCES
+	"examples/deband_plugin/DebandPlugin.cpp"
+)
+
+list(APPEND deband_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${deband_plugin_SOURCES})
+add_library(deband_plugin SHARED)
+
+if(deband_plugin_SOURCES)
+	target_sources(deband_plugin PRIVATE ${deband_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${deband_plugin_SOURCES})
+
+target_compile_features(deband_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(deband_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(deband_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(deband_plugin PROPERTIES
+	OUTPUT_NAME
+		16_DebandShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target sdk-test
 set(CMKR_TARGET sdk-test)
 set(sdk-test_SOURCES "")

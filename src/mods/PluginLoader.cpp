@@ -1763,6 +1763,38 @@ void PluginLoader::early_init() try {
 
     spdlog::info("[PluginLoader] Loading plugins...");
 
+    // Migration: move shader settings from data/plugins/ to data/plugins/shader_settings/
+    // Runs every launch — handles partial migration (e.g. interrupted first run).
+    // Collect paths first to avoid iterator invalidation when renaming into a subdirectory.
+    {
+        const auto old_dir = Framework::get_persistent_dir() / "data" / "plugins";
+        const auto new_dir = old_dir / "shader_settings";
+        if (fs::exists(old_dir)) {
+            std::vector<fs::path> to_migrate;
+            for (const auto& entry : fs::directory_iterator(old_dir)) {
+                if (!entry.is_regular_file()) continue;
+                auto fname = entry.path().filename().string();
+                if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
+                    to_migrate.push_back(entry.path());
+                }
+            }
+            if (!to_migrate.empty()) {
+                fs::create_directories(new_dir);
+                for (const auto& src : to_migrate) {
+                    const auto dest = new_dir / src.filename();
+                    if (fs::exists(dest)) {
+                        // Already migrated previously; remove orphan in old location.
+                        std::error_code ec; fs::remove(src, ec);
+                        if (!ec) spdlog::info("[PluginLoader] Removed orphan shader settings: {}", src.filename().string());
+                    } else {
+                        std::error_code ec; fs::rename(src, dest, ec);
+                        if (!ec) spdlog::info("[PluginLoader] Migrated shader settings: {}", src.filename().string());
+                    }
+                }
+            }
+        }
+    }
+
     auto load_plugins_from_dir = [this](std::filesystem::path path) {
         if (!fs::exists(path) || !fs::is_directory(path)) {
             return;
@@ -1990,6 +2022,11 @@ void PluginLoader::on_draw_sidebar_entry(std::string_view name) {
 void PluginLoader::on_draw_ui() {
     std::scoped_lock _{m_mux};
 
+    const auto renderer = g_framework->get_renderer_type();
+    ImGui::Text("Renderer: %s", renderer == Framework::RendererType::D3D12 ? "D3D12" : "D3D11");
+    ImGui::Separator();
+    ImGui::Spacing();
+
     if (ImGui::Button("Attempt Unload Plugins")) {
         attempt_unload_plugins();
     }
@@ -2113,13 +2150,13 @@ bool PluginLoader::save_preset(const std::filesystem::path& presets_dir, const s
         std::filesystem::create_directories(preset_path);
 
         const auto persistent_dir = Framework::get_persistent_dir();
-        const auto plugin_settings_dir = persistent_dir / "data" / "plugins";
+        const auto shader_settings_dir = persistent_dir / "data" / "plugins" / "shader_settings";
         int count = 0;
-        if (!std::filesystem::exists(plugin_settings_dir)) {
-            m_preset_status = "No plugin settings to save";
+        if (!std::filesystem::exists(shader_settings_dir)) {
+            m_preset_status = "No shader settings to save";
             return false;
         }
-        for (const auto& entry : std::filesystem::directory_iterator(plugin_settings_dir)) {
+        for (const auto& entry : std::filesystem::directory_iterator(shader_settings_dir)) {
             if (!entry.is_regular_file()) continue;
             auto fname = entry.path().filename().string();
             if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
@@ -2181,14 +2218,31 @@ static void restore_active_preset_from_disk() {
 bool PluginLoader::load_preset(const std::filesystem::path& preset_path) {
     try {
         const auto persistent_dir = Framework::get_persistent_dir();
-        const auto plugin_settings_dir = persistent_dir / "data" / "plugins";
-        std::filesystem::create_directories(plugin_settings_dir);
+        const auto shader_settings_dir = persistent_dir / "data" / "plugins" / "shader_settings";
+        std::filesystem::create_directories(shader_settings_dir);
+
+        // Clear shader settings so plugins not in the preset revert to defaults on reload.
+        // Collect first to avoid iterator invalidation while removing entries.
+        {
+            std::vector<std::filesystem::path> to_remove;
+            for (const auto& entry : std::filesystem::directory_iterator(shader_settings_dir)) {
+                if (!entry.is_regular_file()) continue;
+                auto fname = entry.path().filename().string();
+                if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
+                    to_remove.push_back(entry.path());
+                }
+            }
+            for (const auto& p : to_remove) {
+                std::error_code ec; std::filesystem::remove(p, ec);
+            }
+        }
+
         int count = 0;
         for (const auto& entry : std::filesystem::directory_iterator(preset_path)) {
             if (!entry.is_regular_file()) continue;
             auto fname = entry.path().filename().string();
             if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
-                std::filesystem::copy_file(entry.path(), plugin_settings_dir / fname, std::filesystem::copy_options::overwrite_existing);
+                std::filesystem::copy_file(entry.path(), shader_settings_dir / fname, std::filesystem::copy_options::overwrite_existing);
                 ++count;
             }
         }

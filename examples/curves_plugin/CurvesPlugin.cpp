@@ -303,7 +303,7 @@ public:
     // Settings persistence
     // ========================================================================
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"curves_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"curves_settings.txt";
     }
 
     void save_settings() {
@@ -341,7 +341,7 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Curves Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", CURVES_VERSION);
-            ImGui::TextWrapped("Add contrast using S-curves without clipping highlights or shadows. Multiple curve formulas.");
+            ImGui::TextWrapped("Add contrast using S-curves without clipping highlights or shadows. Multiple formulas (Luma, Chroma, Both). Subtle but effective.");
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);
@@ -354,6 +354,7 @@ public:
                 }
                 ImGui::EndCombo();
             }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Luma = brightness contrast only (preserves colors)\nChroma = color contrast only (preserves brightness)\nBoth = applies to brightness and color together");
 
             if (ImGui::BeginCombo("Formula", g_formula_names[m_formula])) {
                 for (int i = 0; i < 11; i++) {
@@ -363,8 +364,10 @@ public:
                 }
                 ImGui::EndCombo();
             }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Different S-curve shapes. Catmull-Rom and Cubic Bezier are the most natural.\nTry a few \u2014 the visual difference is subtle");
 
-            changed |= ImGui::SliderFloat("Contrast", &m_contrast, -1.0f, 1.0f, "%.2f");
+            changed |= ImGui::DragFloat("Contrast", &m_contrast, 0.01f, -1.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Positive = steeper S-curve (more contrast). Negative = flatter (less contrast)");
 
             if (ImGui::Button("Reset to Defaults")) {
                 m_mode     = DEFAULT_MODE;

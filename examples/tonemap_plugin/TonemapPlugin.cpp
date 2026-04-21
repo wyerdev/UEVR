@@ -157,7 +157,7 @@ public:
     void on_initialize() override { API::get()->log_info("[Tonemap] Plugin initialized"); load_settings(); }
 
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"tonemap_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"tonemap_settings.txt";
     }
     void save_settings() {
         try { std::filesystem::create_directories(get_settings_path().parent_path()); std::ofstream f(get_settings_path()); if (f.is_open()) f << m_enabled << "\n" << m_gamma << "\n" << m_exposure << "\n" << m_saturation << "\n" << m_bleach << "\n" << m_defog << "\n" << m_fog_color[0] << " " << m_fog_color[1] << " " << m_fog_color[2] << "\n"; } catch (...) {}
@@ -174,19 +174,21 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Tonemap Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", TM_VERSION);
-            ImGui::TextWrapped("Adjust gamma, exposure, and saturation. Also has bleach bypass (desaturated high-contrast film look).");
+            ImGui::TextWrapped("Adjust gamma, exposure, and saturation. Also has bleach bypass (desaturated high-contrast film look). Exposure can clip highlights; defog subtracts color.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##TM", &m_enabled);
-            changed |= ImGui::SliderFloat("Gamma", &m_gamma, 0.0f, 2.0f, "%.2f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjust midtones. 1.0 is neutral.");
-            changed |= ImGui::SliderFloat("Exposure", &m_exposure, -1.0f, 1.0f, "%.2f");
+            changed |= ImGui::DragFloat("Gamma", &m_gamma, 0.01f, 0.0f, 2.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjust gamma. <1 = brighter, >1 = darker.");
+            changed |= ImGui::DragFloat("Exposure", &m_exposure, 0.01f, -1.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjust exposure. Positive = brighter.");
-            changed |= ImGui::SliderFloat("Saturation##TM", &m_saturation, -1.0f, 1.0f, "%.2f");
-            changed |= ImGui::SliderFloat("Bleach", &m_bleach, 0.0f, 1.0f, "%.2f");
+            changed |= ImGui::DragFloat("Saturation##TM", &m_saturation, 0.01f, -1.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Color intensity. Negative = desaturated, positive = more vivid");
+            changed |= ImGui::DragFloat("Bleach", &m_bleach, 0.01f, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brightens shadows and fades colors");
-            changed |= ImGui::SliderFloat("Defog", &m_defog, 0.0f, 1.0f, "%.2f");
+            changed |= ImGui::DragFloat("Defog", &m_defog, 0.01f, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove color tint (fog)");
             changed |= ImGui::ColorEdit3("Defog Color", m_fog_color);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("The color to subtract when defog > 0");
             if (ImGui::Button("Reset##TM")) { m_gamma = 1.0f; m_exposure = 0.0f; m_saturation = 0.0f; m_bleach = 0.0f; m_defog = 0.0f; m_fog_color[0] = 0; m_fog_color[1] = 0; m_fog_color[2] = 1.0f; changed = true; }
             if (changed) save_settings();
         }

@@ -349,7 +349,7 @@ public:
     // Settings persistence
     // ========================================================================
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"levelsplus_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"levelsplus_settings.txt";
     }
 
     void save_settings() {
@@ -425,27 +425,34 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("LevelsPlus Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", LEVELSPLUS_VERSION);
-            ImGui::TextWrapped("Fix grey/washed-out blacks. Remaps black/white points so darks are actually dark. Start here.");
+            ImGui::TextWrapped("The #1 fix for VR. Remaps black/white points so darks are actually dark and whites are bright. Trades some shadow detail for deeper blacks — almost always worth it. Has per-channel gamma and optional ACES tone mapping. Start here.");
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);
             changed |= ImGui::Checkbox("Enable Levels", &m_enable_levels);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle the levels remapping (black/white point + gamma)");
 
             if (m_enable_levels) {
                 ImGui::Separator();
                 ImGui::Text("Input Levels");
                 changed |= ImGui::ColorEdit3("Input Black Point", m_in_black);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Colors darker than this become pure black");
                 changed |= ImGui::ColorEdit3("Input White Point", m_in_white);
-                changed |= ImGui::SliderFloat3("Input Gamma", m_in_gamma, 0.01f, 10.0f, "%.2f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Colors brighter than this become pure white");
+                changed |= ImGui::DragFloat3("Input Gamma", m_in_gamma, 0.01f, 0.01f, 10.0f, "%.2f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-channel midtone adjustment. <1 = brighter mids, >1 = darker mids");
 
                 ImGui::Separator();
                 ImGui::Text("Output Levels");
                 changed |= ImGui::ColorEdit3("Output Black Point", m_out_black);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Darkest output value. Raise to lighten shadows");
                 changed |= ImGui::ColorEdit3("Output White Point", m_out_white);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brightest output value. Lower to dim highlights");
 
                 ImGui::Separator();
                 ImGui::Text("Color Range Shift");
                 changed |= ImGui::ColorEdit3("Range Shift", m_range_shift);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shifts the midpoint of each color channel");
 
                 // Shift switch: combo for -1, 0, 1
                 int shift_idx = m_range_shift_sw + 1;  // map -1,0,1 to 0,1,2
@@ -453,6 +460,7 @@ public:
                     m_range_shift_sw = shift_idx - 1;
                     changed = true;
                 }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Subtract = shift toward black, Add = shift toward white, Off = no shift");
             }
 
             ImGui::Separator();
@@ -460,12 +468,15 @@ public:
             if (ImGui::Combo("ACES Mode", &m_aces_mode, g_aces_names, 4)) {
                 changed = true;
             }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Off = linear levels only. Film/RRT/RRT+ = cinematic tone curve");
             if (m_aces_mode > 0) {
-                changed |= ImGui::SliderFloat3("ACES Luminance %", m_aces_lum, 0.0f, 200.0f, "%.0f");
+                changed |= ImGui::DragFloat3("ACES Luminance %", m_aces_lum, 1.0f, 0.0f, 200.0f, "%.0f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-channel luminance weight for ACES. Higher = brighter in that channel");
             }
 
             ImGui::Separator();
             changed |= ImGui::Checkbox("Highlight Clipping (debug)", &m_highlight_clipping);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shows clipped pixels: blue=black, yellow=white, red=both");
 
             if (ImGui::Button("Reset to Defaults")) {
                 memcpy(m_in_black,    DEF_IN_BLACK,      sizeof(float)*3);

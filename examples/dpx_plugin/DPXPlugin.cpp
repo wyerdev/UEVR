@@ -166,7 +166,7 @@ public:
     void on_initialize() override { API::get()->log_info("[DPX] Plugin initialized"); load_settings(); }
 
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"dpx_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"dpx_settings.txt";
     }
     void save_settings() {
         try { std::filesystem::create_directories(get_settings_path().parent_path()); std::ofstream f(get_settings_path()); if (f.is_open())
@@ -192,17 +192,21 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("DPX Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", DPX_VERSION);
-            ImGui::TextWrapped("Emulates Cineon film stock. Gives a warm, cinematic color shift with adjustable strength.");
+            ImGui::TextWrapped("Emulates Cineon film stock. Gives a warm, cinematic color shift. Good for games that look too cold or digital.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##DPX", &m_enabled);
-            changed |= ImGui::SliderFloat3("RGB Curve", m_rgb_curve, 1.0f, 15.0f, "%.1f");
+            changed |= ImGui::DragFloat3("RGB Curve", m_rgb_curve, 0.1f, 1.0f, 15.0f, "%.1f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cineon curve steepness per channel");
-            changed |= ImGui::SliderFloat3("RGB C", m_rgb_c, 0.2f, 0.5f, "%.2f");
+            changed |= ImGui::DragFloat3("RGB C", m_rgb_c, 0.01f, 0.2f, 0.5f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cineon curve center point per channel");
-            changed |= ImGui::SliderFloat("Contrast##DPX", &m_contrast, 0.0f, 1.0f, "%.2f");
-            changed |= ImGui::SliderFloat("Saturation##DPX", &m_saturation, 0.0f, 8.0f, "%.1f");
-            changed |= ImGui::SliderFloat("Colorfulness", &m_colorfulness, 0.1f, 2.5f, "%.2f");
-            changed |= ImGui::SliderFloat("Strength##DPX", &m_strength, 0.0f, 1.0f, "%.2f");
+            changed |= ImGui::DragFloat("Contrast##DPX", &m_contrast, 0.01f, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Contrast applied to the Cineon-graded image");
+            changed |= ImGui::DragFloat("Saturation##DPX", &m_saturation, 0.1f, 0.0f, 8.0f, "%.1f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Color saturation of the film emulation. Higher = more vivid");
+            changed |= ImGui::DragFloat("Colorfulness", &m_colorfulness, 0.01f, 0.1f, 2.5f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much the Cineon curve colors deviate from neutral");
+            changed |= ImGui::DragFloat("Strength##DPX", &m_strength, 0.01f, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blend between original (0) and full DPX effect (1)");
             if (ImGui::Button("Reset##DPX")) { m_rgb_curve[0]=m_rgb_curve[1]=m_rgb_curve[2]=8.0f; m_rgb_c[0]=m_rgb_c[1]=0.36f; m_rgb_c[2]=0.34f; m_contrast=0.1f; m_saturation=3.0f; m_colorfulness=2.5f; m_strength=0.20f; changed=true; }
             if (changed) save_settings();
         }
