@@ -178,7 +178,7 @@ public:
     void on_initialize() override { API::get()->log_info("[CAS] Plugin initialized"); load_settings(); }
 
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"cas_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"cas_settings.txt";
     }
 
     void save_settings() {
@@ -204,12 +204,12 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("CAS Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", CAS_VERSION);
-            ImGui::TextWrapped("AMD FidelityFX Contrast Adaptive Sharpening. Adapts sharpening per-pixel based on local contrast.");
+            ImGui::TextWrapped("AMD FidelityFX Contrast Adaptive Sharpening. Sharpens flat areas more, high-contrast edges less — no halos. Good general-purpose sharpener.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##CAS", &m_enabled);
-            changed |= ImGui::SliderFloat("Contrast##CAS", &m_contrast, 0.0f, 1.0f, "%.2f");
+            changed |= ImGui::DragFloat("Contrast##CAS", &m_contrast, 0.01f, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much the shader adapts to high contrast areas. 0 = less aggressive, 1 = maximum adaptation");
-            changed |= ImGui::SliderFloat("Sharpening##CAS", &m_sharpening, 0.0f, 1.0f, "%.2f");
+            changed |= ImGui::DragFloat("Sharpening##CAS", &m_sharpening, 0.01f, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blend between original (0) and sharpened (1)");
             if (ImGui::Button("Reset##CAS")) { m_contrast = 0.0f; m_sharpening = 1.0f; changed = true; }
             if (changed) save_settings();

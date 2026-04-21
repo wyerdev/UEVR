@@ -327,7 +327,7 @@ public:
     // Settings persistence
     // ========================================================================
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"filmgrain2_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"filmgrain2_settings.txt";
     }
 
     void save_settings() {
@@ -366,14 +366,18 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("FilmGrain2 Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", FILMGRAIN2_VERSION);
-            ImGui::TextWrapped("Adds subtle film grain. Hides color banding in dark areas (common on VR panels). Keep it subtle.");
+            ImGui::TextWrapped("Adds photographic film grain. Hides color banding in dark areas (common on VR panels). Keep it subtle — high values look noisy.");
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);
-            changed |= ImGui::SliderFloat("Grain Amount", &m_grain_amount, 0.0f, 0.2f, "%.3f");
-            changed |= ImGui::SliderFloat("Color Amount", &m_color_amount, 0.0f, 1.0f, "%.2f");
-            changed |= ImGui::SliderFloat("Luminance Amount", &m_lum_amount, 0.0f, 1.0f, "%.2f");
-            changed |= ImGui::SliderFloat("Grain Size", &m_grain_size, 1.5f, 2.5f, "%.2f");
+            changed |= ImGui::DragFloat("Grain Amount", &m_grain_amount, 0.001f, 0.0f, 0.2f, "%.3f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overall grain intensity. Keep low (0.02-0.05) for subtle effect");
+            changed |= ImGui::DragFloat("Color Amount", &m_color_amount, 0.01f, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = monochrome grain, 1 = full color grain");
+            changed |= ImGui::DragFloat("Luminance Amount", &m_lum_amount, 0.01f, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much grain varies with brightness. 1 = more grain in dark areas");
+            changed |= ImGui::DragFloat("Grain Size", &m_grain_size, 0.01f, 1.5f, 2.5f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Size of grain particles. Higher = coarser grain");
 
             if (ImGui::Button("Reset to Defaults")) {
                 m_grain_amount = DEFAULT_GRAIN_AMOUNT;

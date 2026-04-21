@@ -207,7 +207,7 @@ public:
     void on_initialize() override { API::get()->log_info("[HSLShift] Plugin initialized"); load_settings(); }
 
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"hslshift_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"hslshift_settings.txt";
     }
 
     void save_settings() {
@@ -250,17 +250,26 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("HSL Shift Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", HSL_VERSION);
-            ImGui::TextWrapped("Remap individual colors to different hues. 8 color zones you can shift independently.");
+            ImGui::TextWrapped("Remap individual colors to different hues. 8 color zones you can shift independently. Changes color direction, not intensity.");
+            ImGui::TextDisabled("Pick a new target color for each zone. E.g. change Red to Orange to warm up skin tones.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##HSL", &m_enabled);
             changed |= ImGui::ColorEdit3("Red##HSL", m_red);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remap reds to this color");
             changed |= ImGui::ColorEdit3("Orange##HSL", m_orange);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remap oranges to this color");
             changed |= ImGui::ColorEdit3("Yellow##HSL", m_yellow);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remap yellows to this color");
             changed |= ImGui::ColorEdit3("Green##HSL", m_green);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remap greens to this color");
             changed |= ImGui::ColorEdit3("Cyan##HSL", m_cyan);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remap cyans to this color");
             changed |= ImGui::ColorEdit3("Blue##HSL", m_blue);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remap blues to this color");
             changed |= ImGui::ColorEdit3("Purple##HSL", m_purple);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remap purples to this color");
             changed |= ImGui::ColorEdit3("Magenta##HSL", m_magenta);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remap magentas to this color");
             if (ImGui::Button("Reset##HSL")) {
                 m_red[0]=0.75f; m_red[1]=0.25f; m_red[2]=0.25f;
                 m_orange[0]=0.75f; m_orange[1]=0.50f; m_orange[2]=0.25f;

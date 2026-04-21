@@ -49,7 +49,7 @@ cmake --build ./build --config Release --target uevr
 6. You should now be able to compile UEVR by pressing `Ctrl+Shift+P` and selecting `CMake: Build` or by pressing `F7`
 ### Building plugins
 
-The 15 post-processing plugins are defined in `cmake.toml` and built alongside UEVR:
+The 16 post-processing plugins are defined in `cmake.toml` and built alongside UEVR:
 
 ```
 cmake --build ./build --config Release --target fakehdr_plugin

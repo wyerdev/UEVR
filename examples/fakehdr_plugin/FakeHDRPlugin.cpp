@@ -272,7 +272,7 @@ public:
     // Settings persistence
     // ========================================================================
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"fakehdr_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"fakehdr_settings.txt";
     }
 
     void save_settings() {
@@ -305,21 +305,17 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("FakeHDR Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", FAKEHDR_VERSION);
-            ImGui::TextWrapped("Easiest way to make any game look good. Deepens darks and makes colors pop via local tone mapping bloom.");
+            ImGui::TextWrapped("Easiest way to make any game look good. Deepens darks and makes colors pop via local tone mapping bloom. Enhances detail without clipping.");
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);
 
-            constexpr float step = 0.01f;
-            constexpr float step_fast = 0.1f;
-            changed |= ImGui::InputFloat("HDR Power", &m_hdr_power, step, step_fast, "%.2f");
-            changed |= ImGui::InputFloat("Radius 1",  &m_radius1,   step, step_fast, "%.3f");
-            changed |= ImGui::InputFloat("Radius 2",  &m_radius2,   step, step_fast, "%.3f");
-
-            // Clamp values
-            m_hdr_power = (m_hdr_power < 0.0f) ? 0.0f : (m_hdr_power > 8.0f) ? 8.0f : m_hdr_power;
-            m_radius1   = (m_radius1   < 0.0f) ? 0.0f : (m_radius1   > 8.0f) ? 8.0f : m_radius1;
-            m_radius2   = (m_radius2   < 0.0f) ? 0.0f : (m_radius2   > 8.0f) ? 8.0f : m_radius2;
+            changed |= ImGui::DragFloat("HDR Power", &m_hdr_power, 0.01f, 0.0f, 8.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tone-mapping strength. Higher = more pronounced HDR effect");
+            changed |= ImGui::DragFloat("Radius 1",  &m_radius1,   0.001f, 0.0f, 8.0f, "%.3f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Inner bloom sample distance. Affects fine detail");
+            changed |= ImGui::DragFloat("Radius 2",  &m_radius2,   0.001f, 0.0f, 8.0f, "%.3f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Outer bloom sample distance. Affects broad glow");
 
             if (ImGui::Button("Reset to Defaults")) {
                 m_hdr_power = DEFAULT_HDR_POWER;

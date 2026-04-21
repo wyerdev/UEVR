@@ -242,7 +242,7 @@ public:
     void on_initialize() override { API::get()->log_info("[Clarity] Plugin initialized"); load_settings(); }
 
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"clarity_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"clarity_settings.txt";
     }
 
     void save_settings() {
@@ -274,23 +274,25 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Clarity Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", CL_VERSION);
-            ImGui::TextWrapped("Local contrast enhancement. Makes textures and details pop without changing colors. Very effective in VR.");
+            ImGui::TextWrapped("Local contrast enhancement — like sharpening but for mid-frequency detail. Makes textures pop without changing colors or clipping. Multiple blend modes (Soft Light, Overlay, Hard Light). Very effective in VR where things often look flat.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##Clarity", &m_enabled);
-            changed |= ImGui::SliderInt("Radius##Clarity", &m_radius, 0, 4);
+            changed |= ImGui::DragInt("Radius##Clarity", &m_radius, 1, 0, 4);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Higher = larger blur radius for the clarity mask");
-            changed |= ImGui::SliderFloat("Offset##Clarity", &m_offset, 1.0f, 5.0f, "%.1f");
+            changed |= ImGui::DragFloat("Offset##Clarity", &m_offset, 0.1f, 1.0f, 5.0f, "%.1f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Additional blur radius multiplier");
             const char* blend_items[] = {"Soft Light","Overlay","Hard Light","Multiply","Vivid Light","Linear Light","Addition"};
             changed |= ImGui::Combo("Blend Mode##Clarity", &m_blend_mode, blend_items, 7);
-            changed |= ImGui::SliderFloat("Strength##Clarity", &m_strength, 0.0f, 1.0f, "%.2f");
-            changed |= ImGui::SliderFloat("Dark Intensity##Clarity", &m_dark_intensity, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How the clarity mask is composited. Hard Light is sharpest, Soft Light is gentlest");
+            changed |= ImGui::DragFloat("Strength##Clarity", &m_strength, 0.01f, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overall intensity of the clarity effect");
+            changed |= ImGui::DragFloat("Dark Intensity##Clarity", &m_dark_intensity, 0.01f, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Strength of dark halos");
-            changed |= ImGui::SliderFloat("Light Intensity##Clarity", &m_light_intensity, 0.0f, 1.0f, "%.2f");
+            changed |= ImGui::DragFloat("Light Intensity##Clarity", &m_light_intensity, 0.01f, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Strength of light halos");
-            changed |= ImGui::SliderInt("BlendIf Dark##Clarity", &m_blend_if_dark, 0, 255);
+            changed |= ImGui::DragInt("BlendIf Dark##Clarity", &m_blend_if_dark, 1, 0, 255);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Exclude pixels below this brightness. 50 = target midtones");
-            changed |= ImGui::SliderInt("BlendIf Light##Clarity", &m_blend_if_light, 0, 255);
+            changed |= ImGui::DragInt("BlendIf Light##Clarity", &m_blend_if_light, 1, 0, 255);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Exclude pixels above this brightness. 205 = target midtones");
             if (ImGui::Button("Reset##Clarity")) {
                 m_radius=3; m_offset=2.0f; m_blend_mode=2; m_strength=0.4f;

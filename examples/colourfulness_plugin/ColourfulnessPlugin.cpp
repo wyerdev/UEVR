@@ -299,7 +299,7 @@ public:
     // Settings persistence
     // ========================================================================
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"colourfulness_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"colourfulness_settings.txt";
     }
 
     void save_settings() {
@@ -356,17 +356,20 @@ public:
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled", &m_enabled);
-            changed |= ImGui::SliderFloat("Colourfulness", &m_colourfulness, -1.0f, 2.0f, "%.2f");
+            changed |= ImGui::DragFloat("Colourfulness", &m_colourfulness, 0.01f, -1.0f, 2.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Degree of colourfulness, 0 = neutral");
-            changed |= ImGui::SliderFloat("Luma Limiter", &m_lim_luma, 0.1f, 1.0f, "%.2f");
+            changed |= ImGui::DragFloat("Luma Limiter", &m_lim_luma, 0.01f, 0.1f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lower values allow more change near clipping");
 
             ImGui::Separator();
             ImGui::Text("Dither");
             changed |= ImGui::Checkbox("Enable Dither", &m_enable_dither);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add subtle dithering to reduce banding after color changes");
             if (m_enable_dither) {
                 changed |= ImGui::Checkbox("Coloured Noise", &m_col_noise);
-                changed |= ImGui::SliderFloat("Backbuffer Bits", &m_bb_bits, 1.0f, 32.0f, "%.0f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Use color noise instead of monochrome. Usually looks better");
+                changed |= ImGui::DragFloat("Backbuffer Bits", &m_bb_bits, 1.0f, 1.0f, 32.0f, "%.0f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bit depth of the output. 8 for most displays, 10 for HDR");
             }
 
             if (ImGui::Button("Reset to Defaults")) {

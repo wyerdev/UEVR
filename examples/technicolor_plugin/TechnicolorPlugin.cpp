@@ -226,7 +226,7 @@ public:
     // Settings
     // ========================================================================
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"technicolor_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"technicolor_settings.txt";
     }
 
     void save_settings() {
@@ -265,15 +265,20 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Technicolor Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", PLUGIN_VERSION);
-            ImGui::TextWrapped("Emulates 2-strip Technicolor (old Hollywood look). Teal shadows, warm highlights. Use sparingly.");
+            ImGui::TextWrapped("Emulates 2-strip Technicolor (old Hollywood look). Strong color shift — teal shadows, warm highlights. Use sparingly.");
             bool changed = false;
 
             changed |= ImGui::Checkbox("Enabled##tech", &m_enabled);
-            changed |= ImGui::SliderFloat("Power", &m_power, 0.0f, 8.0f, "%.1f");
-            changed |= ImGui::SliderFloat("Negative R", &m_neg_r, 0.0f, 1.0f, "%.2f");
-            changed |= ImGui::SliderFloat("Negative G", &m_neg_g, 0.0f, 1.0f, "%.2f");
-            changed |= ImGui::SliderFloat("Negative B", &m_neg_b, 0.0f, 1.0f, "%.2f");
-            changed |= ImGui::SliderFloat("Strength", &m_strength, 0.0f, 1.0f, "%.2f");
+            changed |= ImGui::DragFloat("Power", &m_power, 0.1f, 0.0f, 8.0f, "%.1f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overall intensity of the Technicolor effect");
+            changed |= ImGui::DragFloat("Negative R", &m_neg_r, 0.01f, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Red channel film negative. Higher = less red in dark areas");
+            changed |= ImGui::DragFloat("Negative G", &m_neg_g, 0.01f, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Green channel film negative. Higher = less green in dark areas");
+            changed |= ImGui::DragFloat("Negative B", &m_neg_b, 0.01f, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blue channel film negative. Higher = less blue in dark areas");
+            changed |= ImGui::DragFloat("Strength", &m_strength, 0.01f, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blend between original (0) and full Technicolor (1)");
 
             if (ImGui::Button("Reset to Defaults##tech")) {
                 m_power = DEFAULT_POWER; m_neg_r = DEFAULT_NEG_R; m_neg_g = DEFAULT_NEG_G;

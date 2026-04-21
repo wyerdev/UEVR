@@ -192,7 +192,7 @@ public:
     }
 
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"liftgammagain_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"liftgammagain_settings.txt";
     }
 
     void save_settings() {
@@ -232,14 +232,14 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Lift Gamma Gain", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", LGG_VERSION);
-            ImGui::TextWrapped("Fine-tune shadows, midtones, and highlights separately per RGB channel.");
+            ImGui::TextWrapped("Fine-tune shadows, midtones, and highlights separately per RGB channel. Use if LevelsPlus alone isn't enough. Gain can clip highlights if pushed high.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##LGG", &m_enabled);
-            changed |= ImGui::SliderFloat3("Lift (Shadows)", m_lift, 0.0f, 2.0f, "%.2f");
+            changed |= ImGui::DragFloat3("Lift (Shadows)", m_lift, 0.01f, 0.0f, 2.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjust shadows per R/G/B channel");
-            changed |= ImGui::SliderFloat3("Gamma (Midtones)", m_gamma, 0.01f, 2.0f, "%.2f");
+            changed |= ImGui::DragFloat3("Gamma (Midtones)", m_gamma, 0.01f, 0.01f, 2.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjust midtones per R/G/B channel");
-            changed |= ImGui::SliderFloat3("Gain (Highlights)", m_gain, 0.0f, 2.0f, "%.2f");
+            changed |= ImGui::DragFloat3("Gain (Highlights)", m_gain, 0.01f, 0.0f, 2.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjust highlights per R/G/B channel");
             if (ImGui::Button("Reset##LGG")) {
                 m_lift[0] = m_lift[1] = m_lift[2] = 1.0f;

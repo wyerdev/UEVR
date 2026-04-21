@@ -206,7 +206,7 @@ public:
     void on_initialize() override { API::get()->log_info("[LumaSharpen] Plugin initialized"); load_settings(); }
 
     std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"lumasharpen_settings.txt";
+        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"lumasharpen_settings.txt";
     }
 
     void save_settings() {
@@ -238,17 +238,17 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("LumaSharpen Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", LS_VERSION);
-            ImGui::TextWrapped("Sharpens in luminance only to avoid color artifacts. Good for fine detail recovery.");
+            ImGui::TextWrapped("Sharpens in luminance only to avoid color fringing. 4 sampling patterns with adjustable strength and halo clamp. Best for fine detail recovery on top of CAS.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##LumaSharpen", &m_enabled);
-            changed |= ImGui::SliderFloat("Strength##LS", &m_sharp_strength, 0.1f, 3.0f, "%.2f");
+            changed |= ImGui::DragFloat("Strength##LS", &m_sharp_strength, 0.01f, 0.1f, 3.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Strength of the sharpening effect");
-            changed |= ImGui::SliderFloat("Clamp##LS", &m_sharp_clamp, 0.0f, 1.0f, "%.3f");
+            changed |= ImGui::DragFloat("Clamp##LS", &m_sharp_clamp, 0.001f, 0.0f, 1.0f, "%.3f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Limits maximum sharpening per pixel to prevent halos");
             const char* pattern_items[] = {"Fast (7-tap)","Normal (9-tap)","Wider (17-tap)","Pyramid"};
             changed |= ImGui::Combo("Pattern##LS", &m_pattern, pattern_items, 4);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sampling pattern. Normal is recommended.");
-            changed |= ImGui::SliderFloat("Offset Bias##LS", &m_offset_bias, 0.0f, 6.0f, "%.1f");
+            changed |= ImGui::DragFloat("Offset Bias##LS", &m_offset_bias, 0.1f, 0.0f, 6.0f, "%.1f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjusts the radius of the sampling pattern");
             changed |= ImGui::Checkbox("Show Sharpen##LS", &m_show_sharpen);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Visualize the sharpening mask (debug)");
