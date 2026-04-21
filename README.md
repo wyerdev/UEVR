@@ -5,7 +5,7 @@ Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix
 
 **Credits:** 
 - Built on [praydog's UEVR](https://github.com/praydog/UEVR) ([Original UEVR README below](#original-uevr-readme)). 
-- Shaders ported from ReShade originals by CeeJay.dk, AMD, SLSNe, Marty McFly, 3an, DKT70, Loadus, Martins Upitis, bacondither, Ioxa, and kingeric1992 ([license files](examples/)).
+- Shaders ported from ReShade originals by CeeJay.dk, AMD, SLSNe, Marty McFly, 3an, DKT70, Loadus, Martins Upitis, bacondither, Ioxa, kingeric1992, Niklas Haas (haasn), and JPulowski ([license files](examples/)).
 
 # [How to Install](docs/INSTALL.md)
 
@@ -21,15 +21,7 @@ Rare cutscene or 3P transition crashes may still remain in some games. The D3D12
 ## UEVR Plugins: ReShade Post-Processing Shaders
 - Fix washed-out colors and grey blacks
 
-VR headsets often show **washed-out colors and grey blacks** compared to a flat monitor. This fork includes 15 ReShade shaders to fix this, re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
-
-### **Performance**
-
-Performance impact is small (hopefully) — typically **1–2 ms** on DX12, more on DX11. 
-
-It varies by title: some games show no loss at all, others a bit more. And maybe depends on GPU as well.
-
-The visual improvement is well worth the small performance impact.
+VR headsets often show **washed-out colors and grey blacks** compared to a flat monitor. This fork includes 16 ReShade shaders to fix this, re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
 
 ### **Where to start:** 
 - **LevelsPlus** fixes grey blacks (the #1 VR issue) and 
@@ -70,7 +62,13 @@ These change the overall look and feel of the image. Detail-safe — they enhanc
 | 14 | **CAS** | AMD FidelityFX Contrast Adaptive Sharpening. Adapts sharpening per-pixel based on local contrast — sharpens flat areas more, high-contrast edges less. No halos. Good general-purpose sharpener. |
 | 15 | **LumaSharpen** | Sharpens in luminance only (unsharp mask on luma), avoiding color fringing. 4 sampling patterns, adjustable strength and halo clamp. Best for fine detail recovery on top of CAS. |
 
-All shaders are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Shaders are loaded in numeric order (01→15). Settings are saved per-game automatically.
+**Cleanup & Correction (final pass)**
+
+| # | Shader | When to Use It |
+|---|--------|----------------|
+| 16 | **Deband** | Removes color banding artifacts in gradients (common on VR panels). Detects flat regions via standard deviation + Weber ratio analysis, smooths them, and applies ordered dithering. |
+
+All shaders are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Shaders are loaded in numeric order (01→16). Settings are saved per-game automatically.
 
 ### Presets
 
@@ -79,13 +77,105 @@ Don't want to configure each shader manually? Load a preset instead:
 | Preset | What It Enables | Best For |
 |--------|----------------|----------|
 | **All Off** | Nothing | Reset everything back to defaults |
-| **VR Fix - Black Levels** | LevelsPlus | Quick fix for grey/washed-out blacks |
-| **VR Essentials** | LevelsPlus + Vibrance | Black fix + subtle color boost |
+| **Deeper Blacks** | LevelsPlus + Vibrance | Fix grey/washed-out blacks + subtle color boost |
+| **Sharpen Only** | CAS + LumaSharpen + Deband | Clearer image without any color changes |
+| **High Contrast** | Curves (Luma S-curve) + Vibrance | Strong S-curve contrast + selective color boost |
 | **Cinematic** | LevelsPlus + Tonemap + Curves + DPX | Warm, film-like look |
-| **Vivid** | LevelsPlus + Vibrance + Colourfulness | Punchy, saturated colors |
-| **HDR Look** | LevelsPlus + FakeHDR + Colourfulness | Local tone mapping + enhanced color |
+| **Vivid Colors** | LevelsPlus + Vibrance + Colourfulness | Punchy, saturated colors |
+| **HDR Depth** | LevelsPlus + FakeHDR + Colourfulness | Local tone mapping + enhanced color |
 
 You can also save your own presets — **per-game** (local) or **shared across all games** (global).
+
+### Which Shader Should I Use?
+
+Many shaders overlap. These tables help you pick the right one for your problem.
+
+#### Washed Out / Grey / Flat Image
+
+| | LevelsPlus (#01) | Tonemap (#03) | LiftGammaGain (#02) |
+|---|---|---|---|
+| What it fixes | Blacks aren't black, whites aren't white | Overall brightness/saturation off | Shadow/midtone/highlight color cast |
+| Best for | **Start here** — fixes 80% of washed-out games | Global brightness + saturation tweak | Color-cast correction (e.g. shadows too blue) |
+| Downside if too high | Crushed blacks (lose shadow detail) | Blown highlights, oversaturation | Color shifts |
+| OK to combine? | Yes — apply first | Yes — adds global adjustment | Yes — complementary to LevelsPlus |
+
+Start with **LevelsPlus**. Still flat? Add **Tonemap**. See a color cast? Add **LiftGammaGain**.
+
+#### Dull / Desaturated Colors
+
+| | Vibrance (#09) | Colourfulness (#08) | Technicolor (#07) | DPX (#06) |
+|---|---|---|---|---|
+| How it works | Boosts dull colors more, protects saturated | Boosts all saturation with limiter | 2-strip film color separation | Film stock emulation |
+| Skin tones safe? | Yes | Mostly | No | No |
+| Changes color palette? | No | No | Yes (teal + warm) | Yes (warm/golden) |
+| Best for | Safe default for more vivid | More saturation without clipping | Stylized cinematic look | Warm cinematic look |
+| OK to combine? | Yes | Yes with Vibrance | Use alone | Use alone |
+
+**Vibrance** is the safest start. **Colourfulness** stacks well with it. Technicolor and DPX are style choices — don't combine them with each other.
+
+#### Flat / No Depth (Colors Are Fine but Image Looks "Painted On")
+
+| | Curves (#04) | Clarity (#13) | FakeHDR (#05) | FilmicPass (#12) |
+|---|---|---|---|---|
+| Scope | Global contrast S-curve | **Local** contrast (per-region) | Local tone mapping via bloom | Full cinematic chain |
+| Best for | Simple contrast bump | **Texture detail in VR** — surfaces pop | Recovering dark detail without blowing highlights | Specific film emulation |
+| Downside if too high | Crushed blacks / clipped whites | Halos around strong edges | "HDR-fake" look | Many params interact unpredictably |
+| OK to combine? | Yes | Yes (different scope) | Yes with Curves/Clarity | Use carefully |
+
+**Curves** for basic contrast. **Clarity** is the VR standout — local contrast makes everything look less flat. **FakeHDR** for dark games with crushed detail.
+
+#### Color Banding in Dark Areas
+
+| | Deband (#16) | FilmGrain2 (#10) |
+|---|---|---|
+| Approach | Detects + smooths banded areas + dithering | Overlays film grain noise everywhere |
+| Targeted? | Yes — only affects banded areas | No — applies everywhere |
+| Best for | Clean, invisible fix | Hiding banding + adding film character |
+
+Use **Deband** for a surgical fix. **FilmGrain2** if you also want the grain aesthetic. Both work together.
+
+#### Sharpening
+
+| | CAS (#14) | LumaSharpen (#15) | UE Built-In (`r.Tonemapper.Sharpen` CVar) |
+|---|---|---|---|
+| Algorithm | 3×3 adaptive contrast sharpening | Unsharp mask on luma only | Cross 4-tap unsharp mask |
+| Adapts to edges? | Yes (per-pixel) | No | No |
+| Color halos? | No | No (luma-only) | Possible at high values |
+| Quality | **Best for VR** | Very good | Basic |
+
+**CAS** is the best sharpener. The UE built-in (`r.Tonemapper.Sharpen` in the CVar menu) works for quick tweaks but CAS is superior. Don't stack CAS + LumaSharpen at high values.
+
+#### Color Remapping
+
+**HSL Shift (#11)** is unique — it lets you shift individual color hues (8 zones: reds, oranges, yellows, greens, cyans, blues, purples, magentas). Use it when one specific color looks wrong, not for global adjustments.
+
+#### Don't Stack These
+
+| Combination | Problem |
+|---|---|
+| Technicolor + DPX | Both impose strong color palettes — they fight |
+| Vibrance + Colourfulness both at max | Double saturation boost clips colors |
+| Multiple contrast shaders all at high values | Crushed blacks + blown whites |
+| Clarity + CAS both at high values | Over-sharpened, ringing artifacts |
+| FilmicPass + Tonemap + LevelsPlus all maxed | Triple-processing gamma — unpredictable |
+
+**Rule of thumb**: Pick one shader per problem, tune it, then add a second only if needed.
+
+### Performance
+
+Most shaders are essentially **free** — they read one pixel, do some math, write it back.
+
+| Cost | Shaders | GPU Time (per eye) |
+|---|---|---|
+| **Free** (1 texture read) | LevelsPlus, LiftGammaGain, Tonemap, Curves, DPX, Technicolor, Colourfulness, Vibrance, HSL Shift | ~0.05ms each |
+| **Cheap** (1 read, heavy math) | FilmGrain2, FilmicPass | ~0.1ms each |
+| **Light** (3–5 reads) | LumaSharpen, Deband | ~0.1ms each |
+| **Medium** (9 reads) | CAS | ~0.15ms |
+| **Heavy** (17–18 reads) | FakeHDR, Clarity | ~0.3–0.5ms each |
+
+**Typical usage** (2–5 shaders): well under **1ms**. All 16 at once: ~1.5–2ms total. For context, a 90fps VR frame budget is 11.1ms.
+
+*All times are rough estimates based on shader complexity, not measured benchmarks. Actual cost varies by GPU, resolution, and game. Use your VR runtime's frame timing overlay to measure real impact.*
 
 ---
 

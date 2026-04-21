@@ -276,6 +276,14 @@ headers = ["examples/lumasharpen_plugin/**.hpp", "examples/lumasharpen_plugin/**
 [target.lumasharpen_plugin.properties]
 OUTPUT_NAME = "15_LumaSharpenShader"
 
+[target.deband_plugin]
+type = "plugin"
+sources = ["examples/deband_plugin/DebandPlugin.cpp"]
+headers = ["examples/deband_plugin/**.hpp", "examples/deband_plugin/**.h"]
+
+[target.deband_plugin.properties]
+OUTPUT_NAME = "16_DebandShader"
+
 [target.sdk-test]
 type = "shared"
 sources = ["side-projects/sdk-test/**.cpp", "side-projects/sdk-test/**.c"]

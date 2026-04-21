@@ -99,7 +99,9 @@ if defined PRESET_SRC (
     if not exist "%PRESET_DST%" mkdir "%PRESET_DST%"
     for /d %%d in ("%PRESET_SRC%\*") do (
         set "PNAME=%%~nxd"
-        if not exist "%PRESET_DST%\!PNAME!" mkdir "%PRESET_DST%\!PNAME!"
+        :: Clean and recreate so stale files from older versions are removed
+        if exist "%PRESET_DST%\!PNAME!" rmdir /s /q "%PRESET_DST%\!PNAME!"
+        mkdir "%PRESET_DST%\!PNAME!"
         for %%f in ("%%d\*") do (
             copy /Y "%%f" "%PRESET_DST%\!PNAME!\" >nul 2>&1
             if errorlevel 1 (
