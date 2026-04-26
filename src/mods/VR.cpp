@@ -2125,6 +2125,39 @@ void VR::on_present() {
     std::scoped_lock _{m_openvr_mtx};
     m_submitted = false;
 
+    // Log VR rendering-mode transitions so plugin/effect-runtime diagnostics
+    // can be correlated with the active mode (Native Stereo / Synchronized
+    // Sequential / Alternating-AFR, plus the native_stereo_fix flag and the
+    // SyncedSequentialMethod sub-mode). One line per state change only.
+    // File-static cache avoids touching VR.hpp class layout (per repo rule:
+    // never add members to upstream-shifting headers — use .cpp statics).
+    {
+        static uint32_t s_last_logged_render_mode_key = 0xffffffffu;
+        const int rm_idx     = m_rendering_method->value();
+        const int ssm_idx    = m_synced_afr_method->value();
+        const bool ns_fix    = is_native_stereo_fix_enabled();
+        const bool ext_compat= m_extreme_compat_mode->value();
+        const uint32_t key = (uint32_t)(rm_idx & 0xff)
+                           | ((uint32_t)(ssm_idx & 0xff) << 8)
+                           | ((uint32_t)(ns_fix ? 1 : 0) << 16)
+                           | ((uint32_t)(ext_compat ? 1 : 0) << 17);
+        if (key != s_last_logged_render_mode_key) {
+            s_last_logged_render_mode_key = key;
+            const char* rm_name = (rm_idx >= 0 && (size_t)rm_idx < s_rendering_method_names.size())
+                                  ? s_rendering_method_names[rm_idx].c_str() : "?";
+            const char* ssm_name = (ssm_idx >= 0 && (size_t)ssm_idx < s_synced_afr_method_names.size())
+                                   ? s_synced_afr_method_names[ssm_idx].c_str() : "?";
+            spdlog::info("[VR] rendering mode: \"{}\" | synced_sequential_method: \"{}\" | "
+                         "native_stereo_fix={} (effective={}) | extreme_compat_mode={} | "
+                         "is_using_afr={} is_using_synchronized_afr={}",
+                         rm_name, ssm_name,
+                         m_native_stereo_fix->value() ? 1 : 0, ns_fix ? 1 : 0,
+                         ext_compat ? 1 : 0,
+                         is_using_afr() ? 1 : 0,
+                         is_using_synchronized_afr() ? 1 : 0);
+        }
+    }
+
     const auto renderer = g_framework->get_renderer_type();
     vr::EVRCompositorError e = vr::EVRCompositorError::VRCompositorError_None;
 

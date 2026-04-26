@@ -54,15 +54,15 @@ cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release --target fakehdr_plugin
 ```
 
-Output: `build/Release/05_FakeHDRShader.dll`
+Output: `build/Release/07_FakeHDRShader.dll`
 
 ## Installation
 
-1. Copy `05_FakeHDRShader.dll` to `%APPDATA%/UnrealVRMod/UEVR/plugins/` (global, all games) or `%APPDATA%/UnrealVRMod/<game_executable>/plugins/` (per-game)
+1. Copy `07_FakeHDRShader.dll` to `%APPDATA%/UnrealVRMod/UEVR/plugins/` (global, all games) or `%APPDATA%/UnrealVRMod/<game_executable>/plugins/` (per-game)
 2. Launch the game with UEVR
 3. Open UEVR menu (Insert or L3+R3) → FakeHDR sidebar entry → Enable
 
-This plugin is one of 16 ReShade-ported post-processing plugins. See the [main README](../../README.md) and [technical docs](../../docs/fakehdr-vr-postprocess-plugin.md) for the full suite.
+This plugin is one of the ReShade-ported post-processing plugins. See the [main README](../../README.md) and [technical docs](../../docs/fakehdr-vr-postprocess-plugin.md) for the full suite.
 
 ## Credits
 

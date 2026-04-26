@@ -36,6 +36,7 @@
 #include "pluginloader/FRHITexture2DFunctions.hpp"
 #include "pluginloader/FUObjectArrayFunctions.hpp"
 #include "pluginloader/UScriptStructFunctions.hpp"
+#include "pluginloader/SettingsRegistry.hpp"
 
 #include "LuaLoader.hpp"
 #include "UObjectHook.hpp"
@@ -43,6 +44,11 @@
 
 #include "Mods.hpp"
 #include "PluginLoader.hpp"
+
+// Single source of truth for the shader settings subdirectory (host side).
+// Plugin DLLs mirror this via examples/renderlib/plugin_assets.hpp.
+// If this path changes, update that header too.
+static constexpr std::string_view SHADER_SETTINGS_DIR_NAME = "shader_settings";
 
 UEVR_PluginVersion g_plugin_version{
     UEVR_PLUGIN_VERSION_MAJOR, UEVR_PLUGIN_VERSION_MINOR, UEVR_PLUGIN_VERSION_PATCH};
@@ -270,7 +276,9 @@ UEVR_PluginFunctions g_plugin_functions {
     .get_total_commits = []() -> unsigned int {
         return UEVR_TOTAL_COMMITS;
     },
-    .dispatch_custom_event = uevr::dispatch_custom_event
+    .dispatch_custom_event = uevr::dispatch_custom_event,
+    .register_settings_serializer = uevr::settings_registry::register_settings_serializer,
+    .notify_settings_changed = uevr::settings_registry::notify_settings_changed
 };
 
 #define GET_ENGINE_WORLD_RETNULL() \
@@ -1768,7 +1776,7 @@ void PluginLoader::early_init() try {
     // Collect paths first to avoid iterator invalidation when renaming into a subdirectory.
     {
         const auto old_dir = Framework::get_persistent_dir() / "data" / "plugins";
-        const auto new_dir = old_dir / "shader_settings";
+        const auto new_dir = old_dir / SHADER_SETTINGS_DIR_NAME;
         if (fs::exists(old_dir)) {
             std::vector<fs::path> to_migrate;
             for (const auto& entry : fs::directory_iterator(old_dir)) {
@@ -1936,12 +1944,24 @@ std::optional<std::string> PluginLoader::on_initialize_d3d_thread() {
         ++it;
     }
 
+    // Phase B: now that every plugin's on_initialize() (and thus their
+    // register_settings_serializer call) has run, replay auto.uevrpreset so
+    // settings persist across the DLL reload that load_preset triggers.
+    // Plugins do NOT read settings files themselves anymore.
+    uevr::settings_registry::apply_auto_preset();
+
     return std::nullopt;
 }
 
 void PluginLoader::attempt_unload_plugins() {
     {
         std::unique_lock _{m_api_cb_mtx};
+
+        // Flush any pending preset auto-save and drop the in-memory
+        // settings registry before plugin DLLs are freed — the registry
+        // holds raw function pointers into those DLLs.
+        uevr::settings_registry::flush_now();
+        uevr::settings_registry::clear();
 
         for (auto& callbacks : m_plugin_callback_lists) {
             callbacks->clear();
@@ -1986,6 +2006,26 @@ void PluginLoader::attempt_unload_plugins() {
 void PluginLoader::reload_plugins() {
     early_init();
     on_initialize_d3d_thread();
+}
+
+bool PluginLoader::is_shader_plugin_enabled(const std::string& name) const {
+    // Map DLL name (e.g. "10_VibranceShader" / "VibrancePlugin") to a bare
+    // identifier ("vibrance") and ask the live settings registry whether
+    // any registered serializer with a case-insensitively matching section
+    // name reports enabled=1. This reflects in-memory state immediately —
+    // no file-system polling, so toggling enabled in a plugin's UI or
+    // loading a preset updates the sidebar color on the very next frame.
+    std::string core = name;
+    size_t start = 0;
+    while (start < core.size() && (std::isdigit(core[start]) || core[start] == '_')) ++start;
+    core = core.substr(start);
+    const std::string shader_suffix = "Shader";
+    const std::string plugin_suffix = "Plugin";
+    if (core.size() > shader_suffix.size() && core.substr(core.size() - shader_suffix.size()) == shader_suffix)
+        core = core.substr(0, core.size() - shader_suffix.size());
+    else if (core.size() > plugin_suffix.size() && core.substr(core.size() - plugin_suffix.size()) == plugin_suffix)
+        core = core.substr(0, core.size() - plugin_suffix.size());
+    return uevr::settings_registry::is_section_enabled(core);
 }
 
 std::vector<SidebarEntryInfo> PluginLoader::get_sidebar_entries() {
@@ -2066,39 +2106,8 @@ void PluginLoader::on_draw_ui() {
 
         const auto persistent_dir = Framework::get_persistent_dir();
         for (auto&& [name, _] : m_plugins) {
-            // Derive settings filename from plugin DLL name:
-            // "01_LevelsPlusShader" → strip prefix digits/underscore → "LevelsPlusShader"
-            // → strip "Shader" suffix → "LevelsPlus" → lowercase → "levelsplus_settings.txt"
-            std::string core = name;
-            // Strip leading digits and underscores (e.g. "01_")
-            size_t start = 0;
-            while (start < core.size() && (std::isdigit(core[start]) || core[start] == '_')) ++start;
-            core = core.substr(start);
-            // Strip "Shader" or "Plugin" suffix
-            const std::string shader_suffix = "Shader";
-            const std::string plugin_suffix = "Plugin";
-            if (core.size() > shader_suffix.size() && core.substr(core.size() - shader_suffix.size()) == shader_suffix) {
-                core = core.substr(0, core.size() - shader_suffix.size());
-            } else if (core.size() > plugin_suffix.size() && core.substr(core.size() - plugin_suffix.size()) == plugin_suffix) {
-                core = core.substr(0, core.size() - plugin_suffix.size());
-            }
-            // Lowercase
-            for (auto& c : core) c = (char)std::tolower(c);
-            auto settings_path = persistent_dir / "data" / "plugins" / (core + "_settings.txt");
-
-            bool is_enabled = false;
-            try {
-                std::ifstream f(settings_path);
-                if (f.is_open()) {
-                    int val = 0;
-                    if (f >> val) is_enabled = (val != 0);
-                }
-            } catch (...) {}
-
-            if (is_enabled) {
-                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "[ON]  %s", name.c_str());
-            } else {
-                ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "[OFF] %s", name.c_str());
+            if (is_shader_plugin_enabled(name)) {
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s", name.c_str());
             }
         }
     } else {
@@ -2129,15 +2138,16 @@ std::filesystem::path PluginLoader::get_shipping_presets_dir() {
 }
 
 std::vector<std::string> PluginLoader::list_presets(const std::filesystem::path& dir) {
+    // Returns names INCLUDING the .uevrpreset extension so the UI can
+    // construct paths via `dir / name` directly.
     std::vector<std::string> result;
     try {
         if (!std::filesystem::exists(dir)) return result;
         for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-            if (entry.is_directory()) {
-                auto name = entry.path().filename().string();
-                if (name == "." || name == "..") continue;
-                result.push_back(name);
-            }
+            if (!entry.is_regular_file()) continue;
+            const auto& p = entry.path();
+            if (p.extension() != ".uevrpreset") continue;
+            result.push_back(p.filename().string());
         }
         std::sort(result.begin(), result.end());
     } catch (...) {}
@@ -2146,27 +2156,22 @@ std::vector<std::string> PluginLoader::list_presets(const std::filesystem::path&
 
 bool PluginLoader::save_preset(const std::filesystem::path& presets_dir, const std::string& name) {
     try {
-        auto preset_path = presets_dir / name;
-        std::filesystem::create_directories(preset_path);
+        std::filesystem::create_directories(presets_dir);
+        // Append the canonical extension if the user-supplied name lacks it.
+        std::filesystem::path file_name = name;
+        if (file_name.extension() != ".uevrpreset") {
+            file_name = std::filesystem::path(name + ".uevrpreset");
+        }
+        const auto preset_path = presets_dir / file_name;
 
-        const auto persistent_dir = Framework::get_persistent_dir();
-        const auto shader_settings_dir = persistent_dir / "data" / "plugins" / "shader_settings";
-        int count = 0;
-        if (!std::filesystem::exists(shader_settings_dir)) {
-            m_preset_status = "No shader settings to save";
+        std::string display = file_name.stem().string();
+        if (!uevr::settings_registry::save_named_preset(preset_path, display)) {
+            m_preset_status = "Save failed: write error";
             return false;
         }
-        for (const auto& entry : std::filesystem::directory_iterator(shader_settings_dir)) {
-            if (!entry.is_regular_file()) continue;
-            auto fname = entry.path().filename().string();
-            if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
-                std::filesystem::copy_file(entry.path(), preset_path / fname, std::filesystem::copy_options::overwrite_existing);
-                ++count;
-            }
-        }
 
-        m_preset_status = "Saved \"" + name + "\" (" + std::to_string(count) + " files)";
-        spdlog::info("[PluginLoader] Saved preset '{}' with {} settings files to {}", name, count, preset_path.string());
+        m_preset_status = "Saved \"" + display + "\"";
+        spdlog::info("[PluginLoader] Saved preset to {}", preset_path.string());
         return true;
     } catch (const std::exception& e) {
         m_preset_status = std::string("Save failed: ") + e.what();
@@ -2207,7 +2212,7 @@ static void restore_active_preset_from_disk() {
         if (!std::getline(f, builtin_str)) return;
         auto dir = std::filesystem::path(dir_str);
         // Verify the preset still exists on disk
-        if (std::filesystem::exists(dir / name)) {
+        if (std::filesystem::exists(dir / (name + ".uevrpreset"))) {
             s_active_preset_name = name;
             s_active_preset_dir = dir;
             s_active_preset_is_builtin = (builtin_str == "1");
@@ -2217,49 +2222,35 @@ static void restore_active_preset_from_disk() {
 
 bool PluginLoader::load_preset(const std::filesystem::path& preset_path) {
     try {
+        if (!std::filesystem::exists(preset_path)) {
+            m_preset_status = "Load failed: file not found";
+            return false;
+        }
+
         const auto persistent_dir = Framework::get_persistent_dir();
-        const auto shader_settings_dir = persistent_dir / "data" / "plugins" / "shader_settings";
+        const auto shader_settings_dir = persistent_dir / "data" / "plugins" / SHADER_SETTINGS_DIR_NAME;
         std::filesystem::create_directories(shader_settings_dir);
-
-        // Clear shader settings so plugins not in the preset revert to defaults on reload.
-        // Collect first to avoid iterator invalidation while removing entries.
-        {
-            std::vector<std::filesystem::path> to_remove;
-            for (const auto& entry : std::filesystem::directory_iterator(shader_settings_dir)) {
-                if (!entry.is_regular_file()) continue;
-                auto fname = entry.path().filename().string();
-                if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
-                    to_remove.push_back(entry.path());
-                }
-            }
-            for (const auto& p : to_remove) {
-                std::error_code ec; std::filesystem::remove(p, ec);
-            }
-        }
-
-        int count = 0;
-        for (const auto& entry : std::filesystem::directory_iterator(preset_path)) {
-            if (!entry.is_regular_file()) continue;
-            auto fname = entry.path().filename().string();
-            if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
-                std::filesystem::copy_file(entry.path(), shader_settings_dir / fname, std::filesystem::copy_options::overwrite_existing);
-                ++count;
-            }
-        }
+        const auto auto_path = shader_settings_dir / "auto.uevrpreset";
 
         auto name = preset_path.filename().string();
-        s_active_preset_name = name;
+        s_active_preset_name = preset_path.stem().string();
         s_active_preset_dir = preset_path.parent_path();
         s_active_preset_is_builtin = (s_active_preset_dir == get_shipping_presets_dir());
         save_active_preset_to_disk();
 
-        m_preset_status = "Loaded \"" + name + "\" (" + std::to_string(count) + " files) - reloading plugins...";
-        spdlog::info("[PluginLoader] Loaded preset '{}' ({} files), reloading plugins", name, count);
+        m_preset_status = "Loaded \"" + name + "\" - reloading plugins...";
+        spdlog::info("[PluginLoader] Loaded preset '{}', reloading plugins", name);
 
+        // Unload first so attempt_unload_plugins()'s flush_now() drains the
+        // current (about-to-be-replaced) registry to disk — then we copy the
+        // chosen preset over auto.uevrpreset. If we copied first, flush_now()
+        // would clobber it with the still-live old values.
         attempt_unload_plugins();
+        std::filesystem::copy_file(preset_path, auto_path,
+            std::filesystem::copy_options::overwrite_existing);
         reload_plugins();
 
-        m_preset_status = "Loaded \"" + name + "\" (" + std::to_string(count) + " files)";
+        m_preset_status = "Loaded \"" + name + "\"";
         return true;
     } catch (const std::exception& e) {
         m_preset_status = std::string("Load failed: ") + e.what();
@@ -2271,10 +2262,11 @@ bool PluginLoader::load_preset(const std::filesystem::path& preset_path) {
 bool PluginLoader::delete_preset(const std::filesystem::path& preset_path) {
     try {
         auto name = preset_path.filename().string();
-        std::filesystem::remove_all(preset_path);
+        std::error_code ec;
+        std::filesystem::remove(preset_path, ec);
         m_preset_status = "Deleted \"" + name + "\"";
         spdlog::info("[PluginLoader] Deleted preset '{}'", name);
-        if (s_active_preset_name == name && s_active_preset_dir == preset_path.parent_path()) {
+        if (s_active_preset_name == preset_path.stem().string() && s_active_preset_dir == preset_path.parent_path()) {
             s_active_preset_name.clear();
             s_active_preset_dir.clear();
             save_active_preset_to_disk();
@@ -2295,7 +2287,8 @@ void PluginLoader::draw_preset_ui() {
             auto global = get_global_presets_dir();
             for (int i = 1; i < 1000; ++i) {
                 auto name = "Preset " + std::to_string(i);
-                if (!std::filesystem::exists(local / name) && !std::filesystem::exists(global / name)) {
+                auto file = name + ".uevrpreset";
+                if (!std::filesystem::exists(local / file) && !std::filesystem::exists(global / file)) {
                     return name;
                 }
             }
@@ -2393,6 +2386,18 @@ void PluginLoader::draw_preset_ui() {
         ImGui::Text("Global Presets (all games):");
         draw_preset_list("global_", get_global_presets_dir());
 
+        // "Disable all" is intentionally a transient action, not a preset:
+        // it resets every registered plugin to its compiled-in defaults
+        // and forces enabled=0 (auto-saved via the normal debounce path).
+        // Replaces the previous data-preset "All Off".
+        ImGui::Spacing();
+        if (ImGui::Button("Disable all shaders")) {
+            uevr::settings_registry::disable_all();
+            m_preset_status = "All shaders disabled and reset to defaults";
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(disables every shader and resets all sliders to defaults)");
+
         // Built-in presets (shipped with the release, Load-only)
         auto shipping_dir = get_shipping_presets_dir();
         if (std::filesystem::exists(shipping_dir) && std::filesystem::is_directory(shipping_dir)) {
@@ -2442,6 +2447,10 @@ void PluginLoader::on_present() {
             spdlog::error("[PluginLoader] Exception occurred in on_present callback; one of the plugins has an error.");
         }
     }
+
+    // Debounced auto-save of the .uevrpreset file (Phase A scaffold). Cheap
+    // fast path: single relaxed atomic load when nothing is dirty.
+    uevr::settings_registry::tick_debounce();
 }
 
 // D3D11 pipeline state objects — created once, bound before every plugin

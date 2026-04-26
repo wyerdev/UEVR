@@ -1,8 +1,10 @@
 # VR Post-Processing Shaders — Technical Documentation
 
-16 UEVR C++ shaders that apply ReShade-based post-processing effects directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), these shaders modify the UE render target **before** UEVR copies it to VR, so effects are visible in-headset.
+A suite of UEVR C++ shaders that apply ReShade-based post-processing effects directly to VR eye textures. Unlike ReShade (which only affects the desktop mirror), these shaders modify the UE render target **before** UEVR copies it to VR, so effects are visible in-headset.
 
-The plugin architecture, DX11/DX12 rendering pipeline, and UEVR core API changes were designed for FakeHDR (CeeJay.dk's FakeHDR.fx) and are shared by all 16 plugins.
+> **Scope of this document:** the per-shader tables (algorithm, taps/pixel, ALU cost) cover only the original 16 plugins this doc was written for. Later additions — `BlackCrush` (#03), `AdaptiveTonemapper` (#04), `LUT` (#14), `Bloom` (#20) — appear in the Plugin Load Order and shared architecture sections, but their individual algorithm/cost entries are not yet documented here. See the [main README](../README.md) for user-facing descriptions.
+
+The plugin architecture, DX11/DX12 rendering pipeline, and UEVR core API changes were designed for FakeHDR (CeeJay.dk's FakeHDR.fx) and are shared by all the shader plugins.
 
 Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and `on_draw_ui`) and several DX12 workarounds for UE's TYPELESS render targets and missing `ALLOW_RENDER_TARGET` flag.
 
@@ -14,35 +16,35 @@ Required new UEVR core API callbacks (`on_pre_render_vr_framework_dx11/dx12` and
 |---|--------|----------|--------------|----------------|
 | 01 | LevelsPlus | LevelsPlus.fx (CeeJay.dk) | Black/white point, per-channel gamma, ACES tone mapping | **Fix grey/washed-out blacks** — the #1 VR problem. Start here. |
 | 02 | LiftGammaGain | LiftGammaGain.fx (3an, CeeJay.dk) | Shadow/midtone/highlight RGB lift, gamma, gain | Fine-tune shadow/midtone/highlight color separately. Use when LevelsPlus isn't enough. |
-| 03 | Tonemap | Tonemap.fx (CeeJay.dk) | Gamma, exposure, saturation, bleach bypass, defog | Adjust overall brightness/saturation. Bleach bypass for desaturated film look. Defog to remove haze. |
+| 05 | Tonemap | Tonemap.fx (CeeJay.dk) | Gamma, exposure, saturation, bleach bypass, defog | Adjust overall brightness/saturation. Bleach bypass for desaturated film look. Defog to remove haze. |
 
 ### Color Grading
 
 | # | Shader | Based On | What It Does | When to Use It |
 |---|--------|----------|--------------|----------------|
-| 04 | Curves | Curves.fx (CeeJay.dk) | Luma/chroma contrast S-curve with multiple formulas | Add contrast — brights get brighter, darks get darker. Subtle but effective. |
-| 05 | FakeHDR | FakeHDR.fx (CeeJay.dk) | Local tone mapping via dual-radius bloom | "HDR look" — brightens dark details without blowing out highlights. |
-| 06 | DPX | DPX.fx (Loadus) | Cineon film stock color emulation | Warm cinematic color shift. Good for games that look too cold/digital. |
-| 07 | Technicolor | Technicolor.fx (DKT70, CeeJay.dk) | 2-strip Technicolor color grading | Old Hollywood look — teal shadows, warm highlights. Use sparingly. |
-| 08 | Colourfulness | Colourfulness.fx (bacondither) | Saturation enhancement with luma limiting | Boost saturation without clipping already-saturated colors. |
-| 09 | Vibrance | Vibrance.fx (CeeJay.dk) | Intelligent saturation boost (boosts dull colors more) | Make dull games pop without oversaturating skin tones. |
-| 11 | HSL Shift | HSLShift.fx (kingeric1992) | Per-hue color remapping (8 color zones) | Remap individual hues — e.g. shift reds toward orange, make greens more vivid. |
-| 12 | Filmic Pass | FilmicPass.fx (ReShade standard) | Sigmoid curves, bleach bypass, fade, per-channel gamma | Full cinematic color processing — more control than Tonemap for specific film looks. |
+| 06 | Curves | Curves.fx (CeeJay.dk) | Luma/chroma contrast S-curve with multiple formulas | Add contrast — brights get brighter, darks get darker. Subtle but effective. |
+| 07 | FakeHDR | FakeHDR.fx (CeeJay.dk) | Local tone mapping via dual-radius bloom | "HDR look" — brightens dark details without blowing out highlights. |
+| 08 | DPX | DPX.fx (Loadus) | Cineon film stock color emulation | Warm cinematic color shift. Good for games that look too cold/digital. |
+| 09 | Technicolor | Technicolor.fx (DKT70, CeeJay.dk) | 2-strip Technicolor color grading | Old Hollywood look — teal shadows, warm highlights. Use sparingly. |
+| 10 | Colourfulness | Colourfulness.fx (bacondither) | Saturation enhancement with luma limiting | Boost saturation without clipping already-saturated colors. |
+| 11 | Vibrance | Vibrance.fx (CeeJay.dk) | Intelligent saturation boost (boosts dull colors more) | Make dull games pop without oversaturating skin tones. |
+| 12 | HSL Shift | HSLShift.fx (kingeric1992) | Per-hue color remapping (8 color zones) | Remap individual hues — e.g. shift reds toward orange, make greens more vivid. |
+| 13 | Filmic Pass | FilmicPass.fx (ReShade standard) | Sigmoid curves, bleach bypass, fade, per-channel gamma | Full cinematic color processing — more control than Tonemap for specific film looks. |
 
 ### Detail & Film Effects
 
 | # | Shader | Based On | What It Does | When to Use It |
 |---|--------|----------|--------------|----------------|
-| 10 | FilmGrain2 | FilmGrain2.fx (Martins Upitis) | Photographic film grain overlay | Hide color banding in dark areas (common on VR panels). Keep subtle. |
-| 13 | Clarity | Clarity.fx (Ioxa) | Local contrast enhancement with blend mode selection | Makes textures/details pop without changing colors. **Very effective in VR** where things look flat. |
-| 14 | CAS | CAS.fx (AMD, SLSNe, Marty McFly, CeeJay.dk) | Contrast-adaptive sharpening (FidelityFX) | Per-pixel adaptive sharpening — sharpens flat areas more, high-contrast edges less. No halos. |
-| 15 | LumaSharpen | LumaSharpen.fx (CeeJay.dk) | Unsharp mask in luminance space | Sharpens in luma only to avoid color fringing. 4 sampling patterns, adjustable strength and clamp. |
+| 15 | FilmGrain2 | FilmGrain2.fx (Martins Upitis) | Photographic film grain overlay | Hide color banding in dark areas (common on VR panels). Keep subtle. |
+| 16 | Clarity | Clarity.fx (Ioxa) | Local contrast enhancement with blend mode selection | Makes textures/details pop without changing colors. **Very effective in VR** where things look flat. |
+| 17 | CAS | CAS.fx (AMD, SLSNe, Marty McFly, CeeJay.dk) | Contrast-adaptive sharpening (FidelityFX) | Per-pixel adaptive sharpening — sharpens flat areas more, high-contrast edges less. No halos. |
+| 18 | LumaSharpen | LumaSharpen.fx (CeeJay.dk) | Unsharp mask in luminance space | Sharpens in luma only to avoid color fringing. 4 sampling patterns, adjustable strength and clamp. |
 
 ### Cleanup & Correction
 
 | # | Shader | Based On | What It Does | When to Use It |
 |---|--------|----------|--------------|----------------|
-| 16 | Deband | Deband.fx (haasn/JPulowski, CeeJay.dk dithering) | Banding detection + smoothing + ordered dithering | Remove color banding in gradients (common on VR panels). |
+| 19 | Deband | Deband.fx (haasn/JPulowski, CeeJay.dk dithering) | Banding detection + smoothing + ordered dithering | Remove color banding in gradients (common on VR panels). |
 
 ### Shader Comparison, Performance & Stacking Guide
 
@@ -52,7 +54,7 @@ See the [README](../README.md#which-shader-should-i-use) for user-facing guidanc
 
 UE exposes `r.Tonemapper.Sharpen` as a CVar — UEVR already surfaces it in the CVar menu (float, 0.0–10.0). Technical comparison:
 
-| | UE Tonemapper Sharpen | CAS (#14) | LumaSharpen (#15) |
+| | UE Tonemapper Sharpen | CAS (#17) | LumaSharpen (#18) |
 |---|---|---|---|
 | Algorithm | Cross 4-tap unsharp mask | 3×3 adaptive contrast sharpening | Unsharp mask on luma only |
 | Taps | 4 (cross pattern) | 9 (full 3×3 neighborhood) | 4–12 (configurable pattern) |
@@ -63,28 +65,28 @@ UE exposes `r.Tonemapper.Sharpen` as a CVar — UEVR already surfaces it in the 
 
 ### Per-Shader Cost Breakdown (Technical Detail)
 
-The main cost driver is **texture samples per pixel** (memory bandwidth). ALU (math) is secondary. All 16 shaders are single-pass, single draw call.
+The main cost driver is **texture samples per pixel** (memory bandwidth). ALU (math) is secondary. The shaders covered in this document are all single-pass, single draw call.
 
 *All times below are rough estimates based on shader complexity (tap count + ALU), not measured benchmarks. Actual cost varies by GPU, resolution, and game.*
 
 | Tier | Shader | Taps/pixel | ALU | Detail |
 |---|---|---|---|---|
 | **Free** | LiftGammaGain (#02) | 1 | Trivial | pow + multiply — cheapest shader |
-| **Free** | Vibrance (#09) | 1 | Trivial | Dot product + lerp |
-| **Free** | Technicolor (#07) | 1 | Trivial | Dot products + multiply-add |
+| **Free** | Vibrance (#11) | 1 | Trivial | Dot product + lerp |
+| **Free** | Technicolor (#09) | 1 | Trivial | Dot products + multiply-add |
 | **Free** | LevelsPlus (#01) | 1 | Light | pow + ACES tone curve |
-| **Free** | Tonemap (#03) | 1 | Light | pow + bleach bypass + saturation |
-| **Free** | Curves (#04) | 1 | Light | One formula path (sin/exp/sqrt) |
-| **Free** | HSL Shift (#11) | 1 | Light | RGB↔HSL conversion + zone lookup |
-| **Free** | DPX (#06) | 1 | Moderate | exp + pow + 3×3 matrix multiplies |
-| **Free** | Colourfulness (#08) | 1 | Moderate | rsqrt + pow + sigmoid |
-| **Cheap** | FilmGrain2 (#10) | 1 | **Heavy** | Only 1 texture read, but Perlin noise (12+ sin/frac calls) |
-| **Cheap** | FilmicPass (#12) | 1 | **Heavy** | 4× sigmoid exp, 3× pow, soft-light blend |
-| **Light** | LumaSharpen (#15) | 3–5 | Light | Pattern-dependent (default pattern=1: 5 taps) |
-| **Light** | Deband (#16) | 5 | Light | 1 center + 4 directional + dither math |
-| **Medium** | CAS (#14) | 9 | Moderate | Full 3×3 neighborhood + adaptive contrast |
-| **Heavy** | FakeHDR (#05) | 17 | Moderate | 1 center + 8×2 bloom radii — **most expensive** |
-| **Heavy** | Clarity (#13) | 18 | Heavy | Two 9-tap Gaussian blurs (H+V) + blend modes |
+| **Free** | Tonemap (#05) | 1 | Light | pow + bleach bypass + saturation |
+| **Free** | Curves (#06) | 1 | Light | One formula path (sin/exp/sqrt) |
+| **Free** | HSL Shift (#12) | 1 | Light | RGB↔HSL conversion + zone lookup |
+| **Free** | DPX (#08) | 1 | Moderate | exp + pow + 3×3 matrix multiplies |
+| **Free** | Colourfulness (#10) | 1 | Moderate | rsqrt + pow + sigmoid |
+| **Cheap** | FilmGrain2 (#15) | 1 | **Heavy** | Only 1 texture read, but Perlin noise (12+ sin/frac calls) |
+| **Cheap** | FilmicPass (#13) | 1 | **Heavy** | 4× sigmoid exp, 3× pow, soft-light blend |
+| **Light** | LumaSharpen (#18) | 3–5 | Light | Pattern-dependent (default pattern=1: 5 taps) |
+| **Light** | Deband (#19) | 5 | Light | 1 center + 4 directional + dither math |
+| **Medium** | CAS (#17) | 9 | Moderate | Full 3×3 neighborhood + adaptive contrast |
+| **Heavy** | FakeHDR (#07) | 17 | Moderate | 1 center + 8×2 bloom radii — **most expensive** |
+| **Heavy** | Clarity (#16) | 18 | Heavy | Two 9-tap Gaussian blurs (H+V) + blend modes |
 
 All plugins share the same architecture:
 - DX11 and DX12 dual-path rendering
@@ -97,11 +99,11 @@ All plugins share the same architecture:
 
 ### Plugin Load Order
 
-Plugins are loaded in DLL name alphabetical order. Numeric prefixes (`01_` through `16_`) ensure:
-- Color correction runs first (01–03)
-- Color grading runs in the middle (04–09, 11–12): Curves → FakeHDR → DPX → Technicolor → Colourfulness → Vibrance → HSL Shift → Filmic Pass
-- Detail, sharpening & film effects run last (10, 13–15): FilmGrain2 → Clarity → CAS → LumaSharpen
-- Cleanup runs after all effects (16): Deband
+Plugins are loaded in DLL name alphabetical order. Numeric prefixes (`01_` through `19_`, with `20_` reserved for the dropped Bloom plugin) ensure:
+- Color correction runs first (01–05): LevelsPlus → LiftGammaGain → BlackCrush → AdaptiveTonemapper → Tonemap
+- Color grading runs in the middle (06–14): Curves → FakeHDR → DPX → Technicolor → Colourfulness → Vibrance → HSL Shift → Filmic Pass → LUT (final color stamp)
+- Detail, sharpening & film effects run after grading (15–18): FilmGrain2 → Clarity → CAS → LumaSharpen
+- Cleanup runs after all effects (19): Deband
 
 ### Preset System
 
@@ -502,22 +504,22 @@ The plugin implements `on_device_reset()` which calls `release_effect_resources(
 
 ```
 examples/
-    colourfulness_plugin/    — ColourfulnessPlugin.cpp + 08_ColourfulnessShader-LICENSE.txt
-    curves_plugin/           — CurvesPlugin.cpp + 04_CurvesShader-LICENSE.txt
-    dpx_plugin/              — DPXPlugin.cpp + 06_DPXShader-LICENSE.txt
-    fakehdr_plugin/          — FakeHDRPlugin.cpp + README.md + 05_FakeHDRShader-LICENSE.txt + shaders/
-    filmgrain2_plugin/       — FilmGrain2Plugin.cpp + 10_FilmGrain2Shader-LICENSE.txt
+    colourfulness_plugin/    — ColourfulnessPlugin.cpp + 10_ColourfulnessShader-LICENSE.txt
+    curves_plugin/           — CurvesPlugin.cpp + 06_CurvesShader-LICENSE.txt
+    dpx_plugin/              — DPXPlugin.cpp + 08_DPXShader-LICENSE.txt
+    fakehdr_plugin/          — FakeHDRPlugin.cpp + README.md + 07_FakeHDRShader-LICENSE.txt + shaders/
+    filmgrain2_plugin/       — FilmGrain2Plugin.cpp + 15_FilmGrain2Shader-LICENSE.txt
     levelsplus_plugin/       — LevelsPlusPlugin.cpp + 01_LevelsPlusShader-LICENSE.txt
     liftgammagain_plugin/    — LiftGammaGainPlugin.cpp + 02_LiftGammaGainShader-LICENSE.txt
-    technicolor_plugin/      — TechnicolorPlugin.cpp + 07_TechnicolorShader-LICENSE.txt
-    tonemap_plugin/          — TonemapPlugin.cpp + 03_TonemapShader-LICENSE.txt
-    vibrance_plugin/         — VibrancePlugin.cpp + 09_VibranceShader-LICENSE.txt
-    hslshift_plugin/         — HSLShiftPlugin.cpp + 11_HSLShiftShader-LICENSE.txt
-    filmicpass_plugin/       — FilmicPassPlugin.cpp + 12_FilmicPassShader-LICENSE.txt
-    clarity_plugin/          — ClarityPlugin.cpp + 13_ClarityShader-LICENSE.txt
-    cas_plugin/              — CASPlugin.cpp + 14_CASShader-LICENSE.txt
-    lumasharpen_plugin/      — LumaSharpenPlugin.cpp + 15_LumaSharpenShader-LICENSE.txt
-    deband_plugin/           — DebandPlugin.cpp + 16_DebandShader-LICENSE.txt
+    technicolor_plugin/      — TechnicolorPlugin.cpp + 09_TechnicolorShader-LICENSE.txt
+    tonemap_plugin/          — TonemapPlugin.cpp + 05_TonemapShader-LICENSE.txt
+    vibrance_plugin/         — VibrancePlugin.cpp + 11_VibranceShader-LICENSE.txt
+    hslshift_plugin/         — HSLShiftPlugin.cpp + 12_HSLShiftShader-LICENSE.txt
+    filmicpass_plugin/       — FilmicPassPlugin.cpp + 13_FilmicPassShader-LICENSE.txt
+    clarity_plugin/          — ClarityPlugin.cpp + 16_ClarityShader-LICENSE.txt
+    cas_plugin/              — CASPlugin.cpp + 17_CASShader-LICENSE.txt
+    lumasharpen_plugin/      — LumaSharpenPlugin.cpp + 18_LumaSharpenShader-LICENSE.txt
+    deband_plugin/           — DebandPlugin.cpp + 19_DebandShader-LICENSE.txt
     example_plugin/          — Developer example (not deployed as a shader plugin)
     renderlib/               — Shared render utilities (not deployed)
 
@@ -540,7 +542,7 @@ src/
                 CommandContext.cpp  — SEH-wrapped execute + recover + discard
                 TextureContext.cpp  — update_texture() for in-place heap reuse
 
-cmake.toml                   — All 16 plugin targets with numeric-prefixed OUTPUT_NAMEs
+cmake.toml                   — Plugin targets with numeric-prefixed OUTPUT_NAMEs
 deploy.sh                    — Build deployment script (DLLs + plugins + licenses + presets)
 ```
 
@@ -557,7 +559,7 @@ cmake --build build --config Release
 cmake --build build --config Release --target uevr --clean-first
 ```
 
-Output: `build/Release/01_LevelsPlusShader.dll` through `build/Release/16_DebandShader.dll`
+Output: `build/Release/01_LevelsPlusShader.dll` through `build/Release/19_DebandShader.dll` (plus `20_BloomShader.dll` — dropped from roadmap)
 
 Deploy plugins + licenses + presets:
 ```bash

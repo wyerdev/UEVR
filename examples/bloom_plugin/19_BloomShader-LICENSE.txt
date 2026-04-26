@@ -1,0 +1,24 @@
+BloomPlugin for UEVR
+====================
+
+Original shader:
+  Bloom and lens flares for ReShade
+  Copyright (c) 2009-2015 Gilcher Pascal aka Marty McFly
+  Source: legacy crosire/reshade-shaders (community collection)
+  Mirror used for code reference: https://github.com/Matsilagi/reshade-shaders/blob/master/Shaders/Bloom.fx
+  No explicit license was provided in the original file or repository.
+  All rights remain with the original author.
+
+Modifications: Ported from ReShade FX to DX11/DX12 C++ plugin with
+embedded HLSL pixel shaders. All four `*_DEPTH_CHECK` macros are 0
+(their original default) because UEVR does not expose a depth buffer
+to plugins. Shader math is otherwise verbatim.
+
+Bundled assets:
+  LensDB.png      — lens dirt overlay (1920x1080 RGBA8)
+  LensSprite.png  — lens flare sprite mask (1920x1080 RGBA8)
+  Source: https://github.com/Matsilagi/reshade-shaders/tree/master/Textures
+  No explicit license; vendored under the same "all rights reserved" terms
+  as the shader itself.
+
+UEVR plugin wrapper code: MIT (see repository LICENSE).

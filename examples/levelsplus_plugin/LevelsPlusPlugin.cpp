@@ -28,47 +28,16 @@ The code was originally written by Stephen Hill (@self_shadow), who deserves all
 credit for coming up with this fit and implementing it.
 */
 
+
 #include <memory>
-#include <fstream>
-#include <string>
-
-#include <Windows.h>
-#include <d3d11.h>
-#include <d3d12.h>
-#include <dxgi1_4.h>
-#include <d3dcompiler.h>
-#include <wrl/client.h>
-
-#pragma comment(lib, "d3dcompiler.lib")
-#pragma comment(lib, "d3d12.lib")
-#pragma comment(lib, "dxgi.lib")
 
 #include "imgui/imgui_impl_win32.h"
-
 #include "uevr/Plugin.hpp"
+#include "uevr/PluginSettings.hpp"
+#include "effects/effect_runtime.hpp"
 
 using namespace uevr;
-template<typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
-// ============================================================================
-// Embedded HLSL source
-// ============================================================================
-
-static const char* g_levelsplus_vs_src = R"(
-struct VSOutput {
-    float4 Position : SV_Position;
-    float2 TexCoord : TEXCOORD0;
-};
-
-VSOutput main(uint vertexID : SV_VertexID) {
-    VSOutput output;
-    output.TexCoord = float2((vertexID << 1) & 2, vertexID & 2);
-    output.Position = float4(output.TexCoord * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
-    return output;
-}
-)";
-
-// Faithful port of CeeJay.dk LevelsPlus v1.8.3 + ACES by MJP/Stephen Hill
 static const char* g_levelsplus_ps_src = R"(
 cbuffer LevelsParams : register(b0) {
     float3 InputBlackPoint;   float _pad0;
@@ -77,123 +46,76 @@ cbuffer LevelsParams : register(b0) {
     float3 OutputBlackPoint;  float _pad3;
     float3 OutputWhitePoint;  float _pad4;
     float3 ColorRangeShift;   float ColorRangeShiftSw;
-    float3 ACESLumPct;        int ACESMode;      // 0=none, 1=old, 2=new, 3=fitted
-    int EnableLevels;         int HighlightClipping;
-    int2 _pad5;
+    float3 ACESLumPct;        int   ACESMode;
+    int   EnableLevels;       int   HighlightClipping;
+    int2  _pad5;
 };
 
-Texture2D SceneTexture : register(t0);
+Texture2D Scene : register(t0);
 SamplerState PointSampler : register(s0);
 
-struct PSInput {
-    float4 Position : SV_Position;
-    float2 TexCoord : TEXCOORD0;
-};
+struct PSInput { float4 Position : SV_Position; float2 TexCoord : TEXCOORD0; };
 
-// ---- ACES tonemapping ----
-
-// sRGB => XYZ => D65_2_D60 => AP1 => RRT_SAT
 static const float3x3 ACESInputMat = float3x3(
     0.59719, 0.35458, 0.04823,
     0.07600, 0.90834, 0.01566,
     0.02840, 0.13383, 0.83777
 );
-
-// ODT_SAT => XYZ => D60_2_D65 => sRGB
 static const float3x3 ACESOutputMat = float3x3(
      1.60475, -0.53108, -0.07367,
     -0.10208,  1.10813, -0.00605,
     -0.00327, -0.07276,  1.07602
 );
 
-float3 RRTAndODTFit(float3 v)
-{
+float3 RRTAndODTFit(float3 v) {
     float3 a = v * (v + 0.0245786f) - 0.000090537f;
     float3 b = v * (0.983729f * v + 0.4329510f) + 0.238081f;
     return a / b;
 }
-
-float3 ACESFitted(float3 color)
-{
+float3 ACESFitted(float3 color) {
     color = mul(ACESInputMat, color);
     color = RRTAndODTFit(color);
     color = mul(ACESOutputMat, color);
-    color = saturate(color);
-    return color;
+    return saturate(color);
 }
-
-float3 ACESFilmRec2020old(float3 color)
-{
-    float Slope = 15.8f;
-    float Toe = 2.12f;
-    float Shoulder = 1.2f;
-    float BlackClip = 5.92f;
-    float WhiteClip = 1.9f;
+float3 ACESFilmRec2020old(float3 color) {
+    float Slope = 15.8f, Toe = 2.12f, Shoulder = 1.2f, BlackClip = 5.92f, WhiteClip = 1.9f;
+    color = color * ACESLumPct * 0.005f;
+    return (color * (Slope * color + Toe)) / (color * (Shoulder * color + BlackClip) + WhiteClip);
+}
+float3 ACESFilmRec2020(float3 color) {
+    float Slope = 0.98, Toe = 0.3, Shoulder = 0.22, BlackClip = 0, WhiteClip = 0.025;
     color = color * ACESLumPct * 0.005f;
     return (color * (Slope * color + Toe)) / (color * (Shoulder * color + BlackClip) + WhiteClip);
 }
 
-float3 ACESFilmRec2020(float3 color)
-{
-    float Slope = 0.98;
-    float Toe = 0.3;
-    float Shoulder = 0.22;
-    float BlackClip = 0;
-    float WhiteClip = 0.025;
-    color = color * ACESLumPct * 0.005f;
-    return (color * (Slope * color + Toe)) / (color * (Shoulder * color + BlackClip) + WhiteClip);
-}
-
-// ---- Main ----
-
-float4 main(PSInput input) : SV_Target
-{
-    float3 InputColor = SceneTexture.Sample(PointSampler, input.TexCoord).rgb;
+float4 main(PSInput input) : SV_Target {
+    float3 InputColor = Scene.Sample(PointSampler, input.TexCoord).rgb;
     float3 OutputColor = InputColor;
 
-    if (EnableLevels)
-    {
+    if (EnableLevels) {
         OutputColor = pow(
             max(((InputColor + (ColorRangeShift * ColorRangeShiftSw)) - InputBlackPoint)
                 / (InputWhitePoint - InputBlackPoint), 0.0),
             InputGamma
         ) * (OutputWhitePoint - OutputBlackPoint) + OutputBlackPoint;
     }
+    if (ACESMode == 1)      OutputColor = ACESFilmRec2020old(OutputColor);
+    else if (ACESMode == 2) OutputColor = ACESFilmRec2020(OutputColor);
+    else if (ACESMode == 3) OutputColor = ACESFitted(OutputColor);
 
-    if (ACESMode == 1)
-        OutputColor = ACESFilmRec2020old(OutputColor);
-    else if (ACESMode == 2)
-        OutputColor = ACESFilmRec2020(OutputColor);
-    else if (ACESMode == 3)
-        OutputColor = ACESFitted(OutputColor);
-
-    if (HighlightClipping)
-    {
-        float3 ClippedColor;
-
-        ClippedColor = any(OutputColor > saturate(OutputColor))
-            ? float3(1.0, 1.0, 0.0)
-            : OutputColor;
-        ClippedColor = all(OutputColor > saturate(OutputColor))
-            ? float3(1.0, 0.0, 0.0)
-            : ClippedColor;
-        ClippedColor = any(OutputColor < saturate(OutputColor))
-            ? float3(0.0, 1.0, 1.0)
-            : ClippedColor;
-        ClippedColor = all(OutputColor < saturate(OutputColor))
-            ? float3(0.0, 0.0, 1.0)
-            : ClippedColor;
-
-        OutputColor = ClippedColor;
+    if (HighlightClipping) {
+        float3 Clipped = OutputColor;
+        Clipped = any(OutputColor > saturate(OutputColor)) ? float3(1.0, 1.0, 0.0) : Clipped;
+        Clipped = all(OutputColor > saturate(OutputColor)) ? float3(1.0, 0.0, 0.0) : Clipped;
+        Clipped = any(OutputColor < saturate(OutputColor)) ? float3(0.0, 1.0, 1.0) : Clipped;
+        Clipped = all(OutputColor < saturate(OutputColor)) ? float3(0.0, 0.0, 1.0) : Clipped;
+        OutputColor = Clipped;
     }
-
     return float4(saturate(OutputColor), 1.0);
 }
 )";
 
-// ============================================================================
-// Constant buffer layout (must match HLSL cbuffer LevelsParams)
-// ============================================================================
 struct LevelsPlusCB {
     float InputBlackPoint[3];   float _pad0;
     float InputWhitePoint[3];   float _pad1;
@@ -205,663 +127,270 @@ struct LevelsPlusCB {
     int   EnableLevels;         int   HighlightClipping;
     int   _pad5[2];
 };
+static_assert(sizeof(LevelsPlusCB) % 16 == 0, "CB must be 16-byte aligned");
 
-// ============================================================================
-// Helper: resolve TYPELESS formats
-// ============================================================================
-static DXGI_FORMAT resolve_typeless_format(DXGI_FORMAT fmt) {
-    switch (fmt) {
-        case DXGI_FORMAT_R8G8B8A8_TYPELESS:     return DXGI_FORMAT_R8G8B8A8_UNORM;
-        case DXGI_FORMAT_B8G8R8A8_TYPELESS:     return DXGI_FORMAT_B8G8R8A8_UNORM;
-        case DXGI_FORMAT_B8G8R8X8_TYPELESS:     return DXGI_FORMAT_B8G8R8X8_UNORM;
-        case DXGI_FORMAT_R10G10B10A2_TYPELESS:  return DXGI_FORMAT_R10G10B10A2_UNORM;
-        case DXGI_FORMAT_R16G16B16A16_TYPELESS: return DXGI_FORMAT_R16G16B16A16_FLOAT;
-        case DXGI_FORMAT_R32G32B32A32_TYPELESS: return DXGI_FORMAT_R32G32B32A32_FLOAT;
-        case DXGI_FORMAT_R32_TYPELESS:          return DXGI_FORMAT_R32_FLOAT;
-        case DXGI_FORMAT_R16_TYPELESS:          return DXGI_FORMAT_R16_FLOAT;
-        default: return fmt;
-    }
-}
+static constexpr const char* LEVELSPLUS_VERSION = "1.1.0";
+static constexpr float LP_DEFAULT_IN_BLACK[3]   = { 16.0f/255.0f, 18.0f/255.0f, 20.0f/255.0f };
+static constexpr float LP_DEFAULT_IN_WHITE[3]   = { 233.0f/255.0f, 222.0f/255.0f, 211.0f/255.0f };
+static constexpr float LP_DEFAULT_IN_GAMMA[3]   = { 1.0f, 1.0f, 1.0f };
+static constexpr float LP_DEFAULT_OUT_BLACK[3]  = { 0.0f, 0.0f, 0.0f };
+static constexpr float LP_DEFAULT_OUT_WHITE[3]  = { 1.0f, 1.0f, 1.0f };
+static constexpr float LP_DEFAULT_RANGE_SHIFT[3]= { 0.0f, 0.0f, 0.0f };
+static constexpr int   LP_DEFAULT_RANGE_SHIFT_SW= 0;
+static constexpr int   LP_DEFAULT_ACES_MODE     = 0;
+static constexpr float LP_DEFAULT_ACES_LUM[3]   = { 100.0f, 100.0f, 100.0f };
+static constexpr bool  LP_DEFAULT_ENABLE_LEVELS = true;
+static constexpr bool  LP_DEFAULT_HIGHLIGHT_CLIP= false;
 
-// ============================================================================
-// Default parameter values (from original shader)
-// ============================================================================
-static constexpr float DEF_IN_BLACK[3]  = { 16.0f/255.0f,  18.0f/255.0f,  20.0f/255.0f  };
-static constexpr float DEF_IN_WHITE[3]  = { 233.0f/255.0f, 222.0f/255.0f, 211.0f/255.0f };
-static constexpr float DEF_IN_GAMMA[3]  = { 1.0f, 1.0f, 1.0f };
-static constexpr float DEF_OUT_BLACK[3] = { 0.0f, 0.0f, 0.0f };
-static constexpr float DEF_OUT_WHITE[3] = { 1.0f, 1.0f, 1.0f };
-static constexpr float DEF_RANGE_SHIFT[3] = { 0.0f, 0.0f, 0.0f };
-static constexpr int   DEF_RANGE_SHIFT_SW = 0;
-static constexpr int   DEF_ACES_MODE = 0;
-static constexpr float DEF_ACES_LUM[3] = { 100.0f, 100.0f, 100.0f };
-
-static constexpr const char* LEVELSPLUS_VERSION = "1.0.0";
-static const char* g_aces_names[] = { "None", "ACES Old (Rec2020)", "ACES (Rec2020)", "ACES Fitted" };
+static const char* g_aces_names[]  = { "None", "ACES Old (Rec2020)", "ACES (Rec2020)", "ACES Fitted" };
 static const char* g_shift_names[] = { "Downshift (-1)", "Disabled (0)", "Upshift (+1)" };
 
-// ============================================================================
-// LevelsPlus Plugin
-// ============================================================================
-class LevelsPlusPlugin : public uevr::Plugin {
+class LevelsPlusPlugin : public uevr::Plugin, public uevr::settings::Serializable {
 public:
-    // Tunable parameters
-    float m_in_black[3]  = { DEF_IN_BLACK[0],  DEF_IN_BLACK[1],  DEF_IN_BLACK[2]  };
-    float m_in_white[3]  = { DEF_IN_WHITE[0],  DEF_IN_WHITE[1],  DEF_IN_WHITE[2]  };
-    float m_in_gamma[3]  = { DEF_IN_GAMMA[0],  DEF_IN_GAMMA[1],  DEF_IN_GAMMA[2]  };
-    float m_out_black[3] = { DEF_OUT_BLACK[0], DEF_OUT_BLACK[1], DEF_OUT_BLACK[2] };
-    float m_out_white[3] = { DEF_OUT_WHITE[0], DEF_OUT_WHITE[1], DEF_OUT_WHITE[2] };
-    float m_range_shift[3] = { DEF_RANGE_SHIFT[0], DEF_RANGE_SHIFT[1], DEF_RANGE_SHIFT[2] };
-    int   m_range_shift_sw = DEF_RANGE_SHIFT_SW;  // -1, 0, 1
-    int   m_aces_mode = DEF_ACES_MODE;
-    float m_aces_lum[3] = { DEF_ACES_LUM[0], DEF_ACES_LUM[1], DEF_ACES_LUM[2] };
-    bool  m_enable_levels = true;
-    bool  m_highlight_clipping = false;
-    bool  m_enabled = false;
+    bool  m_enabled            = false;
+    bool  m_enable_levels      = LP_DEFAULT_ENABLE_LEVELS;
+    bool  m_highlight_clipping = LP_DEFAULT_HIGHLIGHT_CLIP;
+    int   m_range_shift_sw     = LP_DEFAULT_RANGE_SHIFT_SW;
+    int   m_aces_mode          = LP_DEFAULT_ACES_MODE;
 
-    // D3D11 effect resources
-    ComPtr<ID3D11DeviceContext>      m_dx11_ctx;
-    ComPtr<ID3D11VertexShader>       m_vs;
-    ComPtr<ID3D11PixelShader>        m_ps;
-    ComPtr<ID3D11Buffer>             m_cb;
-    ComPtr<ID3D11SamplerState>       m_sampler;
-    bool m_shader_ready = false;
-    bool m_dx11_logged_flags = false;
-    bool m_dx11_first_apply_logged = false;
+    float m_in_black[3]    = { LP_DEFAULT_IN_BLACK[0],    LP_DEFAULT_IN_BLACK[1],    LP_DEFAULT_IN_BLACK[2]    };
+    float m_in_white[3]    = { LP_DEFAULT_IN_WHITE[0],    LP_DEFAULT_IN_WHITE[1],    LP_DEFAULT_IN_WHITE[2]    };
+    float m_in_gamma[3]    = { LP_DEFAULT_IN_GAMMA[0],    LP_DEFAULT_IN_GAMMA[1],    LP_DEFAULT_IN_GAMMA[2]    };
+    float m_out_black[3]   = { LP_DEFAULT_OUT_BLACK[0],   LP_DEFAULT_OUT_BLACK[1],   LP_DEFAULT_OUT_BLACK[2]   };
+    float m_out_white[3]   = { LP_DEFAULT_OUT_WHITE[0],   LP_DEFAULT_OUT_WHITE[1],   LP_DEFAULT_OUT_WHITE[2]   };
+    float m_range_shift[3] = { LP_DEFAULT_RANGE_SHIFT[0], LP_DEFAULT_RANGE_SHIFT[1], LP_DEFAULT_RANGE_SHIFT[2] };
+    float m_aces_lum[3]    = { LP_DEFAULT_ACES_LUM[0],    LP_DEFAULT_ACES_LUM[1],    LP_DEFAULT_ACES_LUM[2]    };
 
-    struct DX11TargetState {
-        ComPtr<ID3D11Texture2D>          copy_tex;
-        ComPtr<ID3D11ShaderResourceView> copy_srv;
-        ComPtr<ID3D11RenderTargetView>   rtv;
-        ID3D11Texture2D*                 rtv_tex = nullptr;
-        UINT width  = 0;
-        UINT height = 0;
-        bool cache_hit_logged = false;
-
-        void reset() {
-            copy_tex.Reset(); copy_srv.Reset(); rtv.Reset();
-            rtv_tex = nullptr; width = 0; height = 0;
-            cache_hit_logged = false;
-        }
-    };
-    static constexpr size_t MAX_DX11_TARGETS = 2;
-    DX11TargetState m_dx11_targets[MAX_DX11_TARGETS];
-
-    DX11TargetState& find_dx11_target_state(UINT w, UINT h) {
-        for (size_t i = 0; i < MAX_DX11_TARGETS; ++i) {
-            auto& ts = m_dx11_targets[i];
-            if (ts.width == w && ts.height == h) {
-                if (!ts.cache_hit_logged) {
-                    ts.cache_hit_logged = true;
-                    API::get()->log_info("[LevelsPlus] DX11 cache hit: slot %d (%ux%u)", (int)i, w, h);
-                }
-                return ts;
-            }
-        }
-        for (auto& ts : m_dx11_targets)
-            if (ts.width == 0) return ts;
-        m_dx11_targets[1].reset();
-        return m_dx11_targets[1];
-    }
-
-    // DX12 effect resources
-    ComPtr<ID3D12RootSignature>  m_dx12_root_sig;
-    ComPtr<ID3D12PipelineState>  m_dx12_pso;
-    ComPtr<ID3D12Resource>       m_dx12_cb;
-
-    struct DX12TargetState {
-        ComPtr<ID3D12Resource>       copy_tex;
-        ComPtr<ID3D12DescriptorHeap> srv_heap;
-        ComPtr<ID3D12DescriptorHeap> rtv_heap;
-        UINT width  = 0;
-        UINT height = 0;
-
-        void reset() {
-            copy_tex.Reset();
-            srv_heap.Reset(); rtv_heap.Reset();
-            width = 0; height = 0;
-        }
-    };
-    static constexpr size_t MAX_TARGET_STATES = 2;
-    DX12TargetState m_dx12_targets[MAX_TARGET_STATES];
-
-    DX12TargetState& find_target_state(UINT w, UINT h) {
-        for (auto& ts : m_dx12_targets)
-            if (ts.width == w && ts.height == h) return ts;
-        for (auto& ts : m_dx12_targets)
-            if (ts.width == 0) return ts;
-        m_dx12_targets[1].reset();
-        return m_dx12_targets[1];
-    }
-
-    bool m_dx12_ready = false;
-    LevelsPlusCB* m_dx12_cb_mapped = nullptr;
-    DXGI_FORMAT m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
-
-    void on_dllmain() override {}
+    fx::SinglePassEffect<LevelsPlusCB> m_fx{ g_levelsplus_ps_src };
 
     void on_initialize() override {
-        API::get()->log_info("[LevelsPlus] Plugin initialized");
-        load_settings();
+        API::get()->log_info("[LevelsPlus] Plugin initialized (v%s)", LEVELSPLUS_VERSION);
+        m_fx.init();
+        uevr::settings::register_with_host(*this, API::get()->param());
     }
 
-    // ========================================================================
-    // Settings persistence
-    // ========================================================================
-    std::filesystem::path get_settings_path() {
-        return API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings" / L"levelsplus_settings.txt";
+    // --- uevr::settings::Serializable ---
+    std::string preset_section_name() const override { return "LevelsPlus"; }
+    int render_order() const override { return 100; }
+
+    std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
+        return {
+            {"enabled",            m_enabled ? "1" : "0"},
+            {"enable_levels",      m_enable_levels ? "1" : "0"},
+            {"highlight_clipping", m_highlight_clipping ? "1" : "0"},
+            {"range_shift_sw",     std::to_string(m_range_shift_sw)},
+            {"aces_mode",          std::to_string(m_aces_mode)},
+            {"in_black_r",  std::to_string(m_in_black[0])},
+            {"in_black_g",  std::to_string(m_in_black[1])},
+            {"in_black_b",  std::to_string(m_in_black[2])},
+            {"in_white_r",  std::to_string(m_in_white[0])},
+            {"in_white_g",  std::to_string(m_in_white[1])},
+            {"in_white_b",  std::to_string(m_in_white[2])},
+            {"in_gamma_r",  std::to_string(m_in_gamma[0])},
+            {"in_gamma_g",  std::to_string(m_in_gamma[1])},
+            {"in_gamma_b",  std::to_string(m_in_gamma[2])},
+            {"out_black_r", std::to_string(m_out_black[0])},
+            {"out_black_g", std::to_string(m_out_black[1])},
+            {"out_black_b", std::to_string(m_out_black[2])},
+            {"out_white_r", std::to_string(m_out_white[0])},
+            {"out_white_g", std::to_string(m_out_white[1])},
+            {"out_white_b", std::to_string(m_out_white[2])},
+            {"range_shift_r", std::to_string(m_range_shift[0])},
+            {"range_shift_g", std::to_string(m_range_shift[1])},
+            {"range_shift_b", std::to_string(m_range_shift[2])},
+            {"aces_lum_r", std::to_string(m_aces_lum[0])},
+            {"aces_lum_g", std::to_string(m_aces_lum[1])},
+            {"aces_lum_b", std::to_string(m_aces_lum[2])},
+        };
     }
 
-    void save_settings() {
-        try {
-            std::filesystem::create_directories(get_settings_path().parent_path());
-            std::ofstream f(get_settings_path());
-            if (f.is_open()) {
-                f << m_enabled << "\n";
-                f << m_enable_levels << "\n";
-                f << m_in_black[0] << " " << m_in_black[1] << " " << m_in_black[2] << "\n";
-                f << m_in_white[0] << " " << m_in_white[1] << " " << m_in_white[2] << "\n";
-                f << m_in_gamma[0] << " " << m_in_gamma[1] << " " << m_in_gamma[2] << "\n";
-                f << m_out_black[0] << " " << m_out_black[1] << " " << m_out_black[2] << "\n";
-                f << m_out_white[0] << " " << m_out_white[1] << " " << m_out_white[2] << "\n";
-                f << m_range_shift[0] << " " << m_range_shift[1] << " " << m_range_shift[2] << "\n";
-                f << m_range_shift_sw << "\n";
-                f << m_aces_mode << "\n";
-                f << m_aces_lum[0] << " " << m_aces_lum[1] << " " << m_aces_lum[2] << "\n";
-                f << m_highlight_clipping << "\n";
-            }
-        } catch (...) {}
+    void deserialize_settings(const std::map<std::string, std::string>& kv) override {
+        auto get_float = [&](const char* k, float& out, float lo, float hi) {
+            auto it = kv.find(k);
+            if (it == kv.end()) return;
+            try { float v = std::stof(it->second); if (v<lo) v=lo; if (v>hi) v=hi; out = v; } catch (...) {}
+        };
+        auto get_int = [&](const char* k, int& out, int lo, int hi) {
+            auto it = kv.find(k);
+            if (it == kv.end()) return;
+            try { int v = std::stoi(it->second); if (v<lo) v=lo; if (v>hi) v=hi; out = v; } catch (...) {}
+        };
+        auto get_bool = [&](const char* k, bool& out) {
+            auto it = kv.find(k);
+            if (it != kv.end()) out = (it->second != "0" && !it->second.empty());
+        };
+        get_bool("enabled",            m_enabled);
+        get_bool("enable_levels",      m_enable_levels);
+        get_bool("highlight_clipping", m_highlight_clipping);
+        get_int("range_shift_sw", m_range_shift_sw, -1, 1);
+        get_int("aces_mode",      m_aces_mode,       0, 3);
+        get_float("in_black_r",  m_in_black[0],  0.0f, 1.0f);
+        get_float("in_black_g",  m_in_black[1],  0.0f, 1.0f);
+        get_float("in_black_b",  m_in_black[2],  0.0f, 1.0f);
+        get_float("in_white_r",  m_in_white[0],  0.0f, 1.0f);
+        get_float("in_white_g",  m_in_white[1],  0.0f, 1.0f);
+        get_float("in_white_b",  m_in_white[2],  0.0f, 1.0f);
+        get_float("in_gamma_r",  m_in_gamma[0],  0.01f, 10.0f);
+        get_float("in_gamma_g",  m_in_gamma[1],  0.01f, 10.0f);
+        get_float("in_gamma_b",  m_in_gamma[2],  0.01f, 10.0f);
+        get_float("out_black_r", m_out_black[0], 0.0f, 1.0f);
+        get_float("out_black_g", m_out_black[1], 0.0f, 1.0f);
+        get_float("out_black_b", m_out_black[2], 0.0f, 1.0f);
+        get_float("out_white_r", m_out_white[0], 0.0f, 1.0f);
+        get_float("out_white_g", m_out_white[1], 0.0f, 1.0f);
+        get_float("out_white_b", m_out_white[2], 0.0f, 1.0f);
+        get_float("range_shift_r", m_range_shift[0], 0.0f, 1.0f);
+        get_float("range_shift_g", m_range_shift[1], 0.0f, 1.0f);
+        get_float("range_shift_b", m_range_shift[2], 0.0f, 1.0f);
+        get_float("aces_lum_r", m_aces_lum[0], 0.0f, 200.0f);
+        get_float("aces_lum_g", m_aces_lum[1], 0.0f, 200.0f);
+        get_float("aces_lum_b", m_aces_lum[2], 0.0f, 200.0f);
     }
 
-    void load_settings() {
-        try {
-            std::ifstream f(get_settings_path());
-            if (f.is_open()) {
-                int enabled_int, levels_int, clip_int;
-                if (f >> enabled_int >> levels_int
-                    >> m_in_black[0] >> m_in_black[1] >> m_in_black[2]
-                    >> m_in_white[0] >> m_in_white[1] >> m_in_white[2]
-                    >> m_in_gamma[0] >> m_in_gamma[1] >> m_in_gamma[2]
-                    >> m_out_black[0] >> m_out_black[1] >> m_out_black[2]
-                    >> m_out_white[0] >> m_out_white[1] >> m_out_white[2]
-                    >> m_range_shift[0] >> m_range_shift[1] >> m_range_shift[2]
-                    >> m_range_shift_sw >> m_aces_mode
-                    >> m_aces_lum[0] >> m_aces_lum[1] >> m_aces_lum[2]
-                    >> clip_int)
-                {
-                    m_enabled = (enabled_int != 0);
-                    m_enable_levels = (levels_int != 0);
-                    m_highlight_clipping = (clip_int != 0);
-                    if (m_aces_mode < 0 || m_aces_mode > 3) m_aces_mode = DEF_ACES_MODE;
-                    if (m_range_shift_sw < -1 || m_range_shift_sw > 1) m_range_shift_sw = 0;
-                    API::get()->log_info("[LevelsPlus] Loaded settings: enabled=%d levels=%d aces=%d",
-                        m_enabled, m_enable_levels, m_aces_mode);
-                }
-            }
-        } catch (...) {}
+    void reset_to_defaults() override {
+        m_enabled            = false;
+        m_enable_levels      = LP_DEFAULT_ENABLE_LEVELS;
+        m_highlight_clipping = LP_DEFAULT_HIGHLIGHT_CLIP;
+        m_range_shift_sw     = LP_DEFAULT_RANGE_SHIFT_SW;
+        m_aces_mode          = LP_DEFAULT_ACES_MODE;
+        for (int i = 0; i < 3; ++i) {
+            m_in_black[i]    = LP_DEFAULT_IN_BLACK[i];
+            m_in_white[i]    = LP_DEFAULT_IN_WHITE[i];
+            m_in_gamma[i]    = LP_DEFAULT_IN_GAMMA[i];
+            m_out_black[i]   = LP_DEFAULT_OUT_BLACK[i];
+            m_out_white[i]   = LP_DEFAULT_OUT_WHITE[i];
+            m_range_shift[i] = LP_DEFAULT_RANGE_SHIFT[i];
+            m_aces_lum[i]    = LP_DEFAULT_ACES_LUM[i];
+        }
     }
 
-    // ========================================================================
-    // Helper: fill CB data
-    // ========================================================================
-    void fill_cb(LevelsPlusCB* p) {
-        memcpy(p->InputBlackPoint,  m_in_black,     sizeof(float)*3);  p->_pad0 = 0;
-        memcpy(p->InputWhitePoint,  m_in_white,     sizeof(float)*3);  p->_pad1 = 0;
-        memcpy(p->InputGamma,       m_in_gamma,     sizeof(float)*3);  p->_pad2 = 0;
-        memcpy(p->OutputBlackPoint, m_out_black,    sizeof(float)*3);  p->_pad3 = 0;
-        memcpy(p->OutputWhitePoint, m_out_white,    sizeof(float)*3);  p->_pad4 = 0;
-        memcpy(p->ColorRangeShift,  m_range_shift,  sizeof(float)*3);
-        p->ColorRangeShiftSw = (float)m_range_shift_sw;
-        memcpy(p->ACESLumPct,       m_aces_lum,     sizeof(float)*3);
-        p->ACESMode = m_aces_mode;
-        p->EnableLevels = m_enable_levels ? 1 : 0;
-        p->HighlightClipping = m_highlight_clipping ? 1 : 0;
-        p->_pad5[0] = 0; p->_pad5[1] = 0;
-    }
+    static void reset3(float dst[3], const float src[3]) { dst[0]=src[0]; dst[1]=src[1]; dst[2]=src[2]; }
 
-    // ========================================================================
-    // on_draw_ui
-    // ========================================================================
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("LevelsPlus Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s", LEVELSPLUS_VERSION);
             ImGui::TextWrapped("The #1 fix for VR. Remaps black/white points so darks are actually dark and whites are bright. Trades some shadow detail for deeper blacks — almost always worth it. Has per-channel gamma and optional ACES tone mapping. Start here.");
             bool changed = false;
 
-            changed |= ImGui::Checkbox("Enabled", &m_enabled);
-            changed |= ImGui::Checkbox("Enable Levels", &m_enable_levels);
+            changed |= ImGui::Checkbox("Enabled##LP", &m_enabled);
+
+            changed |= ImGui::Checkbox("Enable Levels##LP", &m_enable_levels);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle the levels remapping (black/white point + gamma)");
+            ImGui::SameLine();
+            if (ImGui::Button("Reset##LP_enable_levels")) { m_enable_levels = LP_DEFAULT_ENABLE_LEVELS; changed = true; }
 
             if (m_enable_levels) {
                 ImGui::Separator();
                 ImGui::Text("Input Levels");
+
                 changed |= ImGui::ColorEdit3("Input Black Point", m_in_black);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Colors darker than this become pure black");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##LP_inblack")) { reset3(m_in_black, LP_DEFAULT_IN_BLACK); changed = true; }
+
                 changed |= ImGui::ColorEdit3("Input White Point", m_in_white);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Colors brighter than this become pure white");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##LP_inwhite")) { reset3(m_in_white, LP_DEFAULT_IN_WHITE); changed = true; }
+
                 changed |= ImGui::DragFloat3("Input Gamma", m_in_gamma, 0.01f, 0.01f, 10.0f, "%.2f");
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-channel midtone adjustment. <1 = brighter mids, >1 = darker mids");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##LP_ingamma")) { reset3(m_in_gamma, LP_DEFAULT_IN_GAMMA); changed = true; }
 
                 ImGui::Separator();
                 ImGui::Text("Output Levels");
+
                 changed |= ImGui::ColorEdit3("Output Black Point", m_out_black);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Darkest output value. Raise to lighten shadows");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##LP_outblack")) { reset3(m_out_black, LP_DEFAULT_OUT_BLACK); changed = true; }
+
                 changed |= ImGui::ColorEdit3("Output White Point", m_out_white);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brightest output value. Lower to dim highlights");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##LP_outwhite")) { reset3(m_out_white, LP_DEFAULT_OUT_WHITE); changed = true; }
 
                 ImGui::Separator();
                 ImGui::Text("Color Range Shift");
+
                 changed |= ImGui::ColorEdit3("Range Shift", m_range_shift);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shifts the midpoint of each color channel");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##LP_rangeshift")) { reset3(m_range_shift, LP_DEFAULT_RANGE_SHIFT); changed = true; }
 
-                // Shift switch: combo for -1, 0, 1
-                int shift_idx = m_range_shift_sw + 1;  // map -1,0,1 to 0,1,2
+                int shift_idx = m_range_shift_sw + 1;
                 if (ImGui::Combo("Shift Direction", &shift_idx, g_shift_names, 3)) {
                     m_range_shift_sw = shift_idx - 1;
                     changed = true;
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Subtract = shift toward black, Add = shift toward white, Off = no shift");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##LP_shiftdir")) { m_range_shift_sw = LP_DEFAULT_RANGE_SHIFT_SW; changed = true; }
             }
 
             ImGui::Separator();
             ImGui::Text("ACES Tonemapping");
-            if (ImGui::Combo("ACES Mode", &m_aces_mode, g_aces_names, 4)) {
-                changed = true;
-            }
+            if (ImGui::Combo("ACES Mode", &m_aces_mode, g_aces_names, 4)) changed = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Off = linear levels only. Film/RRT/RRT+ = cinematic tone curve");
+            ImGui::SameLine();
+            if (ImGui::Button("Reset##LP_acesmode")) { m_aces_mode = LP_DEFAULT_ACES_MODE; changed = true; }
+
             if (m_aces_mode > 0) {
                 changed |= ImGui::DragFloat3("ACES Luminance %", m_aces_lum, 1.0f, 0.0f, 200.0f, "%.0f");
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-channel luminance weight for ACES. Higher = brighter in that channel");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##LP_aceslum")) { reset3(m_aces_lum, LP_DEFAULT_ACES_LUM); changed = true; }
             }
 
             ImGui::Separator();
             changed |= ImGui::Checkbox("Highlight Clipping (debug)", &m_highlight_clipping);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shows clipped pixels: blue=black, yellow=white, red=both");
+            ImGui::SameLine();
+            if (ImGui::Button("Reset##LP_clip")) { m_highlight_clipping = LP_DEFAULT_HIGHLIGHT_CLIP; changed = true; }
 
-            if (ImGui::Button("Reset to Defaults")) {
-                memcpy(m_in_black,    DEF_IN_BLACK,      sizeof(float)*3);
-                memcpy(m_in_white,    DEF_IN_WHITE,      sizeof(float)*3);
-                memcpy(m_in_gamma,    DEF_IN_GAMMA,      sizeof(float)*3);
-                memcpy(m_out_black,   DEF_OUT_BLACK,     sizeof(float)*3);
-                memcpy(m_out_white,   DEF_OUT_WHITE,     sizeof(float)*3);
-                memcpy(m_range_shift, DEF_RANGE_SHIFT,   sizeof(float)*3);
-                m_range_shift_sw = DEF_RANGE_SHIFT_SW;
-                m_aces_mode = DEF_ACES_MODE;
-                memcpy(m_aces_lum, DEF_ACES_LUM, sizeof(float)*3);
-                m_enable_levels = true;
-                m_highlight_clipping = false;
+            ImGui::Spacing();
+            if (ImGui::Button("Reset All##LP")) {
+                m_enable_levels      = LP_DEFAULT_ENABLE_LEVELS;
+                m_highlight_clipping = LP_DEFAULT_HIGHLIGHT_CLIP;
+                m_range_shift_sw     = LP_DEFAULT_RANGE_SHIFT_SW;
+                m_aces_mode          = LP_DEFAULT_ACES_MODE;
+                reset3(m_in_black,    LP_DEFAULT_IN_BLACK);
+                reset3(m_in_white,    LP_DEFAULT_IN_WHITE);
+                reset3(m_in_gamma,    LP_DEFAULT_IN_GAMMA);
+                reset3(m_out_black,   LP_DEFAULT_OUT_BLACK);
+                reset3(m_out_white,   LP_DEFAULT_OUT_WHITE);
+                reset3(m_range_shift, LP_DEFAULT_RANGE_SHIFT);
+                reset3(m_aces_lum,    LP_DEFAULT_ACES_LUM);
                 changed = true;
             }
-
-            if (changed) {
-                save_settings();
-            }
+            if (changed) uevr::settings::notify_changed(*this, API::get()->param());
         }
     }
 
-    // ========================================================================
-    // on_pre_render_vr_framework_dx12
-    // ========================================================================
-    void on_pre_render_vr_framework_dx12() override {
+    void run() {
         if (!m_enabled) return;
-
-        const auto renderer_data = API::get()->param()->renderer;
-        if (renderer_data->renderer_type != UEVR_RENDERER_D3D12) return;
-        if (!renderer_data->device) return;
-
-        auto scene_rt = API::StereoHook::get_scene_render_target();
-        if (!scene_rt) return;
-
-        auto native = (ID3D12Resource*)scene_rt->get_native_resource();
-        if (!native) return;
-        auto desc = native->GetDesc();
-        if (desc.Width == 0 || desc.Height == 0) return;
-
-        auto device = (ID3D12Device*)renderer_data->device;
-        const auto resolved_format = resolve_typeless_format(desc.Format);
-
-        if (!m_dx12_ready || m_dx12_rt_format != resolved_format) {
-            if (m_dx12_ready) release_effect_resources();
-            if (!init_dx12_pipeline(device, desc.Format)) return;
+        LevelsPlusCB cb{};
+        for (int i = 0; i < 3; ++i) {
+            cb.InputBlackPoint[i]  = m_in_black[i];
+            cb.InputWhitePoint[i]  = m_in_white[i];
+            cb.InputGamma[i]       = m_in_gamma[i];
+            cb.OutputBlackPoint[i] = m_out_black[i];
+            cb.OutputWhitePoint[i] = m_out_white[i];
+            cb.ColorRangeShift[i]  = m_range_shift[i];
+            cb.ACESLumPct[i]       = m_aces_lum[i];
         }
-        auto& ts = find_target_state((UINT)desc.Width, desc.Height);
-        if (!ensure_dx12_copy_texture(device, native, ts)) return;
-
-        auto cmd = (ID3D12GraphicsCommandList*)API::StereoHook::get_pre_render_command_list();
-        if (!cmd) return;
-
-        if (m_dx12_cb_mapped) {
-            fill_cb(m_dx12_cb_mapped);
-        }
-
-        // Copy target -> copy_tex
-        D3D12_RESOURCE_BARRIER barriers[2]{};
-        barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barriers[0].Transition.pResource = native;
-        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barriers[1].Transition.pResource = ts.copy_tex.Get();
-        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        cmd->ResourceBarrier(2, barriers);
-        cmd->CopyResource(ts.copy_tex.Get(), native);
-
-        barriers[0].Transition.pResource = native;
-        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barriers[1].Transition.pResource = ts.copy_tex.Get();
-        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        cmd->ResourceBarrier(2, barriers);
-
-        D3D12_RENDER_TARGET_VIEW_DESC rtv_desc{};
-        rtv_desc.Format = resolved_format;
-        rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-        device->CreateRenderTargetView(native, &rtv_desc, ts.rtv_heap->GetCPUDescriptorHandleForHeapStart());
-
-        cmd->SetPipelineState(m_dx12_pso.Get());
-        cmd->SetGraphicsRootSignature(m_dx12_root_sig.Get());
-        cmd->SetGraphicsRootConstantBufferView(0, m_dx12_cb->GetGPUVirtualAddress());
-        ID3D12DescriptorHeap* heaps[] = { ts.srv_heap.Get() };
-        cmd->SetDescriptorHeaps(1, heaps);
-        cmd->SetGraphicsRootDescriptorTable(1, ts.srv_heap->GetGPUDescriptorHandleForHeapStart());
-        D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = ts.rtv_heap->GetCPUDescriptorHandleForHeapStart();
-        cmd->OMSetRenderTargets(1, &rtv_handle, FALSE, nullptr);
-        D3D12_VIEWPORT vp{}; vp.Width = (float)ts.width; vp.Height = (float)ts.height; vp.MaxDepth = 1.0f;
-        cmd->RSSetViewports(1, &vp);
-        D3D12_RECT scissor{}; scissor.right = (LONG)ts.width; scissor.bottom = (LONG)ts.height;
-        cmd->RSSetScissorRects(1, &scissor);
-        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        cmd->DrawInstanced(3, 1, 0, 0);
+        cb.ColorRangeShiftSw  = (float)m_range_shift_sw;
+        cb.ACESMode           = m_aces_mode;
+        cb.EnableLevels       = m_enable_levels ? 1 : 0;
+        cb.HighlightClipping  = m_highlight_clipping ? 1 : 0;
+        m_fx.set_cb(cb);
+        m_fx.execute();
     }
 
-    // ========================================================================
-    // on_pre_render_vr_framework_dx11
-    // ========================================================================
-    void on_pre_render_vr_framework_dx11() override {
-        if (!m_enabled) return;
-
-        const auto renderer_data = API::get()->param()->renderer;
-        if (renderer_data->renderer_type != UEVR_RENDERER_D3D11) return;
-
-        auto scene_rt = API::StereoHook::get_scene_render_target();
-        if (!scene_rt) return;
-
-        auto native = (ID3D11Texture2D*)scene_rt->get_native_resource();
-        if (!native) return;
-
-        apply_levelsplus_to_resource_dx11(native);
-    }
-
-    void on_present() override {}
-    void on_pre_engine_tick(API::UGameEngine* engine, float delta) override {}
-
-    void on_device_reset() override {
-        API::get()->log_info("[LevelsPlus] Device reset");
-        release_effect_resources();
-    }
-
-    void on_post_render_vr_framework_dx11(
-        ID3D11DeviceContext* context, ID3D11Texture2D* texture, ID3D11RenderTargetView* rtv) override {}
-    void on_post_render_vr_framework_dx12(
-        ID3D12GraphicsCommandList* command_list, ID3D12Resource* rt, D3D12_CPU_DESCRIPTOR_HANDLE* rtv) override {}
-
-private:
-
-    void release_effect_resources() {
-        m_dx11_ctx.Reset();
-        m_vs.Reset(); m_ps.Reset(); m_cb.Reset(); m_sampler.Reset();
-        for (auto& ts : m_dx11_targets) ts.reset();
-        m_shader_ready = false;
-        m_dx11_logged_flags = false;
-        m_dx11_first_apply_logged = false;
-
-        m_dx12_pso.Reset(); m_dx12_root_sig.Reset(); m_dx12_cb.Reset();
-        for (auto& ts : m_dx12_targets) ts.reset();
-        m_dx12_ready = false; m_dx12_cb_mapped = nullptr; m_dx12_rt_format = DXGI_FORMAT_UNKNOWN;
-    }
-
-    // ========================================================================
-    // DX11
-    // ========================================================================
-    bool init_shaders_dx11(ID3D11Device* device) {
-        if (!device) return false;
-
-        ComPtr<ID3DBlob> vs_blob, vs_err;
-        if (FAILED(D3DCompile(g_levelsplus_vs_src, strlen(g_levelsplus_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vs_blob, &vs_err))) return false;
-        ComPtr<ID3DBlob> ps_blob, ps_err;
-        if (FAILED(D3DCompile(g_levelsplus_ps_src, strlen(g_levelsplus_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &ps_blob, &ps_err))) {
-            if (ps_err) API::get()->log_error("[LevelsPlus] PS compile: %s", (const char*)ps_err->GetBufferPointer());
-            return false;
-        }
-
-        if (FAILED(device->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &m_vs))) return false;
-        if (FAILED(device->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &m_ps))) return false;
-
-        D3D11_BUFFER_DESC cb_desc{}; cb_desc.ByteWidth = sizeof(LevelsPlusCB);
-        cb_desc.Usage = D3D11_USAGE_DYNAMIC; cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cb_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (FAILED(device->CreateBuffer(&cb_desc, nullptr, &m_cb))) return false;
-
-        D3D11_SAMPLER_DESC sd{}; sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
-        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-        sd.ComparisonFunc = D3D11_COMPARISON_NEVER; sd.MaxLOD = D3D11_FLOAT32_MAX;
-        if (FAILED(device->CreateSamplerState(&sd, &m_sampler))) return false;
-
-        m_shader_ready = true;
-        API::get()->log_info("[LevelsPlus] DX11 shaders ready");
-        return true;
-    }
-
-    bool ensure_dx11_copy_texture(ID3D11Device* device, ID3D11Texture2D* src, DX11TargetState& ts) {
-        D3D11_TEXTURE2D_DESC src_desc{}; src->GetDesc(&src_desc);
-        const auto resolved_fmt = resolve_typeless_format(src_desc.Format);
-        if (ts.copy_tex && ts.width == src_desc.Width && ts.height == src_desc.Height) return true;
-        ts.reset();
-
-        D3D11_TEXTURE2D_DESC cd = src_desc;
-        cd.Format = resolved_fmt;
-        cd.MipLevels = 1;
-        cd.BindFlags = D3D11_BIND_SHADER_RESOURCE; cd.MiscFlags = 0;
-        cd.Usage = D3D11_USAGE_DEFAULT; cd.CPUAccessFlags = 0;
-        if (FAILED(device->CreateTexture2D(&cd, nullptr, &ts.copy_tex))) return false;
-
-        D3D11_SHADER_RESOURCE_VIEW_DESC svd{}; svd.Format = resolved_fmt;
-        svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; svd.Texture2D.MipLevels = 1;
-        if (FAILED(device->CreateShaderResourceView(ts.copy_tex.Get(), &svd, &ts.copy_srv))) { ts.reset(); return false; }
-
-        ts.width = src_desc.Width; ts.height = src_desc.Height;
-        API::get()->log_info("[LevelsPlus] DX11 copy texture created: %ux%u", ts.width, ts.height);
-        return true;
-    }
-
-    void apply_levelsplus_to_resource_dx11(ID3D11Texture2D* target) {
-        const auto rd = API::get()->param()->renderer;
-        auto device = (ID3D11Device*)rd->device;
-        if (!device || !target) return;
-
-        D3D11_TEXTURE2D_DESC target_desc{};
-        target->GetDesc(&target_desc);
-        if (target_desc.Width == 0 || target_desc.Height == 0) return;
-
-        if (!m_dx11_logged_flags) {
-            m_dx11_logged_flags = true;
-            API::get()->log_info("[LevelsPlus] DX11 RT: %ux%u fmt=%u bind=0x%x",
-                target_desc.Width, target_desc.Height, target_desc.Format,
-                target_desc.BindFlags);
-        }
-
-        if (!m_dx11_ctx) device->GetImmediateContext(&m_dx11_ctx);
-        auto ctx = m_dx11_ctx.Get();
-
-        if (!m_shader_ready && !init_shaders_dx11(device)) return;
-
-        auto& ts = find_dx11_target_state(target_desc.Width, target_desc.Height);
-        if (!ensure_dx11_copy_texture(device, target, ts)) return;
-
-        if (ts.rtv_tex != target) {
-            ts.rtv.Reset();
-            const auto resolved_fmt = resolve_typeless_format(target_desc.Format);
-            D3D11_RENDER_TARGET_VIEW_DESC rtv_desc{};
-            rtv_desc.Format = resolved_fmt;
-            rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-            rtv_desc.Texture2D.MipSlice = 0;
-            if (FAILED(device->CreateRenderTargetView(target, &rtv_desc, &ts.rtv))) return;
-            ts.rtv_tex = target;
-        }
-
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        if (SUCCEEDED(ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-            fill_cb(static_cast<LevelsPlusCB*>(mapped.pData));
-            ctx->Unmap(m_cb.Get(), 0);
-        }
-
-        ctx->CopyResource(ts.copy_tex.Get(), target);
-
-        D3D11_VIEWPORT vp{}; vp.Width = (float)ts.width; vp.Height = (float)ts.height; vp.MaxDepth = 1.0f;
-        ctx->RSSetViewports(1, &vp);
-        ID3D11RenderTargetView* rtv_raw = ts.rtv.Get();
-        ctx->OMSetRenderTargets(1, &rtv_raw, nullptr);
-        ctx->IASetInputLayout(nullptr);
-        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ctx->VSSetShader(m_vs.Get(), nullptr, 0);
-        ctx->PSSetShader(m_ps.Get(), nullptr, 0);
-        ctx->PSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
-        ctx->PSSetShaderResources(0, 1, ts.copy_srv.GetAddressOf());
-        ctx->PSSetSamplers(0, 1, m_sampler.GetAddressOf());
-        ctx->Draw(3, 0);
-
-        if (!m_dx11_first_apply_logged) {
-            m_dx11_first_apply_logged = true;
-            API::get()->log_info("[LevelsPlus] DX11 effect applied: %ux%u", ts.width, ts.height);
-        }
-
-        ID3D11ShaderResourceView* null_srv = nullptr;
-        ctx->PSSetShaderResources(0, 1, &null_srv);
-    }
-
-    // ========================================================================
-    // DX12
-    // ========================================================================
-    bool init_dx12_pipeline(ID3D12Device* device, DXGI_FORMAT rt_format) {
-        if (m_dx12_ready) return true;
-        if (!device) return false;
-
-        rt_format = resolve_typeless_format(rt_format);
-
-        D3D12_DESCRIPTOR_RANGE1 srv_range{};
-        srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        srv_range.NumDescriptors = 1;
-        srv_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
-
-        D3D12_ROOT_PARAMETER1 rp[2]{};
-        rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-        rp[0].Descriptor.ShaderRegister = 0;
-        rp[0].Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE;
-        rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-        rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        rp[1].DescriptorTable.NumDescriptorRanges = 1;
-        rp[1].DescriptorTable.pDescriptorRanges = &srv_range;
-        rp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-
-        D3D12_STATIC_SAMPLER_DESC ss{};
-        ss.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-        ss.AddressU = ss.AddressV = ss.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        ss.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-        ss.MaxLOD = D3D12_FLOAT32_MAX;
-        ss.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-
-        D3D12_VERSIONED_ROOT_SIGNATURE_DESC rsd{};
-        rsd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-        rsd.Desc_1_1.NumParameters = 2; rsd.Desc_1_1.pParameters = rp;
-        rsd.Desc_1_1.NumStaticSamplers = 1; rsd.Desc_1_1.pStaticSamplers = &ss;
-
-        ComPtr<ID3DBlob> sig_blob, sig_err;
-        if (FAILED(D3D12SerializeVersionedRootSignature(&rsd, &sig_blob, &sig_err))) {
-            if (sig_err) API::get()->log_error("[LevelsPlus DX12] Root sig: %s", (const char*)sig_err->GetBufferPointer());
-            return false;
-        }
-        if (FAILED(device->CreateRootSignature(0, sig_blob->GetBufferPointer(), sig_blob->GetBufferSize(), IID_PPV_ARGS(&m_dx12_root_sig)))) return false;
-
-        ComPtr<ID3DBlob> vsb, vse, psb, pse;
-        if (FAILED(D3DCompile(g_levelsplus_vs_src, strlen(g_levelsplus_vs_src), "VS", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsb, &vse))) return false;
-        if (FAILED(D3DCompile(g_levelsplus_ps_src, strlen(g_levelsplus_ps_src), "PS", nullptr, nullptr, "main", "ps_5_0", 0, 0, &psb, &pse))) {
-            if (pse) API::get()->log_error("[LevelsPlus DX12] PS compile: %s", (const char*)pse->GetBufferPointer());
-            return false;
-        }
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
-        pd.pRootSignature = m_dx12_root_sig.Get();
-        pd.VS = { vsb->GetBufferPointer(), vsb->GetBufferSize() };
-        pd.PS = { psb->GetBufferPointer(), psb->GetBufferSize() };
-        pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        pd.SampleMask = UINT_MAX;
-        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        pd.NumRenderTargets = 1;
-        pd.RTVFormats[0] = rt_format;
-        pd.SampleDesc.Count = 1;
-
-        if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_dx12_pso)))) {
-            API::get()->log_error("[LevelsPlus DX12] PSO failed for format %u", (unsigned)rt_format);
-            return false;
-        }
-
-        D3D12_HEAP_PROPERTIES uh{}; uh.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC cbd{}; cbd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        cbd.Width = 256; cbd.Height = 1; cbd.DepthOrArraySize = 1; cbd.MipLevels = 1;
-        cbd.Format = DXGI_FORMAT_UNKNOWN; cbd.SampleDesc.Count = 1; cbd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        if (FAILED(device->CreateCommittedResource(&uh, D3D12_HEAP_FLAG_NONE, &cbd,
-                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_dx12_cb)))) return false;
-        m_dx12_cb->Map(0, nullptr, (void**)&m_dx12_cb_mapped);
-
-        m_dx12_rt_format = rt_format;
-        m_dx12_ready = true;
-        API::get()->log_info("[LevelsPlus DX12] Pipeline ready (format %u)", (unsigned)rt_format);
-        return true;
-    }
-
-    bool ensure_dx12_copy_texture(ID3D12Device* device, ID3D12Resource* src, DX12TargetState& ts) {
-        auto sd = src->GetDesc();
-        if (ts.copy_tex && ts.width == (UINT)sd.Width && ts.height == sd.Height) return true;
-        ts.reset();
-
-        const auto resolved_fmt = resolve_typeless_format(sd.Format);
-        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-        D3D12_RESOURCE_DESC copy_desc = sd;
-        copy_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-        copy_desc.Format = resolved_fmt;
-        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &copy_desc,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&ts.copy_tex)))) {
-            API::get()->log_error("[LevelsPlus DX12] Failed to create copy texture");
-            return false;
-        }
-
-        D3D12_DESCRIPTOR_HEAP_DESC shd{}; shd.NumDescriptors = 1;
-        shd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; shd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        if (FAILED(device->CreateDescriptorHeap(&shd, IID_PPV_ARGS(&ts.srv_heap)))) { ts.reset(); return false; }
-
-        D3D12_DESCRIPTOR_HEAP_DESC rhd{}; rhd.NumDescriptors = 1; rhd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        if (FAILED(device->CreateDescriptorHeap(&rhd, IID_PPV_ARGS(&ts.rtv_heap)))) { ts.reset(); return false; }
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC svd{};
-        svd.Format = resolved_fmt;
-        svd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        svd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        svd.Texture2D.MipLevels = 1;
-        device->CreateShaderResourceView(ts.copy_tex.Get(), &svd, ts.srv_heap->GetCPUDescriptorHandleForHeapStart());
-
-        ts.width = (UINT)sd.Width; ts.height = sd.Height;
-        API::get()->log_info("[LevelsPlus DX12] Copy texture ready: %ux%u fmt %u", ts.width, ts.height, (unsigned)resolved_fmt);
-        return true;
-    }
+    void on_pre_render_vr_framework_dx11() override { run(); }
+    void on_pre_render_vr_framework_dx12() override { run(); }
+    void on_device_reset() override { m_fx.release_resources(); }
 };
 
-// ============================================================================
-// Plugin entry point
-// ============================================================================
-std::unique_ptr<LevelsPlusPlugin> g_plugin{new LevelsPlusPlugin()};
+std::unique_ptr<LevelsPlusPlugin> g_plugin{ new LevelsPlusPlugin() };
