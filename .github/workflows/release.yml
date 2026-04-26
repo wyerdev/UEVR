@@ -93,11 +93,22 @@ jobs:
           $tag = "${{env.NIGHTLY_TAG}}"
           $nightlyUrl = "https://github.com/praydog/UEVR-nightly/releases/tag/$tag"
 
-          $lastTag = & git describe --tags --abbrev=0 2>$null
-          $tagExit = $LASTEXITCODE
+          # Don't let native-command non-zero exits become terminating errors
+          # (windows-latest PowerShell defaults can make `git describe` failure throw).
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $lastTag = $null
+          try {
+            $lastTag = & git describe --tags --abbrev=0 2>$null
+            if ($LASTEXITCODE -ne 0) { $lastTag = $null }
+          } catch {
+            $lastTag = $null
+          }
           $global:LASTEXITCODE = 0
-          if ($tagExit -eq 0 -and $lastTag) {
-            $allCommits = & git log --pretty=format:"%s (%h)" "$lastTag..HEAD" 2>$null
+
+          if ($lastTag) {
+            $allCommits = & git log --pretty=format:"%s (%h)" "$lastTag..HEAD"
           } else {
             $allCommits = & git log --pretty=format:"%s (%h)" -20
           }
