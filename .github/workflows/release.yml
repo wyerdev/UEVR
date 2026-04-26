@@ -93,9 +93,17 @@ jobs:
           $tag = "${{env.NIGHTLY_TAG}}"
           $nightlyUrl = "https://github.com/praydog/UEVR-nightly/releases/tag/$tag"
 
-          $allCommits = git log --pretty=format:"%s (%h)" $(git describe --tags --abbrev=0 2>$null)..HEAD 2>$null
+          $lastTag = & git describe --tags --abbrev=0 2>$null
+          $tagExit = $LASTEXITCODE
+          $global:LASTEXITCODE = 0
+          if ($tagExit -eq 0 -and $lastTag) {
+            $allCommits = & git log --pretty=format:"%s (%h)" "$lastTag..HEAD" 2>$null
+          } else {
+            $allCommits = & git log --pretty=format:"%s (%h)" -20
+          }
+          $global:LASTEXITCODE = 0
           if (-not $allCommits) {
-            $allCommits = git log --pretty=format:"%s (%h)" -20
+            $allCommits = & git log --pretty=format:"%s (%h)" -20
           }
           if ($allCommits -is [string]) { $allCommits = @($allCommits) }
           $filtered = $allCommits | Where-Object { $_ -match "^(fix|feat)" }
