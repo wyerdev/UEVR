@@ -37,7 +37,7 @@ These clip by design — they remap the tonal range, trading some shadow/highlig
 | 01 | **LevelsPlus** | **Fix grey/washed-out blacks.** The #1 VR problem. Remaps black/white points so darks are actually dark and whites are actually bright. Trades some shadow detail for deeper blacks — almost always worth it. Also has per-channel gamma and optional ACES tone mapping. Start here. |
 | 02 | **LiftGammaGain** | Fine-tune shadows, midtones, and highlights separately. Use if LevelsPlus alone isn't enough — e.g. shadows are too blue, or highlights are too warm. Gain can clip highlights if pushed high. |
 | 03 | **BlackCrush** | Crushes the bottom of the tonal curve to push near-blacks toward true black without affecting midtones or highlights. Use after LevelsPlus when the lift left a slightly grey shadow floor. |
-| 04 | **AdaptiveTonemapper** | Auto-exposure tonemapper. Currently a near-no-op on standard LDR scene render targets — included for future HDR-input support; safe to leave disabled. |
+| 04 | **AdaptiveTonemapper** | Auto-exposure (eye adaptation) + tonemap curve. Measures average scene brightness and dims bright scenes / brightens dark ones over ~1s, like your eyes adjusting when walking indoors. Three tonemap curves selectable (Reinhard / Filmic / ACES). Defaults are tuned for UEVR's LDR scene RT (Exposure -3, AdaptRange.x 0.05); defaults are restorable via the "Original Defaults" button. |
 | 05 | **Tonemap** | Adjust overall gamma, exposure, and saturation. Exposure can clip highlights; defog subtracts color. Also has bleach bypass (desaturated high-contrast film look). |
 
 **Color Grading (make it look good)**
