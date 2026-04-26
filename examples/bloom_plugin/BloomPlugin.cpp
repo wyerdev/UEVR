@@ -1,10 +1,24 @@
 /*
 Bloom Plugin for UEVR
 =====================
-Faithful port of crosire/legacy Bloom.fx (Marty McFly, 2009-2015) — ~30 uniforms,
-7 intermediate render targets, 10 passes, 2 external textures (LensDB, LensSprite).
-Bloom + AnamFlare + Lenz + Chapman lens flares + Godrays + LensDirt + Flare combine
-into a single multi-pass effect graph.
+Faithful port of crosire/legacy Bloom.fx — ~30 uniforms, 7 intermediate render
+targets, 10 passes, 2 external textures (LensDB, LensSprite). Bloom + AnamFlare
++ Lenz + Chapman lens flares + Godrays + LensDirt + Flare combine into a single
+multi-pass effect graph.
+
+Original shader:
+  Bloom and lens flares for ReShade
+  Copyright (c) 2009-2015 Gilcher Pascal aka Marty McFly
+  Source: legacy crosire/reshade-shaders (community collection)
+  Mirror used for code reference:
+    https://github.com/Matsilagi/reshade-shaders/blob/master/Shaders/Bloom.fx
+  No explicit license was provided in the original file or repository.
+  All rights remain with the original author. Ported with credit per the
+  fork precedent documented in docs/shader-candidates.md (same treatment as
+  the CeeJay.dk shaders). See 19_BloomShader-LICENSE.txt for full notice.
+
+Bundled assets (LensDB.png, LensSprite.png) are vendored from the Matsilagi
+mirror under the same "all rights reserved" terms as the shader itself.
 
 Shader math is verbatim from the ReShade source. Format-correct GPU views handle
 gamma round-trip; if the scene RT is a plain *_UNORM the colorspace warning fires
@@ -15,10 +29,7 @@ The runtime auto-snapshots scene → mip chain (5 levels) so passes that sample
 BackBuffer at LOD 1/3/4 (Lenz/Chapman/Godrays/AnamFlare bright pass) get correct
 downsampled data.
 
-UEVR plugin wrapper: MIT.
-ReShade shader source: license retained per fork precedent for no-explicit-license
-MartyMcFly shaders (see docs/shader-candidates.md). Asset PNGs vendored from
-Matsilagi/reshade-shaders mirror.
+UEVR plugin wrapper code: MIT license (C++ wrapper code ONLY).
 */
 
 #include <algorithm>
