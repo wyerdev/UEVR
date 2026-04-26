@@ -10,6 +10,7 @@ set "UEVR_DATA=%APPDATA%\UnrealVRMod"
 set "PLUGIN_DIR=%UEVR_DATA%\UEVR\plugins"
 set "PRESET_DIR=%UEVR_DATA%\UEVR\data\plugins\shipping_presets"
 set "USER_PRESET_DIR=%UEVR_DATA%\UEVR\data\plugins\presets"
+set "ASSET_DIR=%UEVR_DATA%\UEVR\data\plugins\shader_assets"
 
 :: Detect if we're running from inside the plugins folder already
 set "SCRIPT_DIR=%~dp0"
@@ -19,16 +20,17 @@ if /i "%SCRIPT_DIR:~0,-1%"=="%PLUGIN_DIR%" (
     echo Plugin folder: %PLUGIN_DIR%
 )
 
-:: List of plugin DLLs to remove (our 16 post-processing plugins)
-set "PLUGINS=01_LevelsPlusShader.dll 02_LiftGammaGainShader.dll 03_TonemapShader.dll 04_CurvesShader.dll 05_FakeHDRShader.dll 06_DPXShader.dll 07_TechnicolorShader.dll 08_ColourfulnessShader.dll 09_VibranceShader.dll 10_FilmGrain2Shader.dll 11_HSLShiftShader.dll 12_FilmicPassShader.dll 13_ClarityShader.dll 14_CASShader.dll 15_LumaSharpenShader.dll 16_DebandShader.dll"
+:: List of plugin DLL suffixes to remove (any numeric prefix, current or legacy).
+:: Using suffixes makes the uninstaller resilient to renumbering between releases.
+set "PLUGINS=LevelsPlusShader.dll LiftGammaGainShader.dll TonemapShader.dll CurvesShader.dll BlackCrushShader.dll FakeHDRShader.dll DPXShader.dll TechnicolorShader.dll ColourfulnessShader.dll VibranceShader.dll FilmGrain2Shader.dll HSLShiftShader.dll FilmicPassShader.dll ClarityShader.dll CASShader.dll LumaSharpenShader.dll DebandShader.dll LUTShader.dll BloomShader.dll AdaptiveTonemapperShader.dll"
 
-:: Corresponding license files
-set "LICENSES=01_LevelsPlusShader-LICENSE.txt 02_LiftGammaGainShader-LICENSE.txt 03_TonemapShader-LICENSE.txt 04_CurvesShader-LICENSE.txt 05_FakeHDRShader-LICENSE.txt 06_DPXShader-LICENSE.txt 07_TechnicolorShader-LICENSE.txt 08_ColourfulnessShader-LICENSE.txt 09_VibranceShader-LICENSE.txt 10_FilmGrain2Shader-LICENSE.txt 11_HSLShiftShader-LICENSE.txt 12_FilmicPassShader-LICENSE.txt 13_ClarityShader-LICENSE.txt 14_CASShader-LICENSE.txt 15_LumaSharpenShader-LICENSE.txt 16_DebandShader-LICENSE.txt"
+:: Corresponding license file suffixes
+set "LICENSES=LevelsPlusShader-LICENSE.txt LiftGammaGainShader-LICENSE.txt TonemapShader-LICENSE.txt CurvesShader-LICENSE.txt BlackCrushShader-LICENSE.txt FakeHDRShader-LICENSE.txt DPXShader-LICENSE.txt TechnicolorShader-LICENSE.txt ColourfulnessShader-LICENSE.txt VibranceShader-LICENSE.txt FilmGrain2Shader-LICENSE.txt HSLShiftShader-LICENSE.txt FilmicPassShader-LICENSE.txt ClarityShader-LICENSE.txt CASShader-LICENSE.txt LumaSharpenShader-LICENSE.txt DebandShader-LICENSE.txt LUTShader-LICENSE.txt BloomShader-LICENSE.txt AdaptiveTonemapperShader-LICENSE.txt"
 
-:: Check if anything is installed
+:: Check if anything is installed (match any prefix)
 set "FOUND=0"
 for %%f in (%PLUGINS%) do (
-    if exist "%PLUGIN_DIR%\%%f" set /a FOUND+=1
+    for %%g in ("%PLUGIN_DIR%\*%%f") do if exist "%%g" set /a FOUND+=1
 )
 
 if %FOUND%==0 (
@@ -44,7 +46,7 @@ if %FOUND%==0 (
 echo Found %FOUND% shader(s) to remove.
 echo.
 echo This will remove:
-echo   - All 16 post-processing shader DLLs from global plugins
+echo   - All 20 post-processing shader DLLs from global plugins
 echo   - Their license files
 echo   - Built-in shipping presets
 echo   - User-saved presets
@@ -61,30 +63,34 @@ echo.
 set "REMOVED=0"
 set "ERRORS=0"
 
-:: Remove plugin DLLs
+:: Remove plugin DLLs (any numeric prefix)
 echo Removing shaders...
 for %%f in (%PLUGINS%) do (
-    if exist "%PLUGIN_DIR%\%%f" (
-        del /f "%PLUGIN_DIR%\%%f" 2>&1
-        if exist "%PLUGIN_DIR%\%%f" (
-            echo   FAILED: %%f
-            set /a ERRORS+=1
-        ) else (
-            echo   Removed: %%f
-            set /a REMOVED+=1
+    for %%g in ("%PLUGIN_DIR%\*%%f") do (
+        if exist "%%g" (
+            del /f "%%g" 2>&1
+            if exist "%%g" (
+                echo   FAILED: %%~nxg
+                set /a ERRORS+=1
+            ) else (
+                echo   Removed: %%~nxg
+                set /a REMOVED+=1
+            )
         )
     )
 )
 
-:: Remove license files
+:: Remove license files (any numeric prefix)
 for %%f in (%LICENSES%) do (
-    if exist "%PLUGIN_DIR%\%%f" (
-        del /f "%PLUGIN_DIR%\%%f" 2>&1
-        if exist "%PLUGIN_DIR%\%%f" (
-            echo   FAILED: %%f
-            set /a ERRORS+=1
-        ) else (
-            set /a REMOVED+=1
+    for %%g in ("%PLUGIN_DIR%\*%%f") do (
+        if exist "%%g" (
+            del /f "%%g" 2>&1
+            if exist "%%g" (
+                echo   FAILED: %%~nxg
+                set /a ERRORS+=1
+            ) else (
+                set /a REMOVED+=1
+            )
         )
     )
 )
@@ -117,8 +123,22 @@ if exist "%USER_PRESET_DIR%" (
     )
 )
 
+:: Remove shipped shader assets (LUTs, textures, etc.)
+if exist "%ASSET_DIR%" (
+    echo.
+    echo Removing shader assets...
+    rmdir /s /q "%ASSET_DIR%" >nul 2>&1
+    if errorlevel 1 (
+        echo   FAILED: Could not remove shader_assets folder.
+        set /a ERRORS+=1
+    ) else (
+        echo   Removed: shader_assets
+        set /a REMOVED+=1
+    )
+)
+
 :: Our 16 shader settings filenames (must match PluginLoader name derivation)
-set "SETTINGS=levelsplus_settings.txt liftgammagain_settings.txt tonemap_settings.txt curves_settings.txt fakehdr_settings.txt dpx_settings.txt technicolor_settings.txt colourfulness_settings.txt vibrance_settings.txt filmgrain2_settings.txt hslshift_settings.txt filmicpass_settings.txt clarity_settings.txt cas_settings.txt lumasharpen_settings.txt deband_settings.txt"
+set "SETTINGS=levelsplus_settings.txt liftgammagain_settings.txt tonemap_settings.txt curves_settings.txt fakehdr_settings.txt dpx_settings.txt technicolor_settings.txt colourfulness_settings.txt vibrance_settings.txt filmgrain2_settings.txt hslshift_settings.txt filmicpass_settings.txt clarity_settings.txt cas_settings.txt lumasharpen_settings.txt deband_settings.txt lut_settings.txt bloom_settings.txt adaptive_tonemapper_settings.txt"
 
 echo.
 echo Removing per-game shader settings...

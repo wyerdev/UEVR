@@ -13,6 +13,7 @@ set "SCRIPT_DIR=%~dp0"
 set "UEVR_DATA=%APPDATA%\UnrealVRMod"
 set "PLUGIN_DST=%UEVR_DATA%\UEVR\plugins"
 set "PRESET_DST=%UEVR_DATA%\UEVR\data\plugins\shipping_presets"
+set "ASSET_DST=%UEVR_DATA%\UEVR\data\plugins\shader_assets"
 
 :: Check if plugins subfolder exists (release zip layout)
 if exist "%SCRIPT_DIR%plugins\" (
@@ -35,6 +36,15 @@ if exist "%SCRIPT_DIR%shipping_presets\" (
     set "PRESET_SRC=%SCRIPT_DIR%shipping_presets"
 ) else if exist "%SCRIPT_DIR%presets\" (
     set "PRESET_SRC=%SCRIPT_DIR%presets"
+)
+
+:: Check for shipped shader assets (LUTs, etc.). Release zip layout uses
+:: a flat `shader_assets` folder; dev layout uses `examples/<plugin>/assets/`.
+set "ASSET_SRC="
+if exist "%SCRIPT_DIR%shader_assets\" (
+    set "ASSET_SRC=%SCRIPT_DIR%shader_assets"
+) else if exist "%SCRIPT_DIR%examples\" (
+    set "ASSET_SRC=%SCRIPT_DIR%examples"
 )
 
 :: Count what we have
@@ -68,6 +78,19 @@ if not exist "%PLUGIN_DST%" (
 :: Copy shader DLLs (only numbered ones like 01_LevelsPlusShader.dll)
 set "COPIED=0"
 set "ERRORS=0"
+
+:: Clean up any old-prefix copies of our shaders first.
+:: Plugin numeric prefixes change between releases (e.g. BlackCrush moved from 17 to 05,
+:: shifting FakeHDR/Deband/etc. by one). Without this cleanup, both the old and new
+:: prefix DLLs coexist in PLUGIN_DST and the same shader runs twice per frame.
+:: We match by the unique suffix so any past or future numbering is handled.
+set "SHADER_SUFFIXES=LevelsPlusShader LiftGammaGainShader TonemapShader CurvesShader BlackCrushShader FakeHDRShader DPXShader TechnicolorShader ColourfulnessShader VibranceShader FilmGrain2Shader HSLShiftShader FilmicPassShader ClarityShader CASShader LumaSharpenShader DebandShader LUTShader BloomShader AdaptiveTonemapperShader"
+echo Cleaning up any previous shader installation...
+for %%s in (%SHADER_SUFFIXES%) do (
+    for %%f in ("%PLUGIN_DST%\*%%s.dll") do if exist "%%f" del /f "%%f" >nul 2>&1
+    for %%f in ("%PLUGIN_DST%\*%%s-LICENSE.txt") do if exist "%%f" del /f "%%f" >nul 2>&1
+)
+
 echo Installing shaders...
 for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do (
     copy /Y "%PLUGIN_SRC%\%%f" "%PLUGIN_DST%\" >nul
@@ -96,20 +119,49 @@ for %%f in ("%PLUGIN_SRC%\*-LICENSE.txt") do (
 if defined PRESET_SRC (
     echo.
     echo Installing built-in presets...
-    if not exist "%PRESET_DST%" mkdir "%PRESET_DST%"
-    for /d %%d in ("%PRESET_SRC%\*") do (
-        set "PNAME=%%~nxd"
-        :: Clean and recreate so stale files from older versions are removed
-        if exist "%PRESET_DST%\!PNAME!" rmdir /s /q "%PRESET_DST%\!PNAME!"
-        mkdir "%PRESET_DST%\!PNAME!"
-        for %%f in ("%%d\*") do (
-            copy /Y "%%f" "%PRESET_DST%\!PNAME!\" >nul 2>&1
-            if errorlevel 1 (
-                set /a ERRORS+=1
+    :: Wipe stale entries (legacy folder-style and any *.uevrpreset removed
+    :: upstream) so renames/deletions in the package are reflected on disk.
+    if exist "%PRESET_DST%" rmdir /s /q "%PRESET_DST%"
+    mkdir "%PRESET_DST%"
+    for %%f in ("%PRESET_SRC%\*.uevrpreset") do (
+        copy /Y "%%f" "%PRESET_DST%\" >nul 2>&1
+        if errorlevel 1 (
+            set /a ERRORS+=1
+        ) else (
+            echo   OK: %%~nxf
+            set /a COPIED+=1
+        )
+    )
+)
+
+:: Copy shipped shader assets (LUTs, textures, etc.).
+:: Plugins resolve via plugin_settings.hpp's resolve_shader_asset_path():
+::   1. <persistent>/data/plugins/shader_settings/<file> (per-game user override)
+::   2. <UEVR_root>/data/plugins/shader_assets/<file>    (this directory; shipped fallback)
+if defined ASSET_SRC (
+    echo.
+    echo Installing shader assets...
+    if not exist "%ASSET_DST%" mkdir "%ASSET_DST%"
+    if exist "%SCRIPT_DIR%shader_assets\" (
+        for %%f in ("%ASSET_SRC%\*") do (
+            copy /Y "%%f" "%ASSET_DST%\" >nul 2>&1
+            if not errorlevel 1 (
+                echo   OK: %%~nxf
+                set /a COPIED+=1
             )
         )
-        echo   OK: !PNAME!
-        set /a COPIED+=1
+    ) else (
+        for /d %%d in ("%ASSET_SRC%\*") do (
+            if exist "%%d\assets\" (
+                for %%f in ("%%d\assets\*") do (
+                    copy /Y "%%f" "%ASSET_DST%\" >nul 2>&1
+                    if not errorlevel 1 (
+                        echo   OK: %%~nxf
+                        set /a COPIED+=1
+                    )
+                )
+            )
+        )
     )
 )
 

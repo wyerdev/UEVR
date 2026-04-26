@@ -1,0 +1,31 @@
+# UEVR Shader Preset
+format = 1
+name = OLED Color Pop
+
+[CAS]
+enabled = 1
+contrast = 0
+sharpening = 1
+
+[Colourfulness]
+enabled = 1
+colourfulness = 0.25
+lim_luma = 0.7
+enable_dither = 0
+col_noise = 1
+bb_bits = 10
+
+[LumaSharpen]
+enabled = 1
+sharp_strength = 0.65
+sharp_clamp = 0.035
+pattern = 1
+offset_bias = 1.0
+show_sharpen = 0
+
+[Vibrance]
+enabled = 1
+vibrance = 0.25
+balance_r = 1
+balance_g = 1
+balance_b = 1

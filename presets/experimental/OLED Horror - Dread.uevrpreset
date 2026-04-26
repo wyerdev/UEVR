@@ -1,0 +1,40 @@
+# UEVR Shader Preset
+format = 1
+name = OLED Horror - Dread
+
+[CAS]
+enabled = 1
+contrast = 0
+sharpening = 1
+
+[Clarity]
+enabled = 1
+radius = 3
+offset = 2.0
+blend_mode = 2
+strength = 0.48
+dark_intensity = 0.5
+light_intensity = 0.1
+blend_if_dark = 30
+blend_if_light = 225
+
+[Curves]
+enabled = 1
+mode = 0
+formula = 4
+contrast = 0.50
+
+[LumaSharpen]
+enabled = 1
+sharp_strength = 0.65
+sharp_clamp = 0.035
+pattern = 1
+offset_bias = 1.0
+show_sharpen = 0
+
+[Vibrance]
+enabled = 1
+vibrance = 0.22
+balance_r = 1
+balance_g = 1
+balance_b = 1

@@ -1,0 +1,33 @@
+# UEVR Shader Preset
+format = 1
+name = OLED Contrast
+
+[CAS]
+enabled = 1
+contrast = 0
+sharpening = 1
+
+[Clarity]
+enabled = 1
+radius = 2
+offset = 2.0
+blend_mode = 0
+strength = 0.30
+dark_intensity = 0.5
+light_intensity = 0.0
+blend_if_dark = 40
+blend_if_light = 215
+
+[Curves]
+enabled = 1
+mode = 0
+formula = 4
+contrast = 0.45
+
+[LumaSharpen]
+enabled = 1
+sharp_strength = 0.65
+sharp_clamp = 0.035
+pattern = 1
+offset_bias = 1.0
+show_sharpen = 0

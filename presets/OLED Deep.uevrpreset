@@ -1,0 +1,33 @@
+# UEVR Shader Preset
+format = 1
+name = OLED Deep
+
+[CAS]
+enabled = 1
+contrast = 0
+sharpening = 1
+
+[Clarity]
+enabled = 1
+radius = 3
+offset = 2.5
+blend_mode = 1
+strength = 0.50
+dark_intensity = 0.5
+light_intensity = 0.0
+blend_if_dark = 0
+blend_if_light = 255
+
+[FakeHDR]
+enabled = 1
+hdr_power = 1.08
+radius1 = 0.793
+radius2 = 0.87
+
+[LumaSharpen]
+enabled = 1
+sharp_strength = 0.65
+sharp_clamp = 0.035
+pattern = 1
+offset_bias = 1.0
+show_sharpen = 0
