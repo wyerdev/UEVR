@@ -53,13 +53,18 @@ jobs:
           New-Item -ItemType Directory -Path "$staging/plugins" -Force | Out-Null
           New-Item -ItemType Directory -Path "$staging/shipping_presets" -Force | Out-Null
 
-          # Copy shader DLLs (exclude example_plugin — glob is case-insensitive on Windows)
+          # Copy shader DLLs (exclude example_plugin — glob is case-insensitive on Windows).
+          # Bloom is intentionally excluded from releases: it's kept in-tree for possible
+          # future fix attempts but does not work in VR-LDR (see docs/effect-runtime-plan.md
+          # Phase 3 retrospective). Update this filter if Bloom is ever revived.
           Get-ChildItem "${{github.workspace}}/build/${{env.BUILD_TYPE}}/*Shader.dll" |
-            Where-Object { $_.Name -match "^\d{2}_" } |
+            Where-Object { $_.Name -match "^\d{2}_" -and $_.Name -notmatch "Bloom" } |
             Copy-Item -Destination "$staging/plugins/"
 
-          # Copy license files
-          Get-ChildItem "${{github.workspace}}/examples" -Recurse -Filter "*-LICENSE.txt" | Copy-Item -Destination "$staging/plugins/"
+          # Copy license files (exclude Bloom — see filter above)
+          Get-ChildItem "${{github.workspace}}/examples" -Recurse -Filter "*-LICENSE.txt" |
+            Where-Object { $_.Name -notmatch "Bloom" } |
+            Copy-Item -Destination "$staging/plugins/"
 
           # Copy shipping presets
           Get-ChildItem "${{github.workspace}}/presets" -Directory | ForEach-Object {
