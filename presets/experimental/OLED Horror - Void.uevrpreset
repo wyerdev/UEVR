@@ -1,6 +1,6 @@
 # UEVR Shader Preset
 format = 1
-name = "OLED Horror - Void"
+name = OLED Horror - Void
 
 [CAS]
 enabled = 1

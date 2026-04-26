@@ -16,36 +16,29 @@ std::string_view trim(std::string_view s) {
     return s.substr(b, e - b);
 }
 
-std::string strip_quotes(std::string_view s) {
-    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
-        return std::string{s.substr(1, s.size() - 2)};
-    }
-    return std::string{s};
-}
-
-// Quote if value contains whitespace, '#', ';', or '=' so it round-trips
-// through parse() unambiguously. Otherwise emit raw for diff-friendliness.
-std::string quote_if_needed(const std::string& v) {
-    bool needs = v.empty();
-    for (char c : v) {
-        if (c == ' ' || c == '\t' || c == '#' || c == ';' || c == '=' || c == '"') {
-            needs = true;
-            break;
-        }
-    }
-    if (!needs) return v;
-    // Escape embedded quotes by doubling them; parse() does NOT currently
-    // unescape, but values containing literal quotes are not expected in
-    // shader settings so this is defense-in-depth, not a feature.
+// Sanitize a value for emission: strip the small set of characters that
+// would actually break round-trip through parse() (control chars terminate
+// the line; `"` would re-trigger quote-stripping on read; leading/trailing
+// whitespace is eaten by trim()). Everything else — spaces, `=`, `#`, `;`
+// mid-value — passes through as-is. No quoting, no escaping.
+//
+// User-writable strings (preset display name) are already filtered by the
+// UI's `sanitize_name`; this is the last-line boundary guard for everything
+// the plugins emit.
+std::string sanitize_value(const std::string& v) {
     std::string out;
-    out.reserve(v.size() + 2);
-    out.push_back('"');
-    for (char c : v) {
-        if (c == '"') out.push_back('"');
-        out.push_back(c);
+    out.reserve(v.size());
+    for (unsigned char c : v) {
+        if (c < 0x20) continue;     // \n \r \t and other controls
+        if (c == '"') continue;     // never accept quotes in values
+        out.push_back(static_cast<char>(c));
     }
-    out.push_back('"');
-    return out;
+    // Drop leading/trailing whitespace — trim() on the parse side eats them
+    // anyway, so emitting them would silently change the value on round-trip.
+    while (!out.empty() && (out.back() == ' ' || out.back() == '\t')) out.pop_back();
+    size_t start = 0;
+    while (start < out.size() && (out[start] == ' ' || out[start] == '\t')) ++start;
+    return start == 0 ? out : out.substr(start);
 }
 
 } // namespace
@@ -74,7 +67,7 @@ Document parse(const std::string& text) {
         if (eq == std::string_view::npos) continue;
 
         std::string key{trim(sv.substr(0, eq))};
-        std::string value = strip_quotes(trim(sv.substr(eq + 1)));
+        std::string value{trim(sv.substr(eq + 1))};
         if (key.empty()) continue;
 
         if (!header_done && current_section.empty()) {
@@ -101,7 +94,7 @@ std::string emit(const std::vector<std::pair<std::string, std::string>>& header_
     std::ostringstream out;
     out << "# UEVR Shader Preset\n";
     for (const auto& [k, v] : header_entries) {
-        out << k << " = " << quote_if_needed(v) << "\n";
+        out << k << " = " << sanitize_value(v) << "\n";
     }
 
     for (const auto& s : sections) {
@@ -113,12 +106,12 @@ std::string emit(const std::vector<std::pair<std::string, std::string>>& header_
         for (const auto& k : s.key_order) {
             auto it = s.data.find(k);
             if (it == s.data.end()) continue;
-            out << k << " = " << quote_if_needed(it->second) << "\n";
+            out << k << " = " << sanitize_value(it->second) << "\n";
             emitted[k] = true;
         }
         for (const auto& [k, v] : s.data) {
             if (emitted.count(k)) continue;
-            out << k << " = " << quote_if_needed(v) << "\n";
+            out << k << " = " << sanitize_value(v) << "\n";
         }
     }
     return out.str();

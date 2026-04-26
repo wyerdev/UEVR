@@ -102,6 +102,29 @@ static constexpr const wchar_t* LUT_PREFIX    = L"lut_";
 static constexpr const wchar_t* LUT_EXTENSION = L".png";
 static constexpr const wchar_t* LUT_DEFAULT   = L"lut.png";
 
+// UTF-16 ↔ UTF-8 helpers. Filenames may contain non-ASCII characters
+// (accents, CJK, etc.) on localized installs; truncating to char silently
+// corrupts those names and breaks preset round-trip. Use the OS converter.
+static std::string wide_to_utf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(),
+                                        nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return {};
+    std::string out(static_cast<size_t>(n), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(),
+                          out.data(), n, nullptr, nullptr);
+    return out;
+}
+static std::wstring utf8_to_wide(const std::string& s) {
+    if (s.empty()) return {};
+    const int n = ::MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(),
+                                        nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring out(static_cast<size_t>(n), L'\0');
+    ::MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), out.data(), n);
+    return out;
+}
+
 // Convert "lut_warm_sunset.png" -> "Warm Sunset" for display.
 // "lut.png" -> "Default".
 static std::string preset_display_name(const std::wstring& filename) {
@@ -110,17 +133,18 @@ static std::string preset_display_name(const std::wstring& filename) {
     auto dot = stem.find_last_of(L'.');
     if (dot != std::wstring::npos) stem.erase(dot);
     if (stem.rfind(LUT_PREFIX, 0) == 0) stem.erase(0, std::wcslen(LUT_PREFIX));
-    std::string out;
-    out.reserve(stem.size());
+    // Replace separator chars with spaces, then convert to UTF-8 in one shot
+    // (preserves any non-ASCII characters in the filename).
+    for (auto& wc : stem) { if (wc == L'_' || wc == L'-') wc = L' '; }
+    std::string out = wide_to_utf8(stem);
+    // Title-case ASCII word starts; leaves non-ASCII bytes untouched.
     bool capitalize = true;
-    for (wchar_t wc : stem) {
-        if (wc == L'_' || wc == L'-') { out.push_back(' '); capitalize = true; continue; }
-        char c = static_cast<char>(wc);   // ASCII filenames only
+    for (char& c : out) {
+        if (c == ' ') { capitalize = true; continue; }
         if (capitalize && c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
-        out.push_back(c);
         capitalize = false;
     }
-    return out.empty() ? "Default" : out;
+    return out.empty() ? std::string("Default") : out;
 }
 
 class LUTPlugin : public uevr::Plugin, public uevr::settings::Serializable {
@@ -151,13 +175,10 @@ public:
     int render_order() const override { return 1400; }
 
     std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
-        std::string utf8;
-        utf8.reserve(m_selected_filename.size());
-        for (wchar_t wc : m_selected_filename) utf8.push_back(static_cast<char>(wc));
         return {
             {"enabled",  m_enabled ? "1" : "0"},
             {"amount",   std::to_string(m_amount)},
-            {"lut_file", utf8},
+            {"lut_file", wide_to_utf8(m_selected_filename)},
         };
     }
 
@@ -170,10 +191,7 @@ public:
         }
         it = kv.find("lut_file");
         if (it != kv.end()) {
-            std::wstring wfn;
-            wfn.reserve(it->second.size());
-            for (char c : it->second) wfn.push_back(static_cast<wchar_t>(c));
-            m_selected_filename = wfn;
+            m_selected_filename = utf8_to_wide(it->second);
             // Re-resolve selection against currently-discovered presets and
             // hot-apply the texture if the runtime is already configured.
             for (size_t i = 0; i < m_presets.size(); ++i) {

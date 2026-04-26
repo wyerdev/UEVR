@@ -91,9 +91,6 @@ Don't want to configure each shader manually? Load a preset instead:
 | **OLED Contrast** | CAS + LumaSharpen + Curves (luma S-curve) + Clarity (Soft Light) | OLED S-curve: shadow leg hits true black, deep cinematic punch without touching color |
 | **OLED Color Pop** | CAS + LumaSharpen + Vibrance + Colourfulness | OLED headsets — max color, both saturation layers, no contrast or black-point changes |
 | **OLED Deep** | CAS + LumaSharpen + Clarity (Overlay) + FakeHDR subtle | Most dramatic local detail pop, higher-intensity clarity, zero black crushing |
-| **OLED Horror - Asylum** | CAS + LumaSharpen + Clarity + LiftGammaGain + Colourfulness + Curves | Desaturated grey world, cold blue shadows, dark midtones — Silent Hill / RE atmosphere |
-| **OLED Horror - Void** | CAS + LumaSharpen + Colourfulness + Curves + LiftGammaGain + FilmGrain2 | Near-monochrome, heavy S-curve, film grain in shadows — Alien Isolation / SOMA |
-| **OLED Horror - Dread** | CAS + LumaSharpen + Clarity + LiftGammaGain + Vibrance + Curves | Teal shadows + amber highlights cinematic split, mild desaturation — RE2 / Dead Space |
 
 You can also save your own presets — **per-game** (local) or **shared across all games** (global).
 

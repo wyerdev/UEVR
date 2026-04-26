@@ -301,19 +301,41 @@ float4 main(PSI i) : SV_Target {
 // Plugin
 // ---------------------------------------------------------------------------
 
-// Default parameter values — mirror the original luluco250 AdaptiveTonemapper.fx
-// uniform defaults so "Reset to Defaults" matches the upstream shader.
-static constexpr int   DEFAULT_TONEMAP_OPERATOR = 2;     // ACES
-static constexpr float DEFAULT_AMOUNT           = 1.0f;
-static constexpr float DEFAULT_EXPOSURE         = 0.0f;
-static constexpr bool  DEFAULT_FIX_WHITE_POINT  = true;
-static constexpr float DEFAULT_ADAPT_RANGE_MIN  = 0.001f;
-static constexpr float DEFAULT_ADAPT_RANGE_MAX  = 1.0f;
-static constexpr float DEFAULT_ADAPT_TIME       = 1.0f;
-static constexpr float DEFAULT_ADAPT_SENSITIVITY= 1.0f;
-static constexpr int   DEFAULT_ADAPT_PRECISION  = 0;
-static constexpr float DEFAULT_FOCAL_POINT_X    = 0.5f;
-static constexpr float DEFAULT_FOCAL_POINT_Y    = 0.5f;
+// Two sets of defaults:
+//
+//   ORIGINAL_*  — verbatim luluco250 AdaptiveTonemapper.fx uniform defaults.
+//                 Restorable via the "Original Defaults" button.
+//   DEFAULT_*   — UEVR shipping defaults, tuned for typical UE LDR scene RTs.
+//                 The upstream defaults (Exposure 0, AdaptRange.x 0.001) leave
+//                 the EMA free to drive exposure to ~1000x in dark interiors,
+//                 which blows out the post-tonemap composite in VR. Clamping
+//                 the low end of AdaptRange and biasing Exposure down keeps the
+//                 image in a sane band on first launch. User-verified in-game.
+//
+// Used by both per-field "Reset" buttons and global "Reset All".
+static constexpr int   ORIGINAL_TONEMAP_OPERATOR = 2;     // ACES
+static constexpr float ORIGINAL_AMOUNT           = 1.0f;
+static constexpr float ORIGINAL_EXPOSURE         = 0.0f;
+static constexpr bool  ORIGINAL_FIX_WHITE_POINT  = true;
+static constexpr float ORIGINAL_ADAPT_RANGE_MIN  = 0.001f;
+static constexpr float ORIGINAL_ADAPT_RANGE_MAX  = 1.0f;
+static constexpr float ORIGINAL_ADAPT_TIME       = 1.0f;
+static constexpr float ORIGINAL_ADAPT_SENSITIVITY= 1.0f;
+static constexpr int   ORIGINAL_ADAPT_PRECISION  = 0;
+static constexpr float ORIGINAL_FOCAL_POINT_X    = 0.5f;
+static constexpr float ORIGINAL_FOCAL_POINT_Y    = 0.5f;
+
+static constexpr int   DEFAULT_TONEMAP_OPERATOR = ORIGINAL_TONEMAP_OPERATOR;
+static constexpr float DEFAULT_AMOUNT           = ORIGINAL_AMOUNT;
+static constexpr float DEFAULT_EXPOSURE         = -3.0f; // -3 f-stops, user-tuned
+static constexpr bool  DEFAULT_FIX_WHITE_POINT  = ORIGINAL_FIX_WHITE_POINT;
+static constexpr float DEFAULT_ADAPT_RANGE_MIN  = 0.05f;  // floor adaptation, user-tuned
+static constexpr float DEFAULT_ADAPT_RANGE_MAX  = ORIGINAL_ADAPT_RANGE_MAX;
+static constexpr float DEFAULT_ADAPT_TIME       = ORIGINAL_ADAPT_TIME;
+static constexpr float DEFAULT_ADAPT_SENSITIVITY= ORIGINAL_ADAPT_SENSITIVITY;
+static constexpr int   DEFAULT_ADAPT_PRECISION  = ORIGINAL_ADAPT_PRECISION;
+static constexpr float DEFAULT_FOCAL_POINT_X    = ORIGINAL_FOCAL_POINT_X;
+static constexpr float DEFAULT_FOCAL_POINT_Y    = ORIGINAL_FOCAL_POINT_Y;
 
 class AdaptiveTonemapperPlugin : public uevr::Plugin, public uevr::settings::Serializable {
 public:
@@ -482,11 +504,17 @@ public:
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Adaptive Tonemapper", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("v%s — luluco250 AdaptiveTonemapper.fx port", ATM_VERSION);
+            ImGui::TextWrapped(
+                "Auto-exposure for VR. Measures how bright the scene is, then dims bright "
+                "scenes / brightens dark ones over time, like a real camera or your eyes "
+                "adjusting when you walk indoors. Then runs a 'tonemap' curve that compresses "
+                "the brightness range so highlights don't blow out to flat white.");
             fx::draw_scene_rt_colorspace_warning();
 
             bool changed = false;
             const bool prev_enabled = m_enabled;
             changed |= ImGui::Checkbox("Enabled##ATM", &m_enabled);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Turn the whole effect on or off.");
             if (m_enabled != prev_enabled) {
                 API::get()->log_info("[AdaptiveTonemapper] enabled=%d (scene RT: %s, colorspace=%d)",
                                       m_enabled ? 1 : 0,
@@ -497,18 +525,117 @@ public:
             if (ImGui::TreeNodeEx("Tonemapping", ImGuiTreeNodeFlags_DefaultOpen)) {
                 const char* operators = "Reinhard\0Filmic (Uncharted 2)\0ACES (Unreal Engine 4)\0";
                 changed |= ImGui::Combo("Operator##ATM", &m_TonemapOperator, operators);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "The brightness-compression curve.\n"
+                    "  Reinhard: simplest, softer, slightly washed out.\n"
+                    "  Filmic (Uncharted 2): film-like contrast, deeper shadows.\n"
+                    "  ACES (UE4): the Hollywood / Unreal default, punchy contrast,\n"
+                    "    slightly orange highlights.\n"
+                    "\n"
+                    "NOTE: with 'Fix White Point' ON (default), all three operators\n"
+                    "renormalize whites to 1.0, which makes them look very similar in\n"
+                    "typical scenes. Turn 'Fix White Point' OFF to clearly see the\n"
+                    "difference between operators.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##ATM_op")) { m_TonemapOperator = DEFAULT_TONEMAP_OPERATOR; changed = true; }
+
                 changed |= ImGui::DragFloat("Amount##ATM",   &m_Amount,   0.01f, 0.0f,  2.0f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "How much of the tonemapped result to mix into the original image.\n"
+                    "  0.0 = original image untouched (effect off).\n"
+                    "  1.0 = fully tonemapped (default).\n"
+                    "  >1.0 = exaggerate the effect past 100%.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##ATM_amount")) { m_Amount = DEFAULT_AMOUNT; changed = true; }
+
                 changed |= ImGui::DragFloat("Exposure##ATM", &m_Exposure, 0.01f, -6.0f, 6.0f, "%.2f f-stops");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Overall brightness offset, measured in camera 'stops'.\n"
+                    "  Each +1.0 doubles the brightness; each -1.0 halves it.\n"
+                    "  0 = neutral. Negative = darker. Positive = brighter.\n"
+                    "\n"
+                    "Default is -3.0 because UEVR's input is already a tonemapped LDR\n"
+                    "image (mean brightness ~0.1), so we need ~3 stops down to land\n"
+                    "back near neutral. The upstream ReShade default of 0 assumes a\n"
+                    "raw HDR input and looks blown-out here.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##ATM_exp")) { m_Exposure = DEFAULT_EXPOSURE; changed = true; }
+
                 changed |= ImGui::Checkbox("Fix White Point##ATM", &m_FixWhitePoint);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "After tonemapping, rescale so pure white (1,1,1) maps back to 1.0.\n"
+                    "  ON  (default): keeps highlights bright, hides differences\n"
+                    "                 between operators (they all look similar).\n"
+                    "  OFF: highlights get dimmer (each operator's natural white\n"
+                    "       point), but the difference between Reinhard / Filmic /\n"
+                    "       ACES becomes obvious. Turn this OFF when comparing\n"
+                    "       operators.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##ATM_fwp")) { m_FixWhitePoint = DEFAULT_FIX_WHITE_POINT; changed = true; }
                 ImGui::TreePop();
             }
             if (ImGui::TreeNodeEx("Adaptation", ImGuiTreeNodeFlags_DefaultOpen)) {
                 changed |= ImGui::DragFloat2("Range (min, max)##ATM", m_AdaptRange,    0.001f, 0.001f, 1.0f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Clamps the measured scene brightness before it's used to set\n"
+                    "exposure. Lower min = scene can get brighter in dark areas;\n"
+                    "lower max = scene can get darker in bright areas.\n"
+                    "\n"
+                    "Min should always be <= max. Default min is 0.05 to stop dark\n"
+                    "rooms from being boosted into total whiteout (the upstream\n"
+                    "default of 0.001 lets exposure climb ~125x in caves).");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##ATM_range")) {
+                    m_AdaptRange[0] = DEFAULT_ADAPT_RANGE_MIN;
+                    m_AdaptRange[1] = DEFAULT_ADAPT_RANGE_MAX;
+                    changed = true;
+                }
+
                 changed |= ImGui::DragFloat("Time (s)##ATM",          &m_AdaptTime,    0.01f,  0.0f,   3.0f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "How many seconds the eye-adaptation takes to catch up when\n"
+                    "you walk between bright and dark areas.\n"
+                    "  0   = instant (no smoothing, can flicker).\n"
+                    "  1.0 = ~1 second to stabilize (default, feels natural).\n"
+                    "  3.0 = very slow, cinematic.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##ATM_time")) { m_AdaptTime = DEFAULT_ADAPT_TIME; changed = true; }
+
                 changed |= ImGui::DragFloat("Sensitivity##ATM",       &m_AdaptSensitivity, 0.01f, 0.0f, 3.0f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Multiplier on the measured brightness before it drives exposure.\n"
+                    "  >1.0 = treats the scene as brighter than it is, so the camera\n"
+                    "         dims more aggressively (darker output).\n"
+                    "  <1.0 = treats the scene as darker, so it brightens more.\n"
+                    "  1.0  = neutral (default).");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##ATM_sens")) { m_AdaptSensitivity = DEFAULT_ADAPT_SENSITIVITY; changed = true; }
+
                 changed |= ImGui::SliderInt("Precision##ATM",         &m_AdaptPrecision, 0, ATM_MIP_LEVELS,
                                              "%d (0=full screen, 9=focal pixel)");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "How tightly the metering focuses around the Focal Point.\n"
+                    "  0 = average the entire screen (default, robust).\n"
+                    "  9 = sample only a single pixel at the Focal Point\n"
+                    "      (acts like a spot meter; unstable but very directional).\n"
+                    "Intermediate values average a progressively smaller region.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##ATM_prec")) { m_AdaptPrecision = DEFAULT_ADAPT_PRECISION; changed = true; }
+
                 changed |= ImGui::DragFloat2("Focal Point##ATM",      m_AdaptFocalPoint, 0.001f, 0.0f, 1.0f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Where on the screen the metering is centered. UV coordinates,\n"
+                    "(0,0) = top-left, (1,1) = bottom-right, (0.5,0.5) = center.\n"
+                    "\n"
+                    "Has no effect when Precision = 0 (full-screen average).\n"
+                    "At higher Precision, use this to point the meter at the ground,\n"
+                    "the sky, etc.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##ATM_focal")) {
+                    m_AdaptFocalPoint[0] = DEFAULT_FOCAL_POINT_X;
+                    m_AdaptFocalPoint[1] = DEFAULT_FOCAL_POINT_Y;
+                    changed = true;
+                }
                 ImGui::TreePop();
             }
             if (ImGui::TreeNode("Debug##ATM")) {
@@ -524,7 +651,8 @@ public:
                 changed |= ImGui::RadioButton("Calibration bars##ATMdbg",           &m_DebugVisualizeAdapt, 6);
                 ImGui::TreePop();
             }
-            if (ImGui::Button("Reset to Defaults##ATM")) {
+            ImGui::Spacing();
+            if (ImGui::Button("Reset All##ATM")) {
                 m_TonemapOperator  = DEFAULT_TONEMAP_OPERATOR;
                 m_Amount           = DEFAULT_AMOUNT;
                 m_Exposure         = DEFAULT_EXPOSURE;
@@ -538,6 +666,22 @@ public:
                 m_AdaptFocalPoint[1] = DEFAULT_FOCAL_POINT_Y;
                 changed = true;
             }
+            ImGui::SameLine();
+            if (ImGui::Button("Original Defaults##ATM")) {
+                m_TonemapOperator  = ORIGINAL_TONEMAP_OPERATOR;
+                m_Amount           = ORIGINAL_AMOUNT;
+                m_Exposure         = ORIGINAL_EXPOSURE;
+                m_FixWhitePoint    = ORIGINAL_FIX_WHITE_POINT;
+                m_AdaptRange[0]    = ORIGINAL_ADAPT_RANGE_MIN;
+                m_AdaptRange[1]    = ORIGINAL_ADAPT_RANGE_MAX;
+                m_AdaptTime        = ORIGINAL_ADAPT_TIME;
+                m_AdaptSensitivity = ORIGINAL_ADAPT_SENSITIVITY;
+                m_AdaptPrecision   = ORIGINAL_ADAPT_PRECISION;
+                m_AdaptFocalPoint[0] = ORIGINAL_FOCAL_POINT_X;
+                m_AdaptFocalPoint[1] = ORIGINAL_FOCAL_POINT_Y;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Restore the upstream luluco250 AdaptiveTonemapper.fx default values.");
             if (changed) uevr::settings::notify_changed(*this, API::get()->param());
         }
     }

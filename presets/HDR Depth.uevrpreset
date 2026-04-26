@@ -1,6 +1,6 @@
 # UEVR Shader Preset
 format = 1
-name = "HDR Depth"
+name = HDR Depth
 
 [CAS]
 enabled = 1

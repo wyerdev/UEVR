@@ -1,6 +1,6 @@
 # UEVR Shader Preset
 format = 1
-name = "OLED Contrast"
+name = OLED Contrast
 
 [CAS]
 enabled = 1

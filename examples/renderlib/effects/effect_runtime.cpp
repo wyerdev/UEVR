@@ -20,6 +20,20 @@
 namespace uevr::fx {
 
 namespace {
+// Diagnostic logging gate. Counters and bookkeeping stay live (effectively
+// free), but the verbose `[fx-diag]` log emissions are off unless the user
+// sets the UEVR_FX_DIAG environment variable to a non-empty, non-"0" value.
+// Evaluated once on first access — env-var reads are not free in a hot path.
+bool fx_diag_enabled() {
+    static const bool s_enabled = []() {
+        char buf[8] = {0};
+        const DWORD n = ::GetEnvironmentVariableA("UEVR_FX_DIAG", buf, sizeof(buf));
+        if (n == 0 || n >= sizeof(buf)) return false;
+        return buf[0] != '\0' && !(buf[0] == '0' && buf[1] == '\0');
+    }();
+    return s_enabled;
+}
+
 // SEH-guarded backend dispatch. Plain function — no C++ objects with destructors,
 // no `try/catch`, so MSVC allows `__try/__except`. Returns true if the backend
 // completed without an SEH fault, false if we caught one.
@@ -178,7 +192,8 @@ namespace {
         // the log, the DLL never registered its on_present and Cadence is dead.
         static uint64_t s_calls = 0;
         ++s_calls;
-        const bool log_now = (s_calls == 1) || (s_calls == 60) || (s_calls == 600) || (s_calls % 6000 == 0);
+        const bool log_now = fx_diag_enabled() &&
+            ((s_calls == 1) || (s_calls == 60) || (s_calls == 600) || (s_calls % 6000 == 0));
         if (log_now) {
             if (auto& api = uevr::API::get()) {
                 api->log_info("[fx-diag] on_present_dispatch_runtimes call #%llu, runtimes=%zu",
@@ -309,7 +324,7 @@ void EffectRuntime::execute(uint64_t pass_mask) {
         if (!seen) m_diag_period_rts[m_diag_period_rt_count++] = scene_rt_ptr;
     }
 
-    if (api && m_diag_total_dispatches <= k_diag_verbose_calls) {
+    if (api && fx_diag_enabled() && m_diag_total_dispatches <= k_diag_verbose_calls) {
         api->log_info("[fx-diag] execute n=%llu dispatch_idx_pre=%u mask=0x%llx scene_rt=%p tid=%u",
                       (unsigned long long)m_diag_total_dispatches,
                       dispatch_idx_pre,
@@ -318,7 +333,7 @@ void EffectRuntime::execute(uint64_t pass_mask) {
                       (unsigned)::GetCurrentThreadId());
     }
     // Periodic summary heartbeat after the verbose phase.
-    if (api && m_diag_total_dispatches > k_diag_verbose_calls) {
+    if (api && fx_diag_enabled() && m_diag_total_dispatches > k_diag_verbose_calls) {
         const uint64_t now_ms = static_cast<uint64_t>(GetTickCount64());
         if (m_diag_last_summary_ms == 0) m_diag_last_summary_ms = now_ms;
         if (now_ms - m_diag_last_summary_ms >= 2000) {

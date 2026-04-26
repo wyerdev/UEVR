@@ -1438,6 +1438,10 @@ void Framework::draw_ui() {
                 }
             }
 
+            // PluginLoader is a singleton; resolve once for the whole sidebar
+            // walk instead of dynamic_cast'ing every mod every frame.
+            auto* const plugin_loader = PluginLoader::get().get();
+
             for (size_t i = 1; i < sidebar_entries.size(); ++i) {
                 if (is_advanced_mode || !sidebar_entries[i].m_advanced_entry) {
                     bool is_sub_entry = false;
@@ -1460,8 +1464,9 @@ void Framework::draw_ui() {
                             // Color shader plugin entries green when their settings file marks them enabled.
                             // Done here (not via a SidebarEntryInfo member) to avoid touching Framework.hpp,
                             // which would shift class layout and risk stale incremental builds — see uevr-lessons.md.
-                            if (auto* pl = dynamic_cast<PluginLoader*>(range.mod.get())) {
-                                is_enabled_shader = pl->is_shader_plugin_enabled(sidebar_entries[i].m_label);
+                            // Singleton compare avoids per-frame dynamic_cast against every mod.
+                            if (plugin_loader != nullptr && range.mod.get() == plugin_loader) {
+                                is_enabled_shader = plugin_loader->is_shader_plugin_enabled(sidebar_entries[i].m_label);
                             }
                         }
                     }

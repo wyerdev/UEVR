@@ -1,6 +1,6 @@
 # UEVR Shader Preset
 format = 1
-name = "HDR Depth (Bleached)"
+name = HDR Depth (Bleached)
 
 [CAS]
 enabled = 1

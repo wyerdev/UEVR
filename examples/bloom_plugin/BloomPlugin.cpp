@@ -53,7 +53,7 @@ static constexpr const char* BLOOM_VERSION = "1.0.0";
 // Constant buffer mirroring all ~30 uniforms. Layout matches HLSL natural
 // packing: scalars pack into 4-per-row, float3 occupies 12 bytes within a row
 // (next scalar may pack into the remaining 4 bytes), float2 occupies 8.
-// 14 rows × 16 bytes = 224 bytes total.
+// 13 rows × 16 bytes = 208 bytes total (see static_assert below).
 // ---------------------------------------------------------------------------
 #pragma pack(push, 4)
 struct BloomCB {
