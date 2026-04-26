@@ -33,6 +33,8 @@ public:
     void on_draw_ui() override;
     void on_draw_sidebar_entry(std::string_view name) override;
 
+    bool is_shader_plugin_enabled(const std::string& plugin_dll_name) const;
+
     void on_present();
     void on_device_reset() override;
     bool on_message(HWND wnd, UINT message, WPARAM w_param, LPARAM l_param) override;

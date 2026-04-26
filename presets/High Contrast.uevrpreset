@@ -1,0 +1,16 @@
+# UEVR Shader Preset
+format = 1
+name = "High Contrast"
+
+[Curves]
+enabled = 1
+mode = 0
+formula = 4
+contrast = 0.65
+
+[Vibrance]
+enabled = 1
+vibrance = 0.4
+balance_r = 1
+balance_g = 1
+balance_b = 1

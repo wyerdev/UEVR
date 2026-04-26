@@ -209,6 +209,39 @@ typedef bool (*UEVR_UFunction_NativePostFn)(UEVR_UFunctionHandle, UEVR_UObjectHa
 
 typedef void (*UEVR_PluginRequiredVersionFn)(UEVR_PluginVersion*);
 
+/* Settings serializer — used by register_settings_serializer.
+ *
+ * A plugin builds one of these (typically via the C++ adapter in
+ * include/uevr/PluginSettings.hpp) and registers it once during
+ * uevr_plugin_initialize so the host can persist the plugin's settings
+ * to a single shared .uevrpreset file.
+ *
+ * All callbacks receive the opaque user_data pointer the plugin passed
+ * to register_settings_serializer. The host never interprets it.
+ *
+ * - get_section_name: stable preset section name (e.g. "CAS"). Decoupled
+ *   from DLL filename so DLLs can be renamed without invalidating presets.
+ *   Must be unique across all loaded plugins.
+ * - get_render_order: sparse integer (100, 200, 300...). Lower = earlier
+ *   in the post-process pipeline. Used by the host for sorting; not
+ *   user-facing today.
+ * - serialize: emit the plugin's current settings as (key, value) string
+ *   pairs by calling the supplied emit() callback once per pair.
+ * - deserialize: apply a single (key, value) pair. Called once per key the
+ *   host reads from the preset file. Unknown keys should be ignored.
+ * - reset_to_defaults: revert all settings to their defaults. Host calls
+ *   this BEFORE replaying a preset so plugins not present in the preset
+ *   end up at defaults rather than at whatever they were last set to.
+ */
+typedef void (*UEVR_SettingsSerializeEmitFn)(const char* key, const char* value, void* ctx);
+typedef struct {
+    const char* (*get_section_name)(void* user_data);
+    int  (*get_render_order)(void* user_data);
+    void (*serialize)(void* user_data, UEVR_SettingsSerializeEmitFn emit, void* ctx);
+    void (*deserialize)(void* user_data, const char* key, const char* value);
+    void (*reset_to_defaults)(void* user_data);
+} UEVR_SettingsSerializer;
+
 typedef struct {
     UEVR_OnPresentFn on_present;
     UEVR_OnDeviceResetFn on_device_reset;
@@ -246,6 +279,28 @@ typedef struct {
 
     /* Intended for C plugins to listen to via on_custom_event */
     void (*dispatch_custom_event)(const char* event_name, const char* event_data);
+
+    /* New entries appended at end for ABI compatibility with existing plugins.
+     *
+     * register_settings_serializer:
+     *   Register a per-plugin settings serializer with the host. Call once
+     *   from uevr_plugin_initialize. The serializer struct is shallow-copied
+     *   by the host; the function pointers inside it must remain valid for
+     *   the lifetime of the plugin. user_data is passed back unchanged to
+     *   every callback. If two plugins register the same section name, the
+     *   second registration is rejected and an error is logged — the second
+     *   plugin's settings simply will not persist.
+     *
+     * notify_settings_changed:
+     *   Tell the host that this plugin's settings have changed (e.g. from a
+     *   slider in on_draw_ui). The host debounces these calls and rewrites
+     *   the auto-save preset file on idle. user_data must match what the
+     *   plugin used in register_settings_serializer; the host uses it to
+     *   identify the source plugin. Cheap to call every frame — debouncing
+     *   is the host's responsibility.
+     */
+    void (*register_settings_serializer)(const UEVR_SettingsSerializer* serializer, void* user_data);
+    void (*notify_settings_changed)(void* user_data);
 } UEVR_PluginFunctions;
 
 typedef struct {

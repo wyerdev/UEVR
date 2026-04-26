@@ -16,5 +16,4 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 
-echo Clean succeeded. Rebuilding...
-call build.bat
+echo Clean succeeded. Run build.bat to rebuild...

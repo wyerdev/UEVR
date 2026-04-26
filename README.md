@@ -21,7 +21,7 @@ Rare cutscene or 3P transition crashes may still remain in some games. The D3D12
 ## UEVR Plugins: ReShade Post-Processing Shaders
 - Fix washed-out colors and grey blacks
 
-VR headsets often show **washed-out colors and grey blacks** compared to a flat monitor. This fork includes 16 ReShade shaders to fix this, re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
+VR headsets often show **washed-out colors and grey blacks** compared to a flat monitor. This fork includes 17 ReShade shaders to fix this, re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
 
 ### **Where to start:** 
 - **LevelsPlus** fixes grey blacks (the #1 VR issue) and 
@@ -68,7 +68,13 @@ These change the overall look and feel of the image. Detail-safe — they enhanc
 |---|--------|----------------|
 | 16 | **Deband** | Removes color banding artifacts in gradients (common on VR panels). Detects flat regions via standard deviation + Weber ratio analysis, smooths them, and applies ordered dithering. |
 
-All shaders are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Shaders are loaded in numeric order (01→16). Settings are saved per-game automatically.
+**Color Grading via LUT (advanced)**
+
+| # | Shader | When to Use It |
+|---|--------|----------------|
+| 18 | **LUT** | Apply a custom 1024×32 horizontal-tile LUT PNG (Marty McFly / ReShade convention) to the VR scene. Drop your own `lut.png` in `<UEVR>/data/plugins/shader_assets/` (global, all games) or `<persistent>/data/plugins/shader_settings/` (per-game override). A default warm-grade `lut.png` ships with the installer; copy `lut_identity.png` over it for a neutral pass-through. |
+
+All shaders are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Shaders are loaded in numeric order (01→18). Settings are saved per-game automatically.
 
 ### Presets
 
@@ -83,6 +89,14 @@ Don't want to configure each shader manually? Load a preset instead:
 | **Cinematic** | LevelsPlus + Tonemap + Curves + DPX | Warm, film-like look |
 | **Vivid Colors** | LevelsPlus + Vibrance + Colourfulness | Punchy, saturated colors |
 | **HDR Depth** | LevelsPlus + FakeHDR + Colourfulness | Local tone mapping + enhanced color |
+| **OLED Natural** | CAS + LumaSharpen + Clarity (Soft Light) + Deband | OLED headsets — sharpness stack + local contrast, no black crushing, deband for banding |
+| **OLED Vivid** | CAS + LumaSharpen + Clarity (Hard Light) + LevelsPlus + FakeHDR + Vibrance | OLED headsets — full enhancement, subtle local tone mapping that pops on true blacks |
+| **OLED Contrast** | CAS + LumaSharpen + Curves (luma S-curve) + Clarity (Soft Light) | OLED S-curve: shadow leg hits true black, deep cinematic punch without touching color |
+| **OLED Color Pop** | CAS + LumaSharpen + Vibrance + Colourfulness | OLED headsets — max color, both saturation layers, no contrast or black-point changes |
+| **OLED Deep** | CAS + LumaSharpen + Clarity (Overlay) + FakeHDR subtle | Most dramatic local detail pop, higher-intensity clarity, zero black crushing |
+| **OLED Horror - Asylum** | CAS + LumaSharpen + Clarity + LiftGammaGain + Colourfulness + Curves | Desaturated grey world, cold blue shadows, dark midtones — Silent Hill / RE atmosphere |
+| **OLED Horror - Void** | CAS + LumaSharpen + Colourfulness + Curves + LiftGammaGain + FilmGrain2 | Near-monochrome, heavy S-curve, film grain in shadows — Alien Isolation / SOMA |
+| **OLED Horror - Dread** | CAS + LumaSharpen + Clarity + LiftGammaGain + Vibrance + Curves | Teal shadows + amber highlights cinematic split, mild desaturation — RE2 / Dead Space |
 
 You can also save your own presets — **per-game** (local) or **shared across all games** (global).
 

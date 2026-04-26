@@ -1,0 +1,51 @@
+# UEVR Shader Preset
+format = 1
+name = "Deeper Blacks"
+
+[CAS]
+enabled = 1
+contrast = 0
+sharpening = 1
+
+[LevelsPlus]
+enabled = 1
+enable_levels = 1
+in_black_r = 0.078
+in_black_g = 0.078
+in_black_b = 0.078
+in_white_r = 0.9137
+in_white_g = 0.8706
+in_white_b = 0.8275
+in_gamma_r = 1
+in_gamma_g = 1
+in_gamma_b = 1
+out_black_r = 0
+out_black_g = 0
+out_black_b = 0
+out_white_r = 1
+out_white_g = 1
+out_white_b = 1
+range_shift_r = 0
+range_shift_g = 0
+range_shift_b = 0
+range_shift_sw = 0
+aces_mode = 0
+aces_lum_r = 100
+aces_lum_g = 100
+aces_lum_b = 100
+highlight_clipping = 0
+
+[LumaSharpen]
+enabled = 1
+sharp_strength = 0.65
+sharp_clamp = 0.035
+pattern = 1
+offset_bias = 1.0
+show_sharpen = 0
+
+[Vibrance]
+enabled = 1
+vibrance = 0.35
+balance_r = 1
+balance_g = 1
+balance_b = 1
