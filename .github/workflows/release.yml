@@ -66,12 +66,10 @@ jobs:
             Where-Object { $_.Name -notmatch "Bloom" } |
             Copy-Item -Destination "$staging/plugins/"
 
-          # Copy shipping presets
-          Get-ChildItem "${{github.workspace}}/presets" -Directory | ForEach-Object {
-            $dst = "$staging/shipping_presets/$($_.Name)"
-            New-Item -ItemType Directory -Path $dst -Force | Out-Null
-            Copy-Item "$($_.FullName)/*" $dst
-          }
+          # Copy shipping presets (flat *.uevrpreset files only — subfolders like
+          # presets/experimental/ are intentionally excluded from releases).
+          Get-ChildItem "${{github.workspace}}/presets/*.uevrpreset" -File |
+            Copy-Item -Destination "$staging/shipping_presets/"
 
           # Copy install/uninstall scripts
           Copy-Item "${{github.workspace}}/install-plugins.bat" "$staging/"
