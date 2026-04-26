@@ -134,7 +134,7 @@ public:
     }
 
     std::string preset_section_name() const override { return "Colourfulness"; }
-    int render_order() const override { return 900; }
+    int render_order() const override { return 1000; }
 
     std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
         return {

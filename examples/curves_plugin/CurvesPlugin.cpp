@@ -129,7 +129,7 @@ public:
 
     // --- uevr::settings::Serializable ---
     std::string preset_section_name() const override { return "Curves"; }
-    int render_order() const override { return 400; }
+    int render_order() const override { return 600; }
 
     std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
         return {

@@ -154,7 +154,7 @@ public:
 
     // --- uevr::settings::Serializable -------------------------------------
     std::string preset_section_name() const override { return "Deband"; }
-    int render_order() const override { return 1700; }
+    int render_order() const override { return 1900; }
 
     std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
         return {

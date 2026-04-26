@@ -148,7 +148,7 @@ public:
 
     // --- uevr::settings::Serializable -------------------------------------
     std::string preset_section_name() const override { return "LUT"; }
-    int render_order() const override { return 1800; }
+    int render_order() const override { return 1400; }
 
     std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
         std::string utf8;

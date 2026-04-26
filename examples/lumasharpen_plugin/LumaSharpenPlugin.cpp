@@ -128,7 +128,7 @@ public:
 
     // --- uevr::settings::Serializable -------------------------------------
     std::string preset_section_name() const override { return "LumaSharpen"; }
-    int render_order() const override { return 1600; }
+    int render_order() const override { return 1800; }
 
     std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
         return {

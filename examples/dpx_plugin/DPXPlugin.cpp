@@ -117,7 +117,7 @@ public:
     }
 
     std::string preset_section_name() const override { return "DPX"; }
-    int render_order() const override { return 700; }
+    int render_order() const override { return 800; }
 
     std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
         return {

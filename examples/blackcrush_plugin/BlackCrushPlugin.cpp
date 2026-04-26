@@ -114,7 +114,7 @@ public:
 
     // --- uevr::settings::Serializable ---
     std::string preset_section_name() const override { return "BlackCrush"; }
-    int render_order() const override { return 500; }
+    int render_order() const override { return 300; }
 
     std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
         return {

@@ -122,7 +122,7 @@ public:
     }
 
     std::string preset_section_name() const override { return "FakeHDR"; }
-    int render_order() const override { return 600; }
+    int render_order() const override { return 700; }
 
     std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
         return {

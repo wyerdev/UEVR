@@ -169,7 +169,7 @@ public:
     }
 
     std::string preset_section_name() const override { return "FilmGrain2"; }
-    int render_order() const override { return 1100; }
+    int render_order() const override { return 1500; }
 
     std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
         return {

@@ -108,7 +108,7 @@ public:
 
     // --- uevr::settings::Serializable ---
     std::string preset_section_name() const override { return "Tonemap"; }
-    int render_order() const override { return 300; }
+    int render_order() const override { return 500; }
 
     std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
         return {

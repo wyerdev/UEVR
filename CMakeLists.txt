@@ -352,7 +352,7 @@ list(APPEND plugin_renderlib_SOURCES
 	"examples/renderlib/effects/scene_warning.hpp"
 	"examples/renderlib/imgui/font_robotomedium.hpp"
 	"examples/renderlib/imgui/re2_imconfig.hpp"
-	"examples/renderlib/plugin_settings.hpp"
+	"examples/renderlib/plugin_assets.hpp"
 	"examples/renderlib/rendering/d3d11.hpp"
 	"examples/renderlib/rendering/d3d12.hpp"
 	"examples/renderlib/rendering/shared.hpp"
@@ -469,7 +469,7 @@ target_link_libraries(fakehdr_plugin PUBLIC
 
 set_target_properties(fakehdr_plugin PROPERTIES
 	OUTPUT_NAME
-		06_FakeHDRShader
+		07_FakeHDRShader
 )
 
 unset(CMKR_TARGET)
@@ -511,7 +511,7 @@ target_link_libraries(curves_plugin PUBLIC
 
 set_target_properties(curves_plugin PROPERTIES
 	OUTPUT_NAME
-		04_CurvesShader
+		06_CurvesShader
 )
 
 unset(CMKR_TARGET)
@@ -553,7 +553,7 @@ target_link_libraries(technicolor_plugin PUBLIC
 
 set_target_properties(technicolor_plugin PROPERTIES
 	OUTPUT_NAME
-		08_TechnicolorShader
+		09_TechnicolorShader
 )
 
 unset(CMKR_TARGET)
@@ -595,7 +595,7 @@ target_link_libraries(filmgrain2_plugin PUBLIC
 
 set_target_properties(filmgrain2_plugin PROPERTIES
 	OUTPUT_NAME
-		11_FilmGrain2Shader
+		15_FilmGrain2Shader
 )
 
 unset(CMKR_TARGET)
@@ -679,7 +679,7 @@ target_link_libraries(colourfulness_plugin PUBLIC
 
 set_target_properties(colourfulness_plugin PROPERTIES
 	OUTPUT_NAME
-		09_ColourfulnessShader
+		10_ColourfulnessShader
 )
 
 unset(CMKR_TARGET)
@@ -763,7 +763,7 @@ target_link_libraries(vibrance_plugin PUBLIC
 
 set_target_properties(vibrance_plugin PROPERTIES
 	OUTPUT_NAME
-		10_VibranceShader
+		11_VibranceShader
 )
 
 unset(CMKR_TARGET)
@@ -805,7 +805,7 @@ target_link_libraries(tonemap_plugin PUBLIC
 
 set_target_properties(tonemap_plugin PROPERTIES
 	OUTPUT_NAME
-		03_TonemapShader
+		05_TonemapShader
 )
 
 unset(CMKR_TARGET)
@@ -847,7 +847,7 @@ target_link_libraries(dpx_plugin PUBLIC
 
 set_target_properties(dpx_plugin PROPERTIES
 	OUTPUT_NAME
-		07_DPXShader
+		08_DPXShader
 )
 
 unset(CMKR_TARGET)
@@ -973,7 +973,7 @@ target_link_libraries(clarity_plugin PUBLIC
 
 set_target_properties(clarity_plugin PROPERTIES
 	OUTPUT_NAME
-		14_ClarityShader
+		16_ClarityShader
 )
 
 unset(CMKR_TARGET)
@@ -1015,7 +1015,7 @@ target_link_libraries(cas_plugin PUBLIC
 
 set_target_properties(cas_plugin PROPERTIES
 	OUTPUT_NAME
-		15_CASShader
+		17_CASShader
 )
 
 unset(CMKR_TARGET)
@@ -1057,7 +1057,7 @@ target_link_libraries(lumasharpen_plugin PUBLIC
 
 set_target_properties(lumasharpen_plugin PROPERTIES
 	OUTPUT_NAME
-		16_LumaSharpenShader
+		18_LumaSharpenShader
 )
 
 unset(CMKR_TARGET)
@@ -1099,7 +1099,7 @@ target_link_libraries(deband_plugin PUBLIC
 
 set_target_properties(deband_plugin PROPERTIES
 	OUTPUT_NAME
-		17_DebandShader
+		19_DebandShader
 )
 
 unset(CMKR_TARGET)
@@ -1141,7 +1141,7 @@ target_link_libraries(lut_plugin PUBLIC
 
 set_target_properties(lut_plugin PROPERTIES
 	OUTPUT_NAME
-		18_LUTShader
+		14_LUTShader
 )
 
 unset(CMKR_TARGET)
@@ -1183,7 +1183,7 @@ target_link_libraries(bloom_plugin PUBLIC
 
 set_target_properties(bloom_plugin PROPERTIES
 	OUTPUT_NAME
-		19_BloomShader
+		20_BloomShader
 )
 
 unset(CMKR_TARGET)
@@ -1225,7 +1225,7 @@ target_link_libraries(adaptive_tonemapper_plugin PUBLIC
 
 set_target_properties(adaptive_tonemapper_plugin PROPERTIES
 	OUTPUT_NAME
-		20_AdaptiveTonemapperShader
+		04_AdaptiveTonemapperShader
 )
 
 unset(CMKR_TARGET)
@@ -1267,7 +1267,7 @@ target_link_libraries(blackcrush_plugin PUBLIC
 
 set_target_properties(blackcrush_plugin PROPERTIES
 	OUTPUT_NAME
-		05_BlackCrushShader
+		03_BlackCrushShader
 )
 
 unset(CMKR_TARGET)

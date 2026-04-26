@@ -177,7 +177,7 @@ public:
 
     // --- uevr::settings::Serializable -------------------------------------
     std::string preset_section_name() const override { return "Clarity"; }
-    int render_order() const override { return 1400; }
+    int render_order() const override { return 1600; }
 
     std::vector<std::pair<std::string, std::string>> serialize_settings() const override {
         return {
