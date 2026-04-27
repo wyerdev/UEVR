@@ -46,7 +46,7 @@ if %FOUND%==0 (
 echo Found %FOUND% shader(s) to remove.
 echo.
 echo This will remove:
-echo   - All 20 post-processing shader DLLs from global plugins
+echo   - All post-processing shader DLLs from global plugins
 echo   - Their license files
 echo   - Built-in shipping presets
 echo   - User-saved presets
@@ -144,12 +144,12 @@ echo.
 echo Removing per-game shader settings...
 for /d %%g in ("%UEVR_DATA%\*") do (
     if exist "%%g\data\plugins" (
-        :: Clean new location (shader_settings subdir)
+        rem Clean new location: shader_settings subdir
         if exist "%%g\data\plugins\shader_settings" (
             rmdir /s /q "%%g\data\plugins\shader_settings" >nul 2>&1
             if not errorlevel 1 set /a REMOVED+=1
         )
-        :: Clean old location (pre-migration files in data\plugins directly)
+        rem Clean old location: pre-migration files in data\plugins directly
         for %%s in (%SETTINGS%) do (
             if exist "%%g\data\plugins\%%s" (
                 del /f "%%g\data\plugins\%%s" >nul 2>&1
@@ -160,7 +160,7 @@ for /d %%g in ("%UEVR_DATA%\*") do (
             del /f "%%g\data\plugins\active_preset.txt" >nul 2>&1
             if not errorlevel 1 set /a REMOVED+=1
         )
-        :: Remove per-game presets
+        rem Remove per-game presets
         if exist "%%g\data\plugins\presets" (
             rmdir /s /q "%%g\data\plugins\presets" >nul 2>&1
             if not errorlevel 1 set /a REMOVED+=1
@@ -179,4 +179,5 @@ if !ERRORS! GTR 0 (
 echo ============================================
 echo.
 pause
+if !ERRORS! GTR 0 exit /b 1
 exit /b 0
