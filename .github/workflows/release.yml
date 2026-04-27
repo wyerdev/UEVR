@@ -52,6 +52,7 @@ jobs:
           $staging = "${{github.workspace}}/plugins-staging"
           New-Item -ItemType Directory -Path "$staging/plugins" -Force | Out-Null
           New-Item -ItemType Directory -Path "$staging/shipping_presets" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$staging/shader_assets" -Force | Out-Null
 
           # Copy shader DLLs (exclude example_plugin — glob is case-insensitive on Windows).
           # Bloom is intentionally excluded from releases: it's kept in-tree for possible
@@ -70,6 +71,21 @@ jobs:
           # presets/experimental/ are intentionally excluded from releases).
           Get-ChildItem "${{github.workspace}}/presets/*.uevrpreset" -File |
             Copy-Item -Destination "$staging/shipping_presets/"
+
+          # Copy shipped shader assets (LUT pngs, etc.) flat into shader_assets/.
+          # install-plugins.bat detects this layout (vs dev examples/<plugin>/assets/)
+          # and copies into <UEVR_root>/data/plugins/shader_assets/, which is the
+          # fallback path resolve_shader_asset_path() consults at runtime.
+          # Excludes assets belonging to plugins not shipped (e.g. Bloom — see DLL filter above).
+          $excludedAssetPlugins = @('bloom_plugin')
+          Get-ChildItem "${{github.workspace}}/examples" -Directory |
+            Where-Object { $excludedAssetPlugins -notcontains $_.Name } |
+            ForEach-Object {
+              $assetsDir = Join-Path $_.FullName 'assets'
+              if (Test-Path $assetsDir) {
+                Get-ChildItem $assetsDir -File | Copy-Item -Destination "$staging/shader_assets/"
+              }
+            }
 
           # Copy install/uninstall scripts
           Copy-Item "${{github.workspace}}/install-plugins.bat" "$staging/"
