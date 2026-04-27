@@ -119,13 +119,16 @@ for %%f in ("%PLUGIN_SRC%\*-LICENSE.txt") do (
 if defined PRESET_SRC (
     echo.
     echo Installing built-in presets...
-    :: Wipe stale entries (legacy folder-style and any *.uevrpreset removed
-    :: upstream) so renames/deletions in the package are reflected on disk.
+    rem Wipe stale entries (legacy folder-style and any removed *.uevrpreset)
+    rem so renames/deletions in the package are reflected on disk.
+    rem NOTE: do NOT use :: comments inside a (...) block; a literal ) in the
+    rem comment text closes the block early and breaks parsing.
     if exist "%PRESET_DST%" rmdir /s /q "%PRESET_DST%"
     mkdir "%PRESET_DST%"
     for %%f in ("%PRESET_SRC%\*.uevrpreset") do (
-        copy /Y "%%f" "%PRESET_DST%\" >nul 2>&1
+        copy /Y "%%f" "%PRESET_DST%\" >nul
         if errorlevel 1 (
+            echo   FAILED: %%~nxf
             set /a ERRORS+=1
         ) else (
             echo   OK: %%~nxf
@@ -144,8 +147,11 @@ if defined ASSET_SRC (
     if not exist "%ASSET_DST%" mkdir "%ASSET_DST%"
     if exist "%SCRIPT_DIR%shader_assets\" (
         for %%f in ("%ASSET_SRC%\*") do (
-            copy /Y "%%f" "%ASSET_DST%\" >nul 2>&1
-            if not errorlevel 1 (
+            copy /Y "%%f" "%ASSET_DST%\" >nul
+            if errorlevel 1 (
+                echo   FAILED: %%~nxf
+                set /a ERRORS+=1
+            ) else (
                 echo   OK: %%~nxf
                 set /a COPIED+=1
             )
@@ -154,8 +160,11 @@ if defined ASSET_SRC (
         for /d %%d in ("%ASSET_SRC%\*") do (
             if exist "%%d\assets\" (
                 for %%f in ("%%d\assets\*") do (
-                    copy /Y "%%f" "%ASSET_DST%\" >nul 2>&1
-                    if not errorlevel 1 (
+                    copy /Y "%%f" "%ASSET_DST%\" >nul
+                    if errorlevel 1 (
+                        echo   FAILED: %%~nxf
+                        set /a ERRORS+=1
+                    ) else (
                         echo   OK: %%~nxf
                         set /a COPIED+=1
                     )
@@ -167,8 +176,12 @@ if defined ASSET_SRC (
 
 :: Copy uninstall script to plugins folder so users can run it from there
 if exist "%SCRIPT_DIR%uninstall-plugins.bat" (
-    copy /Y "%SCRIPT_DIR%uninstall-plugins.bat" "%PLUGIN_DST%\" >nul 2>&1
-    if not errorlevel 1 (
+    copy /Y "%SCRIPT_DIR%uninstall-plugins.bat" "%PLUGIN_DST%\" >nul
+    if errorlevel 1 (
+        echo.
+        echo WARNING: Could not copy uninstaller to %PLUGIN_DST%\
+        set /a ERRORS+=1
+    ) else (
         echo.
         echo Uninstaller copied to: %PLUGIN_DST%\uninstall-plugins.bat
     )
@@ -191,6 +204,7 @@ echo NOTE: These shaders require the patched UEVR fork.
 echo       They will NOT load on stock UEVR nightly.
 echo.
 pause
+if !ERRORS! GTR 0 exit /b 1
 exit /b 0
 
 :fail
