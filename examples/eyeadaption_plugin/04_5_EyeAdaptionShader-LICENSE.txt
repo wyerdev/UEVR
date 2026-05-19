@@ -1,0 +1,20 @@
+EyeAdaptionPlugin for UEVR
+==========================
+
+Original shader:
+  EyeAdaption by brussell
+  Version: 2.32
+  Source: https://github.com/brussell1/Shaders/blob/master/Shaders/EyeAdaption.fx
+  License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+  License text: https://creativecommons.org/licenses/by/4.0/legalcode
+
+Original shader credits:
+  luluco250 - luminance get/store code from Magic Bloom
+
+Modifications:
+  - Ported from ReShade FX to a DX11/DX12 UEVR C++ plugin with embedded HLSL pixel shaders.
+  - ReShade technique passes were mapped to uevr::fx EffectRuntime passes.
+  - TexAvgLuma and TexAvgLumaLast are represented as 1x1 R16F render targets because the source shader writes a uniform scalar to every pixel and samples only at (0,0); this is mathematically equivalent.
+  - Scene reads/writes use the UEVR runtime's scene colorspace helpers so the source shader's luminance math receives linear scene values on plain UNORM render targets.
+
+The UEVR plugin wrapper code is distributed under this repository's license.

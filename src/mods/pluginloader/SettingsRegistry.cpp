@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -44,6 +45,14 @@ std::map<void*, std::string> s_user_data_to_section;
 std::atomic<bool> s_dirty{false};
 std::atomic<long long> s_dirty_at_ms{0}; // steady_clock ms since epoch
 
+// Cached compiled-in defaults (serialized strings) for each section,
+// populated during apply_preset_file(). Used to detect non-default values.
+std::map<std::string, std::map<std::string, std::string>> s_defaults_by_section;
+// Sections that are disabled but carry at least one value different from
+// the compiled-in default. Updated during apply_preset_file() and
+// notify_settings_changed().
+std::set<std::string> s_disabled_with_custom;
+
 constexpr long long kDebounceMs = 500;
 
 long long now_ms() {
@@ -51,9 +60,58 @@ long long now_ms() {
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
+std::string canonical_preset_section_name(const std::string& section_name) {
+    if (section_name == "LSPOIrr") return "FGFXLargeScalePerceptualObscuranceIrradiance";
+    return section_name;
+}
+
 std::filesystem::path auto_preset_path_impl() {
     return Framework::get_persistent_dir() / "data" / "plugins"
         / kShaderSettingsDirName / "auto.uevrpreset";
+}
+
+// Serialize a plugin's current values into a string map (lock-free, called
+// outside s_mtx).
+std::map<std::string, std::string> capture_serialized(const Registered& reg) {
+    std::map<std::string, std::string> result;
+    if (reg.vtable.serialize == nullptr) return result;
+    try {
+        reg.vtable.serialize(reg.user_data,
+            [](const char* k, const char* v, void* c) {
+                if (!k) return;
+                static_cast<std::map<std::string, std::string>*>(c)->emplace(k, v ? v : "");
+            }, &result);
+    } catch (...) {}
+    return result;
+}
+
+// Check whether `current` differs from `defaults` in any key other than
+// "enabled". Both maps use the same serializer so formatting is consistent.
+bool has_non_default_values(const std::map<std::string, std::string>& current,
+                            const std::map<std::string, std::string>& defaults) {
+    for (const auto& [k, v] : current) {
+        if (k == "enabled") continue;
+        auto it = defaults.find(k);
+        if (it == defaults.end() || it->second != v) return true;
+    }
+    return false;
+}
+
+// Recompute s_disabled_with_custom for a single section.
+void update_custom_disabled_for(const std::string& section, const Registered& reg) {
+    if (s_defaults_by_section.empty()) return;
+    auto current = capture_serialized(reg);
+    auto enabled_it = current.find("enabled");
+    bool is_enabled = enabled_it != current.end()
+                      && enabled_it->second != "0"
+                      && !enabled_it->second.empty();
+    auto def_it = s_defaults_by_section.find(section);
+    if (is_enabled || def_it == s_defaults_by_section.end()
+        || !has_non_default_values(current, def_it->second)) {
+        s_disabled_with_custom.erase(section);
+    } else {
+        s_disabled_with_custom.insert(section);
+    }
 }
 
 bool flush_to_disk_with_header(const std::filesystem::path& target,
@@ -161,14 +219,24 @@ void register_settings_serializer(const UEVR_SettingsSerializer* serializer, voi
 }
 
 void notify_settings_changed(void* user_data) {
+    std::string section;
+    Registered reg{};
     {
         std::lock_guard lock{s_mtx};
-        if (s_user_data_to_section.find(user_data) == s_user_data_to_section.end()) {
+        auto it = s_user_data_to_section.find(user_data);
+        if (it == s_user_data_to_section.end()) {
             // Unknown plugin — silently ignore. Could be a Phase E hot-reload
             // edge case where the plugin was unregistered concurrently.
             return;
         }
+        section = it->second;
+        auto reg_it = s_serializers.find(section);
+        if (reg_it != s_serializers.end()) reg = reg_it->second;
     }
+
+    // Update "disabled with custom values" tracking for this section.
+    update_custom_disabled_for(section, reg);
+
     s_dirty_at_ms.store(now_ms(), std::memory_order_relaxed);
     s_dirty.store(true, std::memory_order_relaxed);
 }
@@ -216,11 +284,19 @@ void apply_preset_file(const std::filesystem::path& path) {
         }
     }
 
+    // 1b. Capture compiled-in defaults (after reset, before applying preset)
+    //     for non-default value detection used by the UI.
+    s_defaults_by_section.clear();
+    for (const auto& [name, reg] : snapshot) {
+        s_defaults_by_section[name] = capture_serialized(reg);
+    }
+
     // 2. Parse the file (empty Document if missing) and dispatch matching
     //    sections to their serializers.
     auto doc = uevr::preset_ini::parse_file(path);
     if (doc.sections.empty()) {
         spdlog::info("[PluginLoader] Preset '{}' is empty or missing — defaults applied", path.string());
+        s_disabled_with_custom.clear();
         return;
     }
 
@@ -230,9 +306,14 @@ void apply_preset_file(const std::filesystem::path& path) {
 
     int applied_sections = 0;
     int applied_keys = 0;
+    int skipped_sections = 0;
     for (const auto& [section_name, kvs] : doc.sections) {
-        auto it = by_name.find(section_name);
-        if (it == by_name.end()) continue; // unknown plugin — silently skip
+        auto it = by_name.find(canonical_preset_section_name(section_name));
+        if (it == by_name.end()) {
+            spdlog::info("[PluginLoader] Preset section '{}' has no registered serializer — skipped", section_name);
+            ++skipped_sections;
+            continue;
+        }
         const auto* reg = it->second;
         if (reg->vtable.deserialize == nullptr) continue;
         ++applied_sections;
@@ -248,6 +329,12 @@ void apply_preset_file(const std::filesystem::path& path) {
     }
     spdlog::info("[PluginLoader] Applied preset '{}': {} section(s), {} key(s)",
                  path.string(), applied_sections, applied_keys);
+
+    // 3. Compute which disabled sections carry non-default values.
+    s_disabled_with_custom.clear();
+    for (const auto& [name, reg] : snapshot) {
+        update_custom_disabled_for(name, reg);
+    }
 }
 
 void apply_auto_preset() {
@@ -258,6 +345,8 @@ void clear() {
     std::lock_guard lock{s_mtx};
     s_serializers.clear();
     s_user_data_to_section.clear();
+    s_defaults_by_section.clear();
+    s_disabled_with_custom.clear();
     s_dirty.store(false, std::memory_order_relaxed);
 }
 
@@ -332,9 +421,48 @@ void disable_all() {
         }
     }
     if (any) {
+        s_disabled_with_custom.clear(); // all at defaults now
         s_dirty.store(true, std::memory_order_relaxed);
         s_dirty_at_ms.store(now_ms(), std::memory_order_relaxed);
     }
+}
+
+bool section_has_custom_disabled_values(const std::string& section_name) {
+    // Case-insensitive lookup matching is_section_enabled() semantics.
+    auto ieq = [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                std::tolower(static_cast<unsigned char>(b[i]))) return false;
+        }
+        return true;
+    };
+    for (const auto& s : s_disabled_with_custom) {
+        if (ieq(s, section_name)) return true;
+    }
+    return false;
+}
+
+std::string dll_name_to_section(const std::string& name) {
+    std::string core = name;
+    size_t start = 0;
+    while (start < core.size() && (std::isdigit(core[start]) || core[start] == '_')) ++start;
+    core = core.substr(start);
+    const std::string shader_suffix = "Shader";
+    const std::string plugin_suffix = "Plugin";
+    if (core.size() > shader_suffix.size() && core.substr(core.size() - shader_suffix.size()) == shader_suffix)
+        core = core.substr(0, core.size() - shader_suffix.size());
+    else if (core.size() > plugin_suffix.size() && core.substr(core.size() - plugin_suffix.size()) == plugin_suffix)
+        core = core.substr(0, core.size() - plugin_suffix.size());
+    return core;
+}
+
+bool is_plugin_enabled(const std::string& dll_name) {
+    return is_section_enabled(dll_name_to_section(dll_name));
+}
+
+bool plugin_has_custom_disabled_values(const std::string& dll_name) {
+    return section_has_custom_disabled_values(dll_name_to_section(dll_name));
 }
 
 } // namespace uevr::settings_registry

@@ -1,4 +1,6 @@
-# UEVR Death Crash — High On Life (Oregon-Win64-Shipping)
+# [HISTORICAL] UEVR Death Crash — High On Life (Oregon-Win64-Shipping)
+
+[2026-04] Unsolved. Kept for reference.
 
 ## Status: UNSOLVED
 

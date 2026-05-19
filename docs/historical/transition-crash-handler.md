@@ -1,4 +1,6 @@
-# Transition Crash Handler — Technical Documentation
+# [HISTORICAL] Transition Crash Handler — Technical Documentation
+
+[2026-04] Completed. Death/respawn crash fix shipped.
 
 This fixes the death/respawn crash in: **Returnal** (and potentially any UE game with split-DLL rendering that nulls objects during level transitions while the render thread is mid-frame).
 

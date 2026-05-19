@@ -3,9 +3,9 @@
 
 Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix washed-out colors and grey blacks in VR.
 
-**Credits:** 
-- Built on [praydog's UEVR](https://github.com/praydog/UEVR) ([Original UEVR README below](#original-uevr-readme)). 
-- Shaders ported from ReShade originals by CeeJay.dk, AMD, SLSNe, Marty McFly, 3an, DKT70, Loadus, Martins Upitis, bacondither, Ioxa, kingeric1992, Niklas Haas (haasn), JPulowski, and luluco250 ([license files](examples/)).
+**Credits:**
+- Big thanks to [Praydog](https://github.com/praydog), who created UEVR and made this fork possible. This fork modifies and extends [Praydog's UEVR](https://github.com/praydog/UEVR); the UEVR code is Praydog's work ([Original UEVR README below](#original-uevr-readme)).
+- Thanks also to [crosire's ReShade](https://github.com/crosire/reshade) project and the original ReShade shader creators: CeeJay.dk, AMD, SLSNe, Marty McFly, 3an, DKT70, Loadus, Martins Upitis, bacondither, Ioxa, kingeric1992, Niklas Haas (haasn), JPulowski, luluco250, brussell1, Alex Tuduran, and Timothy Lottes / NVIDIA. This fork does not ship ReShade itself; it ports selected shader work to native UEVR plugins so those effects can be used in UEVR ([license files](examples/)).
 
 # [How to Install](docs/INSTALL.md)
 
@@ -34,10 +34,12 @@ These clip by design — they remap the tonal range, trading some shadow/highlig
 
 | # | Shader | When to Use It |
 |---|--------|----------------|
+| 00 | **FGFX Large Scale Perceptual Obscurance/Irradiance** | Blurs the display-space scene at large scale, overlay-blends it back as low-frequency occlusion/irradiance, then applies toning controls. Runs before the color-correction chain. |
 | 01 | **LevelsPlus** | **Fix grey/washed-out blacks.** The #1 VR problem. Remaps black/white points so darks are actually dark and whites are actually bright. Trades some shadow detail for deeper blacks — almost always worth it. Also has per-channel gamma and optional ACES tone mapping. Start here. |
 | 02 | **LiftGammaGain** | Fine-tune shadows, midtones, and highlights separately. Use if LevelsPlus alone isn't enough — e.g. shadows are too blue, or highlights are too warm. Gain can clip highlights if pushed high. |
 | 03 | **BlackCrush** | Crushes the bottom of the tonal curve to push near-blacks toward true black without affecting midtones or highlights. Use after LevelsPlus when the lift left a slightly grey shadow floor. |
 | 04 | **AdaptiveTonemapper** | Auto-exposure (eye adaptation) + tonemap curve. Measures average scene brightness and dims bright scenes / brightens dark ones over ~1s, like your eyes adjusting when walking indoors. Three tonemap curves selectable (Reinhard / Filmic / ACES). Defaults are tuned for UEVR's LDR scene RT (Exposure -3, AdaptRange.x 0.05); defaults are restorable via the "Original Defaults" button. |
+| 04.5 | **EyeAdaption** | Pure exposure compensation: measures scene luminance with a 256x256 mip chain, adapts over time, then brightens or darkens highlights/midtones/shadows without adding a separate tonemap curve. Use when you want exposure adaptation without AdaptiveTonemapper's tonemap curve. |
 | 05 | **Tonemap** | Adjust overall gamma, exposure, and saturation. Exposure can clip highlights; defog subtracts color. Also has bleach bypass (desaturated high-contrast film look). |
 
 **Color Grading (make it look good)**
@@ -47,14 +49,17 @@ These change the overall look and feel of the image. Detail-safe — they enhanc
 | # | Shader | When to Use It |
 |---|--------|----------------|
 | 06 | **Curves** | Add contrast using S-curves. Redistributes contrast within the existing range without clipping. Multiple curve formulas (Luma, Chroma, etc). Subtle but effective. |
-| 07 | **FakeHDR** | **Easiest way to make any game look good.** Deepens darks and makes colors pop via local tone mapping bloom. Enhances detail without clipping. [Technical docs](docs/fakehdr-vr-postprocess-plugin.md). |
+| 07 | **FakeHDR** | **Easiest way to make any game look good.** Deepens darks and makes colors pop via local tone mapping bloom. Enhances detail without clipping. |
 | 08 | **DPX** | Emulates Cineon film stock. Gives a warm, cinematic color shift with a strength slider. Good for games that look too cold/digital. |
 | 09 | **Technicolor** | Emulates 2-strip Technicolor (old Hollywood look). Strong color shift — teal shadows, warm highlights. Use sparingly. |
+| 09.5 | **Technicolor2** | Cross-channel colour mixing that darkens and intensifies colours with brightness and saturation controls. Different algorithm from Technicolor — can be combined or used independently. |
 | 10 | **Colourfulness** | Boosts color saturation with a built-in limiter that prevents clipping. Smarter than just cranking saturation. |
 | 11 | **Vibrance** | Boosts unsaturated colors more than saturated ones. Mathematically avoids clipping. Good for making dull games pop without oversaturating skin tones. |
 | 12 | **HSL Shift** | Remap individual colors to different hues. E.g. make greens more vivid, shift reds toward orange, cool down skin tones. 8 color zones you can shift independently. Changes color direction, not intensity. |
 | 13 | **Filmic Pass** | Full cinematic color processing: sigmoid curves per RGB channel, bleach bypass, fade, saturation, and per-channel gamma. Can clip at extreme settings. More control than Tonemap — use when you want a specific film look. |
-| 14 | **LUT** | Apply a custom 1024×32 horizontal-tile LUT PNG (Marty McFly / ReShade convention) to the VR scene. Drop your own `lut.png` in `<UEVR>/data/plugins/shader_assets/` (global, all games) or `<persistent>/data/plugins/shader_settings/` (per-game override). A default warm-grade `lut.png` ships with the installer; copy `lut_identity.png` over it for a neutral pass-through. The final stamp on color before detail/sharpening. |
+| 13.5 | **Cartoon** | Stylized toon outlining. Detects diagonal luminance edges and darkens them for a cel-shaded/inked look. Best for animated, high-contrast, or deliberately stylized games; keep subtle in VR so textures do not turn busy. |
+| 14 | **LUT** | Apply a custom 1024×32 horizontal-tile LUT PNG to the VR scene. The final stamp on color before detail/sharpening. See [INSTALL.md](docs/INSTALL.md#lut-customization) for swapping in your own LUT. |
+| 14.5 | **FXAA** | NVIDIA FXAA 3.11 quality path. Smooths remaining jagged high-contrast edges after color grading, before grain and sharpening. Best when a game's built-in TAA leaves visible stair-stepping or when sharpening makes edges too crisp. |
 
 **Detail, Sharpening & Film Effects (finishing touches)**
 
@@ -71,7 +76,7 @@ These change the overall look and feel of the image. Detail-safe — they enhanc
 |---|--------|----------------|
 | 19 | **Deband** | Removes color banding artifacts in gradients (common on VR panels). Detects flat regions via standard deviation + Weber ratio analysis, smooths them, and applies ordered dithering. |
 
-All shaders are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Shaders are loaded in numeric order (01→19). Settings are saved per-game automatically.
+All shaders are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Shaders run in their plugin-defined pipeline order. Settings are auto-saved per game in `data/plugins/shader_settings/auto.uevrpreset`.
 
 ### Presets
 
@@ -111,15 +116,15 @@ Start with **LevelsPlus**. Still flat? Add **Tonemap**. See a color cast? Add **
 
 #### Dull / Desaturated Colors
 
-| | Vibrance (#11) | Colourfulness (#10) | Technicolor (#09) | DPX (#08) |
-|---|---|---|---|---|
-| How it works | Boosts dull colors more, protects saturated | Boosts all saturation with limiter | 2-strip film color separation | Film stock emulation |
-| Skin tones safe? | Yes | Mostly | No | No |
-| Changes color palette? | No | No | Yes (teal + warm) | Yes (warm/golden) |
-| Best for | Safe default for more vivid | More saturation without clipping | Stylized cinematic look | Warm cinematic look |
-| OK to combine? | Yes | Yes with Vibrance | Use alone | Use alone |
+| | Vibrance (#11) | Colourfulness (#10) | Technicolor (#09) | Technicolor2 (#09.5) | DPX (#08) |
+|---|---|---|---|---|---|
+| How it works | Boosts dull colors more, protects saturated | Boosts all saturation with limiter | 2-strip film color separation | Cross-channel colour mixing | Film stock emulation |
+| Skin tones safe? | Yes | Mostly | No | No | No |
+| Changes color palette? | No | No | Yes (teal + warm) | Yes (darkens + intensifies) | Yes (warm/golden) |
+| Best for | Safe default for more vivid | More saturation without clipping | Stylized cinematic look | Subtle colour grading | Warm cinematic look |
+| OK to combine? | Yes | Yes with Vibrance | Use alone | Can combine with Technicolor | Use alone |
 
-**Vibrance** is the safest start. **Colourfulness** stacks well with it. Technicolor and DPX are style choices — don't combine them with each other.
+**Vibrance** is the safest start. **Colourfulness** stacks well with it. Technicolor, Technicolor2, and DPX are style choices — don't combine them with DPX.
 
 #### Flat / No Depth (Colors Are Fine but Image Looks "Painted On")
 
@@ -162,6 +167,7 @@ Use **Deband** for a surgical fix. **FilmGrain2** if you also want the grain aes
 | Combination | Problem |
 |---|---|
 | Technicolor + DPX | Both impose strong color palettes — they fight |
+| Technicolor2 + DPX | Same issue — Technicolor2 also imposes a strong color palette |
 | Vibrance + Colourfulness both at max | Double saturation boost clips colors |
 | Multiple contrast shaders all at high values | Crushed blacks + blown whites |
 | Clarity + CAS both at high values | Over-sharpened, ringing artifacts |
@@ -175,13 +181,16 @@ Most shaders are essentially **free** — they read one pixel, do some math, wri
 
 | Cost | Shaders | GPU Time (per eye) |
 |---|---|---|
-| **Free** (1 texture read) | LevelsPlus, LiftGammaGain, Tonemap, Curves, DPX, Technicolor, Colourfulness, Vibrance, HSL Shift | ~0.05ms each |
+| **Free** (1 texture read) | LevelsPlus, LiftGammaGain, Tonemap, Curves, DPX, Technicolor, Technicolor2, Colourfulness, Vibrance, HSL Shift | ~0.05ms each |
 | **Cheap** (1 read, heavy math) | FilmGrain2, FilmicPass | ~0.1ms each |
-| **Light** (3–5 reads) | LumaSharpen, Deband | ~0.1ms each |
+| **Light** (3–5 reads) | Cartoon, LumaSharpen, Deband | ~0.1ms each |
 | **Medium** (9 reads) | CAS | ~0.15ms |
 | **Heavy** (17–18 reads) | FakeHDR, Clarity | ~0.3–0.5ms each |
+| **Multi-pass** | AdaptiveTonemapper, EyeAdaption, FXAA, LUT, FGFXLargeScalePerceptualObscuranceIrradiance, Bloom (experimental) | Not single-pass; measure with your VR runtime overlay |
 
-**Typical usage** (2–5 shaders): well under **1ms**. Every shader enabled at once: ~1.5–2ms total. For context, a 90fps VR frame budget is 11.1ms.
+**Typical usage** (a small hand-picked stack): well under **1ms**. Multi-pass shaders and very broad stacks cost more and should be checked with your VR runtime's frame timing overlay. For context, a 90fps VR frame budget is 11.1ms.
+
+LUT is functionally lightweight despite running through the multi-pass runtime; FGFXLargeScalePerceptualObscuranceIrradiance is the heaviest shipped shader (many cascade passes).
 
 *All times are rough estimates based on shader complexity, not measured benchmarks. Actual cost varies by GPU, resolution, and game. Use your VR runtime's frame timing overlay to measure real impact.*
 
@@ -190,14 +199,14 @@ Most shaders are essentially **free** — they read one pixel, do some math, wri
 ### Building Plugins
 
 ```bash
-cmake --build build --config Release --target <plugin_name>
+cmd.exe //c "build.bat"
 ```
 
-Or build the full project. Plugin DLLs output to `build/Release/`. Deploy to `%APPDATA%/UnrealVRMod/UEVR/plugins/` (global) or `%APPDATA%/UnrealVRMod/<game_executable>/plugins/` (per-game).
+Plugin DLLs output to `build/Release/`. Deploy to `%APPDATA%/UnrealVRMod/UEVR/plugins/` (global) or `%APPDATA%/UnrealVRMod/<game_executable>/plugins/` (per-game).
 
 ### Licenses
 
-Each plugin includes a LICENSE.txt crediting the original ReShade shader author. All original shaders are open source (BSD, MIT, or public domain). See individual files in `examples/*/`.
+Each plugin includes a LICENSE.txt crediting the original shader author, source, and license status. ReShade itself is BSD 3-Clause, but this fork does not bundle the ReShade runtime, injector, or shader compiler. Selected shader ports are tracked through their individual upstream notices; some source shaders have explicit permissive licenses, while others did not include an explicit license in the source used for the port. See individual files in `examples/*/`.
 
 ---
 

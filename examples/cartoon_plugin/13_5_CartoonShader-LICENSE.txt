@@ -1,12 +1,22 @@
-This license governs original UEVR example/plugin wrapper code in this directory
-("examples") and its subdirectories. It does not replace or relicense bundled or
-ported third-party shader code, shader math, textures, or other assets. Those
-materials remain governed by their own upstream notices, which are documented in
-the per-plugin `*-LICENSE.txt` files.
+CartoonPlugin for UEVR
+======================
 
-The MIT License
+Original shader:
+  Cartoon by Christian Cann Schuldt Jensen ~ CeeJay.dk
+  Based on the Auto Toon cg shader from the Dolphin emulator.
+  Source: https://github.com/CeeJayDK/SweetFX/blob/master/Shaders/SweetFX/Cartoon.fx
+  License: MIT (repository-wide)
 
-Copyright (c) 2023 praydog
+Modifications: Ported from ReShade FX to DX11/DX12 C++ plugin with
+embedded HLSL pixel shader.
+
+The UEVR plugin wrapper code is distributed under this repository's license.
+
+-------------------------------------------------------------------------------
+MIT License — SweetFX
+-------------------------------------------------------------------------------
+
+Copyright (c) 2014 CeeJayDK
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
