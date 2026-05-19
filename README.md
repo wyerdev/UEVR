@@ -7,14 +7,14 @@ Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix
 - Big thanks to [Praydog](https://github.com/praydog), who created UEVR and made this fork possible. This fork modifies and extends [Praydog's UEVR](https://github.com/praydog/UEVR); the UEVR code is Praydog's work ([Original UEVR README below](#original-uevr-readme)).
 - Thanks also to [crosire's ReShade](https://github.com/crosire/reshade) project and the original ReShade shader creators: CeeJay.dk, AMD, SLSNe, Marty McFly, 3an, DKT70, Loadus, Martins Upitis, bacondither, Ioxa, kingeric1992, Niklas Haas (haasn), JPulowski, luluco250, brussell1, Alex Tuduran, and Timothy Lottes / NVIDIA. This fork does not ship ReShade itself; it ports selected shader work to native UEVR plugins so those effects can be used in UEVR ([license files](examples/)).
 
-# [How to Install](docs/INSTALL.md)
+# [How to Install](docs/reference/INSTALL.md)
 
 # What's New in This Fork
 
 ## Crash Fixes
 
-- Fix the main Native Stereo crash in Creatures of Ava and improve D3D12 load/transition resilience — [technical details](docs/native-stereo-crash-handler.md) and [load-transition notes](docs/ATTEMPT_3_LOAD_CRASH_FIX_PLAN.md)
-- Fix crashes on death in Returnal — [technical details](docs/transition-crash-handler.md)
+- Fix the main Native Stereo crash in Creatures of Ava and improve D3D12 load/transition resilience — [technical details](docs/historical/native-stereo-crash-handler.md) and [load-transition notes](docs/historical/ATTEMPT_3_LOAD_CRASH_FIX_PLAN.md)
+- Fix crashes on death in Returnal — [technical details](docs/historical/transition-crash-handler.md)
 
 Rare cutscene or 3P transition crashes may still remain in some games. The D3D12 work in this fork is defensive hardening, not a blanket fix for every transition failure mode.
 
@@ -58,7 +58,7 @@ These change the overall look and feel of the image. Detail-safe — they enhanc
 | 12 | **HSL Shift** | Remap individual colors to different hues. E.g. make greens more vivid, shift reds toward orange, cool down skin tones. 8 color zones you can shift independently. Changes color direction, not intensity. |
 | 13 | **Filmic Pass** | Full cinematic color processing: sigmoid curves per RGB channel, bleach bypass, fade, saturation, and per-channel gamma. Can clip at extreme settings. More control than Tonemap — use when you want a specific film look. |
 | 13.5 | **Cartoon** | Stylized toon outlining. Detects diagonal luminance edges and darkens them for a cel-shaded/inked look. Best for animated, high-contrast, or deliberately stylized games; keep subtle in VR so textures do not turn busy. |
-| 14 | **LUT** | Apply a custom 1024×32 horizontal-tile LUT PNG to the VR scene. The final stamp on color before detail/sharpening. See [INSTALL.md](docs/INSTALL.md#lut-customization) for swapping in your own LUT. |
+| 14 | **LUT** | Apply a custom 1024×32 horizontal-tile LUT PNG to the VR scene. The final stamp on color before detail/sharpening. See [INSTALL.md](docs/reference/INSTALL.md#lut-customization) for swapping in your own LUT. |
 | 14.5 | **FXAA** | NVIDIA FXAA 3.11 quality path. Smooths remaining jagged high-contrast edges after color grading, before grain and sharpening. Best when a game's built-in TAA leaves visible stair-stepping or when sharpening makes edges too crisp. |
 
 **Detail, Sharpening & Film Effects (finishing touches)**
