@@ -2009,23 +2009,8 @@ void PluginLoader::reload_plugins() {
 }
 
 bool PluginLoader::is_shader_plugin_enabled(const std::string& name) const {
-    // Map DLL name (e.g. "10_VibranceShader" / "VibrancePlugin") to a bare
-    // identifier ("vibrance") and ask the live settings registry whether
-    // any registered serializer with a case-insensitively matching section
-    // name reports enabled=1. This reflects in-memory state immediately —
-    // no file-system polling, so toggling enabled in a plugin's UI or
-    // loading a preset updates the sidebar color on the very next frame.
-    std::string core = name;
-    size_t start = 0;
-    while (start < core.size() && (std::isdigit(core[start]) || core[start] == '_')) ++start;
-    core = core.substr(start);
-    const std::string shader_suffix = "Shader";
-    const std::string plugin_suffix = "Plugin";
-    if (core.size() > shader_suffix.size() && core.substr(core.size() - shader_suffix.size()) == shader_suffix)
-        core = core.substr(0, core.size() - shader_suffix.size());
-    else if (core.size() > plugin_suffix.size() && core.substr(core.size() - plugin_suffix.size()) == plugin_suffix)
-        core = core.substr(0, core.size() - plugin_suffix.size());
-    return uevr::settings_registry::is_section_enabled(core);
+    // [fork] Delegates to settings registry — see SettingsRegistry.hpp
+    return uevr::settings_registry::is_plugin_enabled(name);
 }
 
 std::vector<SidebarEntryInfo> PluginLoader::get_sidebar_entries() {
@@ -2104,10 +2089,11 @@ void PluginLoader::on_draw_ui() {
         ImGui::Spacing();
         ImGui::Text("Plugin status:");
 
-        const auto persistent_dir = Framework::get_persistent_dir();
         for (auto&& [name, _] : m_plugins) {
             if (is_shader_plugin_enabled(name)) {
                 ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s", name.c_str());
+            } else if (uevr::settings_registry::plugin_has_custom_disabled_values(name)) {
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.2f, 1.0f), "%s (preset values)", name.c_str());
             }
         }
     } else {

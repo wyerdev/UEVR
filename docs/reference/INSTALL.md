@@ -1,6 +1,6 @@
 
 
-# How to Install
+# How to Install (last confirmed: 2026-05-10)
 
 ## Before You Start
 
@@ -34,7 +34,18 @@ Instead of `install-plugins.bat`, you can copy files manually:
 
 **Per-game (one game only):** Copy them to `%APPDATA%\UnrealVRMod\<game_executable>\plugins\` instead (e.g. `Oregon-Win64-Shipping\plugins\`)
 
-**Presets:** Copy the `shipping_presets` folder to `%APPDATA%\UnrealVRMod\UEVR\data\plugins\`
+**Presets:** Copy the shipped `.uevrpreset` files from the zip's `shipping_presets\` (or `presets\`) folder to `%APPDATA%\UnrealVRMod\UEVR\data\plugins\shipping_presets\`.
+
+## LUT Customization
+
+The LUT shader ships with several built-in presets (warm, cool, cinematic, bleach, default). Switch between them in the LUT shader's UI panel — no file changes required.
+
+To add your own LUT, drop a `lut_<name>.png` (1024×32 horizontal-tile RGBA8) into one of:
+
+- **Global (all games):** `%APPDATA%\UnrealVRMod\UEVR\data\plugins\shader_assets\`
+- **Per-game (overrides global by filename):** `%APPDATA%\UnrealVRMod\<game_executable>\data\plugins\shader_settings\`
+
+It will appear in the LUT plugin's preset dropdown after a rescan.
 
 ## File Locations
 
@@ -42,9 +53,9 @@ Instead of `install-plugins.bat`, you can copy files manually:
 |------|-------|
 | Global shaders | `%APPDATA%\UnrealVRMod\UEVR\plugins\` — loaded for **all** games |
 | Per-game shaders | `%APPDATA%\UnrealVRMod\<game_executable>\plugins\` — loaded for that game only |
-| User presets | `%APPDATA%\UnrealVRMod\UEVR\data\plugins\presets\` |
-| Built-in presets | `%APPDATA%\UnrealVRMod\UEVR\data\plugins\shipping_presets\` — overwritten on update |
-| Per-game settings | `%APPDATA%\UnrealVRMod\<game_executable>\data\plugins\` |
+| User presets | `%APPDATA%\UnrealVRMod\UEVR\data\plugins\presets\` — `.uevrpreset` files shared across games |
+| Built-in presets | `%APPDATA%\UnrealVRMod\UEVR\data\plugins\shipping_presets\` — `.uevrpreset` files overwritten on update |
+| Per-game settings | `%APPDATA%\UnrealVRMod\<game_executable>\data\plugins\shader_settings\auto.uevrpreset` |
 
 ## Uninstalling
 

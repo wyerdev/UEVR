@@ -1,4 +1,4 @@
-# How to Update the Base Nightly Version
+# How to Update the Base Nightly Version (last confirmed: 2026-05-10)
 
 Your fork builds a patched version of UEVR on top of a specific **praydog nightly release**. The file `BASE_NIGHTLY` in the repo root tracks which nightly your fork is based on.
 

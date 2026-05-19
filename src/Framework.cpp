@@ -24,6 +24,7 @@
 
 #include "Mods.hpp"
 #include "mods/PluginLoader.hpp"
+#include "mods/pluginloader/SettingsRegistry.hpp"
 #include "mods/VR.hpp"
 #include "mods/ImGuiThemeHelpers.hpp"
 
@@ -1446,6 +1447,7 @@ void Framework::draw_ui() {
                 if (is_advanced_mode || !sidebar_entries[i].m_advanced_entry) {
                     bool is_sub_entry = false;
                     bool is_enabled_shader = false;
+                    bool is_custom_disabled_shader = false;
                     for (const auto& range : mod_sidebar_ranges) {
                         if (i == range.mn) {
                             // Set first entry as default ("Runtime" entry of VR mod)
@@ -1467,6 +1469,10 @@ void Framework::draw_ui() {
                             // Singleton compare avoids per-frame dynamic_cast against every mod.
                             if (plugin_loader != nullptr && range.mod.get() == plugin_loader) {
                                 is_enabled_shader = plugin_loader->is_shader_plugin_enabled(sidebar_entries[i].m_label);
+                                if (!is_enabled_shader) {
+                                    is_custom_disabled_shader = uevr::settings_registry::plugin_has_custom_disabled_values(
+                                        sidebar_entries[i].m_label);
+                                }
                             }
                         }
                     }
@@ -1477,8 +1483,10 @@ void Framework::draw_ui() {
                     ImGui::PushID(i);
                     if (is_enabled_shader)
                         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 1.0f, 0.3f, 1.0f));
+                    else if (is_custom_disabled_shader)
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.9f, 0.2f, 1.0f));
                     dcs(sidebar_entries[i].m_label.c_str(), i);
-                    if (is_enabled_shader)
+                    if (is_enabled_shader || is_custom_disabled_shader)
                         ImGui::PopStyleColor();
                     ImGui::PopID();
                     if (is_sub_entry) {

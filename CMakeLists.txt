@@ -559,6 +559,48 @@ set_target_properties(technicolor_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target technicolor2_plugin
+set(CMKR_TARGET technicolor2_plugin)
+set(technicolor2_plugin_SOURCES "")
+
+list(APPEND technicolor2_plugin_SOURCES
+	"examples/technicolor2_plugin/Technicolor2Plugin.cpp"
+)
+
+list(APPEND technicolor2_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${technicolor2_plugin_SOURCES})
+add_library(technicolor2_plugin SHARED)
+
+if(technicolor2_plugin_SOURCES)
+	target_sources(technicolor2_plugin PRIVATE ${technicolor2_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${technicolor2_plugin_SOURCES})
+
+target_compile_features(technicolor2_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(technicolor2_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(technicolor2_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(technicolor2_plugin PROPERTIES
+	OUTPUT_NAME
+		09_5_Technicolor2Shader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target filmgrain2_plugin
 set(CMKR_TARGET filmgrain2_plugin)
 set(filmgrain2_plugin_SOURCES "")
@@ -1147,6 +1189,48 @@ set_target_properties(lut_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target fxaa_plugin
+set(CMKR_TARGET fxaa_plugin)
+set(fxaa_plugin_SOURCES "")
+
+list(APPEND fxaa_plugin_SOURCES
+	"examples/fxaa_plugin/FXAAPlugin.cpp"
+)
+
+list(APPEND fxaa_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${fxaa_plugin_SOURCES})
+add_library(fxaa_plugin SHARED)
+
+if(fxaa_plugin_SOURCES)
+	target_sources(fxaa_plugin PRIVATE ${fxaa_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${fxaa_plugin_SOURCES})
+
+target_compile_features(fxaa_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(fxaa_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(fxaa_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(fxaa_plugin PROPERTIES
+	OUTPUT_NAME
+		14_Z_FXAAShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target bloom_plugin
 set(CMKR_TARGET bloom_plugin)
 set(bloom_plugin_SOURCES "")
@@ -1231,6 +1315,90 @@ set_target_properties(adaptive_tonemapper_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target fgfx_large_scale_perceptual_obscurance_irradiance_plugin
+set(CMKR_TARGET fgfx_large_scale_perceptual_obscurance_irradiance_plugin)
+set(fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES "")
+
+list(APPEND fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES
+	"examples/fgfx_large_scale_perceptual_obscurance_irradiance_plugin/FGFXLargeScalePerceptualObscuranceIrradiancePlugin.cpp"
+)
+
+list(APPEND fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES})
+add_library(fgfx_large_scale_perceptual_obscurance_irradiance_plugin SHARED)
+
+if(fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES)
+	target_sources(fgfx_large_scale_perceptual_obscurance_irradiance_plugin PRIVATE ${fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES})
+
+target_compile_features(fgfx_large_scale_perceptual_obscurance_irradiance_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(fgfx_large_scale_perceptual_obscurance_irradiance_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(fgfx_large_scale_perceptual_obscurance_irradiance_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(fgfx_large_scale_perceptual_obscurance_irradiance_plugin PROPERTIES
+	OUTPUT_NAME
+		00_FGFXLargeScalePerceptualObscuranceIrradianceShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target eyeadaption_plugin
+set(CMKR_TARGET eyeadaption_plugin)
+set(eyeadaption_plugin_SOURCES "")
+
+list(APPEND eyeadaption_plugin_SOURCES
+	"examples/eyeadaption_plugin/EyeAdaptionPlugin.cpp"
+)
+
+list(APPEND eyeadaption_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${eyeadaption_plugin_SOURCES})
+add_library(eyeadaption_plugin SHARED)
+
+if(eyeadaption_plugin_SOURCES)
+	target_sources(eyeadaption_plugin PRIVATE ${eyeadaption_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${eyeadaption_plugin_SOURCES})
+
+target_compile_features(eyeadaption_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(eyeadaption_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(eyeadaption_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(eyeadaption_plugin PROPERTIES
+	OUTPUT_NAME
+		04_5_EyeAdaptionShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target blackcrush_plugin
 set(CMKR_TARGET blackcrush_plugin)
 set(blackcrush_plugin_SOURCES "")
@@ -1268,6 +1436,48 @@ target_link_libraries(blackcrush_plugin PUBLIC
 set_target_properties(blackcrush_plugin PROPERTIES
 	OUTPUT_NAME
 		03_BlackCrushShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target cartoon_plugin
+set(CMKR_TARGET cartoon_plugin)
+set(cartoon_plugin_SOURCES "")
+
+list(APPEND cartoon_plugin_SOURCES
+	"examples/cartoon_plugin/CartoonPlugin.cpp"
+)
+
+list(APPEND cartoon_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${cartoon_plugin_SOURCES})
+add_library(cartoon_plugin SHARED)
+
+if(cartoon_plugin_SOURCES)
+	target_sources(cartoon_plugin PRIVATE ${cartoon_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${cartoon_plugin_SOURCES})
+
+target_compile_features(cartoon_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(cartoon_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(cartoon_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(cartoon_plugin PROPERTIES
+	OUTPUT_NAME
+		13_5_CartoonShader
 )
 
 unset(CMKR_TARGET)

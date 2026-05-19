@@ -84,22 +84,35 @@ set "ERRORS=0"
 :: shifting FakeHDR/Deband/etc. by one). Without this cleanup, both the old and new
 :: prefix DLLs coexist in PLUGIN_DST and the same shader runs twice per frame.
 :: We match by the unique suffix so any past or future numbering is handled.
-set "SHADER_SUFFIXES=LevelsPlusShader LiftGammaGainShader TonemapShader CurvesShader BlackCrushShader FakeHDRShader DPXShader TechnicolorShader ColourfulnessShader VibranceShader FilmGrain2Shader HSLShiftShader FilmicPassShader ClarityShader CASShader LumaSharpenShader DebandShader LUTShader BloomShader AdaptiveTonemapperShader"
+set "SHADER_SUFFIXES=FGFXLargeScalePerceptualObscuranceIrradianceShader LSPOIrrShader LevelsPlusShader LiftGammaGainShader TonemapShader CurvesShader BlackCrushShader FakeHDRShader DPXShader TechnicolorShader Technicolor2Shader ColourfulnessShader VibranceShader FilmGrain2Shader HSLShiftShader FilmicPassShader CartoonShader FXAAShader ClarityShader CASShader LumaSharpenShader DebandShader LUTShader BloomShader AdaptiveTonemapperShader EyeAdaptionShader"
 echo Cleaning up any previous shader installation...
 for %%s in (%SHADER_SUFFIXES%) do (
     for %%f in ("%PLUGIN_DST%\*%%s.dll") do if exist "%%f" del /f "%%f" >nul 2>&1
     for %%f in ("%PLUGIN_DST%\*%%s-LICENSE.txt") do if exist "%%f" del /f "%%f" >nul 2>&1
 )
 
+rem Target renames can leave old DLLs in the source folder. Keep a current
+rem output allow-list so stale old-prefix artifacts are neither copied nor left
+rem to confuse future manual installs.
+set "CURRENT_SHADER_DLLS=00_FGFXLargeScalePerceptualObscuranceIrradianceShader.dll 01_LevelsPlusShader.dll 02_LiftGammaGainShader.dll 03_BlackCrushShader.dll 04_AdaptiveTonemapperShader.dll 04_5_EyeAdaptionShader.dll 05_TonemapShader.dll 06_CurvesShader.dll 07_FakeHDRShader.dll 08_DPXShader.dll 09_TechnicolorShader.dll 09_5_Technicolor2Shader.dll 10_ColourfulnessShader.dll 11_VibranceShader.dll 12_HSLShiftShader.dll 13_FilmicPassShader.dll 13_5_CartoonShader.dll 14_LUTShader.dll 14_Z_FXAAShader.dll 15_FilmGrain2Shader.dll 16_ClarityShader.dll 17_CASShader.dll 18_LumaSharpenShader.dll 19_DebandShader.dll 20_BloomShader.dll"
+for %%s in (%SHADER_SUFFIXES%) do (
+    for %%f in ("%PLUGIN_SRC%\*%%s.dll") do if exist "%%f" (
+        echo !CURRENT_SHADER_DLLS! | findstr /i /c:"%%~nxf" >nul
+        if errorlevel 1 del /f "%%f" >nul 2>&1
+    )
+)
+
 echo Installing shaders...
-for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do (
-    copy /Y "%PLUGIN_SRC%\%%f" "%PLUGIN_DST%\" >nul
-    if errorlevel 1 (
-        echo   FAILED: %%f
-        set /a ERRORS+=1
-    ) else (
-        echo   OK: %%f
-        set /a COPIED+=1
+for %%f in (%CURRENT_SHADER_DLLS%) do (
+    if exist "%PLUGIN_SRC%\%%f" (
+        copy /Y "%PLUGIN_SRC%\%%f" "%PLUGIN_DST%\" >nul
+        if errorlevel 1 (
+            echo   FAILED: %%f
+            set /a ERRORS+=1
+        ) else (
+            echo   OK: %%f
+            set /a COPIED+=1
+        )
     )
 )
 

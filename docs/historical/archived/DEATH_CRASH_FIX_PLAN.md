@@ -1,4 +1,6 @@
-# UEVR Death/Transition Crash Fix — Architecture Plan
+# [HISTORICAL] UEVR Death/Transition Crash Fix — Architecture Plan
+
+[2026-04] Failed plan, kept for reference only.
 
 This plan failed and is kept for reference only. No implementation from this document is part of the current release path.
 

@@ -1,4 +1,6 @@
-# VEH Crash Handler — Iteration History
+# [HISTORICAL] VEH Crash Handler — Iteration History
+
+[2026-04] Completed. Reference for what was tried and why.
 
 Records every approach tried during the Creatures of Ava VEH debugging session (April 2026), what worked, what failed, and why. **Consult this before making further VEH changes** to avoid repeating mistakes.
 
