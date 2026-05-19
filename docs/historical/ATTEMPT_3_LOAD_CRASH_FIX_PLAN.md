@@ -1,4 +1,6 @@
-# Attempt 3: Robust Level-Load Crash Fix for UEVR
+# [HISTORICAL] Attempt 3: Robust Level-Load Crash Fix for UEVR
+
+[2026-04] VEH path abandoned, D3D12 hardening partially implemented.
 
 ## Status: VEH PATH ABANDONED, D3D12 HARDENING PARTIALLY IMPLEMENTED
 All VEH-level approaches to fix gameplay transition crashes have been exhausted. The shipped work from this attempt is a conservative D3D12 hardening pass in `D3D12Component.cpp`; the broader VEH and stub-object ideas were abandoned. See "Attempt Results" below for details.

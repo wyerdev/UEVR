@@ -49,7 +49,7 @@ cmake --build ./build --config Release --target uevr
 6. You should now be able to compile UEVR by pressing `Ctrl+Shift+P` and selecting `CMake: Build` or by pressing `F7`
 ### Building plugins
 
-The 16 post-processing plugins are defined in `cmake.toml` and built alongside UEVR:
+The post-processing plugins are defined in `cmake.toml` and built alongside UEVR:
 
 ```
 cmake --build ./build --config Release --target fakehdr_plugin
@@ -100,7 +100,7 @@ A full `clean.bat` works but is wasteful — usually only the translation units 
 
 **Cost of the guard:**
 - No header touched: ~0.5–1s of file-stat overhead, no rebuilds — effectively free.
-- One header touched: same scan, plus every first-party MSBuild target gets its `.obj` files invalidated and recompiled even if it doesn't transitively include the changed header. For an edit in `examples/renderlib/effects/`, that's ~16 plugin DLLs + `plugin_renderlib` + `uevr.dll` recompiled where MSBuild's tracking would have rebuilt only a handful of TUs. Cost: tens of seconds added to a "small change" rebuild.
+- One header touched: same scan, plus every first-party MSBuild target gets its `.obj` files invalidated and recompiled even if it doesn't transitively include the changed header. For an edit in `examples/renderlib/effects/`, that means the shader plugin DLLs + `plugin_renderlib` + `uevr.dll` recompile where MSBuild's tracking would have rebuilt only a handful of TUs. Cost: tens of seconds added to a "small change" rebuild.
 - Clean build: no measurable overhead (no objs to scan).
 
 **Future optimization (only if the over-rebuild becomes painful):** make the guard per-target precise instead of per-target wholesale. Two viable approaches, in order of complexity:

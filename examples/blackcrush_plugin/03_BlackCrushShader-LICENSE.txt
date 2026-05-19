@@ -1,12 +1,15 @@
-This license governs original UEVR example/plugin wrapper code in this directory
-("examples") and its subdirectories. It does not replace or relicense bundled or
-ported third-party shader code, shader math, textures, or other assets. Those
-materials remain governed by their own upstream notices, which are documented in
-the per-plugin `*-LICENSE.txt` files.
+BlackCrushPlugin for UEVR
+=========================
+
+Original plugin code:
+  BlackCrush is original UEVR plugin code. It is not a port of a third-party
+  ReShade shader.
+
+License: MIT  
 
 The MIT License
 
-Copyright (c) 2023 praydog
+Copyright (c) 2026 wyermsu
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

@@ -245,29 +245,38 @@ public:
             ImGui::TextWrapped("Local-contrast pop. Bigger blur radius = broader 'haze removal' feel; smaller = pure micro-contrast. Push too far and edges halo. Subtle wins.");
             bool ch = false;
             ch |= ImGui::Checkbox("Enabled##CLA", &m_enabled);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Apply local contrast enhancement. Best used gently after color grading, before sharpening.");
 
             ch |= ImGui::SliderInt("Radius",  &m_radius, 0, 4);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blur radius used to find local contrast. Smaller = fine texture pop; larger = broader haze removal.");
             ImGui::SameLine(); if (ImGui::Button("Reset##CLA_radius"))   { m_radius   = CL_DEFAULT_RADIUS;   ch = true; }
 
             ch |= ImGui::SliderFloat("Offset", &m_offset, 1.0f, 5.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Contrast pivot for the clarity blend. Higher values push the effect harder and can create halos.");
             ImGui::SameLine(); if (ImGui::Button("Reset##CLA_offset"))   { m_offset   = CL_DEFAULT_OFFSET;   ch = true; }
 
             if (ImGui::Combo("Blend Mode", &m_blend_mode, g_clarity_blend_names, IM_ARRAYSIZE(g_clarity_blend_names))) ch = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How the local-contrast layer is mixed back into the scene. Overlay/Soft Light are safer starting points.");
             ImGui::SameLine(); if (ImGui::Button("Reset##CLA_blend"))    { m_blend_mode = CL_DEFAULT_BLEND_MODE; ch = true; }
 
             ch |= ImGui::SliderFloat("Strength",        &m_strength,        0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overall blend amount. Lower this first if the image looks crunchy or outlined.");
             ImGui::SameLine(); if (ImGui::Button("Reset##CLA_strength")) { m_strength = CL_DEFAULT_STRENGTH; ch = true; }
 
             ch |= ImGui::SliderFloat("Dark Intensity",  &m_dark_intensity,  0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much the clarity layer affects dark details. Too high can dirty shadows.");
             ImGui::SameLine(); if (ImGui::Button("Reset##CLA_dark"))     { m_dark_intensity  = CL_DEFAULT_DARK_INT;  ch = true; }
 
             ch |= ImGui::SliderFloat("Light Intensity", &m_light_intensity, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much the clarity layer affects bright details. Too high can halo highlights.");
             ImGui::SameLine(); if (ImGui::Button("Reset##CLA_light"))    { m_light_intensity = CL_DEFAULT_LIGHT_INT; ch = true; }
 
             ch |= ImGui::SliderInt("Blend If Dark",  &m_blend_if_dark,  0, 255);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Protect darker pixels from the clarity blend. Raise if blacks get noisy or lifted.");
             ImGui::SameLine(); if (ImGui::Button("Reset##CLA_bid"))      { m_blend_if_dark  = CL_DEFAULT_BLEND_IF_DARK;  ch = true; }
 
             ch |= ImGui::SliderInt("Blend If Light", &m_blend_if_light, 0, 255);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Protect brighter pixels from the clarity blend. Lower if bright edges develop halos.");
             ImGui::SameLine(); if (ImGui::Button("Reset##CLA_bil"))      { m_blend_if_light = CL_DEFAULT_BLEND_IF_LIGHT; ch = true; }
 
             ImGui::Spacing();
@@ -282,6 +291,7 @@ public:
                 m_blend_if_light  = CL_DEFAULT_BLEND_IF_LIGHT;
                 ch = true;
             }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Restore the Clarity source-default tuning.");
             if (ch) uevr::settings::notify_changed(*this, API::get()->param());
         }
     }

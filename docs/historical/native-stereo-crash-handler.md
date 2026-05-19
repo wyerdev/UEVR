@@ -1,4 +1,6 @@
-# Native Stereo Crash Handler — Technical Documentation
+# [HISTORICAL] Native Stereo Crash Handler — Technical Documentation
+
+[2026-04] Completed. VEH-based crash handler shipped.
 
 This document covers the VEH-based Native Stereo crash handling path. The separate D3D12 load/transition hardening added later in `D3D12Component.cpp` is related, but it is outside the scope of this document.
 

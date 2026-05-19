@@ -74,4 +74,22 @@ bool is_section_enabled(const std::string& section_name);
 // are registered.
 void disable_all();
 
+// Does the section have non-default values while being disabled?
+// Used by the UI to show a yellow indicator for disabled effects that
+// carry custom (preset) values — so the user knows enabling them won't
+// just give defaults. Updated during apply_preset_file() and
+// notify_settings_changed().
+bool section_has_custom_disabled_values(const std::string& section_name);
+
+// Map a plugin DLL stem (e.g. "10_VibranceShader") to a bare section
+// identifier ("Vibrance") for registry lookups.
+std::string dll_name_to_section(const std::string& dll_name);
+
+// Convenience: is the plugin identified by its DLL name currently enabled?
+bool is_plugin_enabled(const std::string& dll_name);
+
+// Convenience: does the plugin (by DLL name) have custom non-default values
+// while disabled?
+bool plugin_has_custom_disabled_values(const std::string& dll_name);
+
 } // namespace uevr::settings_registry
