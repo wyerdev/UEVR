@@ -54,18 +54,15 @@ jobs:
           New-Item -ItemType Directory -Path "$staging/shipping_presets" -Force | Out-Null
           New-Item -ItemType Directory -Path "$staging/shader_assets" -Force | Out-Null
 
-          # Copy shader DLLs (exclude example_plugin — glob is case-insensitive on Windows).
-          # Bloom is intentionally excluded from releases: it's kept in-tree for possible
-          # future fix attempts but does not work in VR-LDR (see docs/effect-runtime-plan.md
-          # Phase 3 retrospective). Update this filter if Bloom is ever revived.
+          # Copy bare-named shader DLLs into staging, then run the ordering script
+          # to assign sequential NN_ prefixes based on render_order() in each .cpp.
+          # Bloom is excluded: kept in-tree for future fix attempts but broken in VR-LDR.
           Get-ChildItem "${{github.workspace}}/build/${{env.BUILD_TYPE}}/*Shader.dll" |
-            Where-Object { $_.Name -match "^\d{2}_" -and $_.Name -notmatch "Bloom" } |
-            Copy-Item -Destination "$staging/plugins/"
-
-          # Copy license files (exclude Bloom — see filter above)
-          Get-ChildItem "${{github.workspace}}/examples" -Recurse -Filter "*-LICENSE.txt" |
             Where-Object { $_.Name -notmatch "Bloom" } |
             Copy-Item -Destination "$staging/plugins/"
+
+          # Assign sequential prefixes and copy LICENSE files (all driven by render_order())
+          python "${{github.workspace}}/scripts/assign_shader_order.py" "$staging/plugins" --exclude Bloom --license-src
 
           # Copy shipping presets (flat *.uevrpreset files only — subfolders like
           # presets/experimental/ are intentionally excluded from releases).
@@ -104,57 +101,21 @@ jobs:
           $pluginHash.Hash | Out-File -FilePath "$pluginZip.sha256"
         shell: powershell
 
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/praydog/UEVR.git
+          git fetch upstream master --no-tags
+        shell: bash
+
       - name: Generate release notes
         run: |
-          $tag = "${{env.NIGHTLY_TAG}}"
-          $nightlyUrl = "https://github.com/praydog/UEVR-nightly/releases/tag/$tag"
-
-          # Don't let native-command non-zero exits become terminating errors
-          # (windows-latest PowerShell defaults can make `git describe` failure throw).
-          $ErrorActionPreference = 'Continue'
-          $PSNativeCommandUseErrorActionPreference = $false
-
-          $lastTag = $null
-          try {
-            $lastTag = & git describe --tags --abbrev=0 2>$null
-            if ($LASTEXITCODE -ne 0) { $lastTag = $null }
-          } catch {
-            $lastTag = $null
-          }
-          $global:LASTEXITCODE = 0
-
-          if ($lastTag) {
-            $allCommits = & git log --pretty=format:"%s (%h)" "$lastTag..HEAD"
-          } else {
-            $allCommits = & git log --pretty=format:"%s (%h)" -20
-          }
-          $global:LASTEXITCODE = 0
-          if (-not $allCommits) {
-            $allCommits = & git log --pretty=format:"%s (%h)" -20
-          }
-          if ($allCommits -is [string]) { $allCommits = @($allCommits) }
-          $filtered = $allCommits | Where-Object { $_ -match "^(fix|feat)" }
-          $log = ($filtered | ForEach-Object { "- $_" }) -join "`n"
-          if (-not $log) { $log = "- No fix/feat commits in this build" }
-
-          $lines = @(
-            "## How to install",
-            "",
-            "1. Download the **base UEVR nightly** this build is patched against:",
-            "   **[$tag]($nightlyUrl)**",
-            "2. Extract the nightly zip to a folder.",
-            "3. Download **${{env.ZIP_NAME}}.zip** from this release.",
-            "4. Extract and **overwrite/replace** the files from step 2 with the files from this release.",
-            "5. Download **uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip** and run ``install-plugins.bat`` to install shaders and presets.",
-            "   Or install manually -- see [INSTALL.md](https://github.com/${{github.repository}}/blob/${{github.sha}}/docs/INSTALL.md).",
-            "6. Run UEVR as normal.",
-            "",
-            "> **Note:** The post-processing shaders require this patched fork. They will **not** load on stock UEVR nightly.",
-            "",
-            "## Changes",
-            $log
-          )
-          $lines -join "`n" | Out-File -FilePath ${{github.workspace}}/RELEASE_NOTES.md -Encoding utf8
+          python "${{github.workspace}}/scripts/generate_release_notes.py" `
+            --nightly-tag "${{env.NIGHTLY_TAG}}" `
+            --zip-name "${{env.ZIP_NAME}}" `
+            --plugins-zip-name "uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}" `
+            --repo-slug "${{github.repository}}" `
+            --commit-sha "${{github.sha}}" `
+            --out-file "${{github.workspace}}/RELEASE_NOTES.md"
         shell: powershell
 
       - name: Create annotated tag

@@ -20,18 +20,9 @@ if /i "%SCRIPT_DIR:~0,-1%"=="%PLUGIN_DIR%" (
     echo Plugin folder: %PLUGIN_DIR%
 )
 
-:: List of plugin DLL suffixes to remove (any numeric prefix, current or legacy).
-:: Using suffixes makes the uninstaller resilient to renumbering between releases.
-set "PLUGINS=FGFXLargeScalePerceptualObscuranceIrradianceShader.dll LSPOIrrShader.dll LevelsPlusShader.dll LiftGammaGainShader.dll TonemapShader.dll CurvesShader.dll BlackCrushShader.dll FakeHDRShader.dll DPXShader.dll TechnicolorShader.dll Technicolor2Shader.dll ColourfulnessShader.dll VibranceShader.dll FilmGrain2Shader.dll HSLShiftShader.dll FilmicPassShader.dll CartoonShader.dll FXAAShader.dll ClarityShader.dll CASShader.dll LumaSharpenShader.dll DebandShader.dll LUTShader.dll BloomShader.dll AdaptiveTonemapperShader.dll EyeAdaptionShader.dll"
-
-:: Corresponding license file suffixes
-set "LICENSES=FGFXLargeScalePerceptualObscuranceIrradianceShader-LICENSE.txt LSPOIrrShader-LICENSE.txt LevelsPlusShader-LICENSE.txt LiftGammaGainShader-LICENSE.txt TonemapShader-LICENSE.txt CurvesShader-LICENSE.txt BlackCrushShader-LICENSE.txt FakeHDRShader-LICENSE.txt DPXShader-LICENSE.txt TechnicolorShader-LICENSE.txt Technicolor2Shader-LICENSE.txt ColourfulnessShader-LICENSE.txt VibranceShader-LICENSE.txt FilmGrain2Shader-LICENSE.txt HSLShiftShader-LICENSE.txt FilmicPassShader-LICENSE.txt CartoonShader-LICENSE.txt FXAAShader-LICENSE.txt ClarityShader-LICENSE.txt CASShader-LICENSE.txt LumaSharpenShader-LICENSE.txt DebandShader-LICENSE.txt LUTShader-LICENSE.txt BloomShader-LICENSE.txt AdaptiveTonemapperShader-LICENSE.txt EyeAdaptionShader-LICENSE.txt"
-
-:: Check if anything is installed (match any prefix)
+:: Check if anything is installed
 set "FOUND=0"
-for %%f in (%PLUGINS%) do (
-    for %%g in ("%PLUGIN_DIR%\*%%f") do if exist "%%g" set /a FOUND+=1
-)
+for /f "delims=" %%f in ('dir /b "%PLUGIN_DIR%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do set /a FOUND+=1
 
 if %FOUND%==0 (
     echo No post-processing shaders found in:
@@ -63,36 +54,29 @@ echo.
 set "REMOVED=0"
 set "ERRORS=0"
 
-:: Remove plugin DLLs (any numeric prefix)
+:: Remove plugin DLLs and matching LICENSE files. Match pattern:
+:: "<digits>_*Shader.dll" (and the matching LICENSE.txt). All shaders we ship
+:: are installed as NN_<Name>Shader.dll (the NN_ prefix is auto-assigned by
+:: scripts/assign_shader_order.py from each plugin's render_order()). This
+:: pattern is unique to our releases — any third-party plugin DLL or any file
+:: a user dropped here manually will NOT have a leading-digit prefix and will
+:: not be touched. This also handles every past / future shader rename or
+:: removal without needing to track a list of historical names: the glob
+:: catches all of them by shape alone.
 echo Removing shaders...
-for %%f in (%PLUGINS%) do (
-    for %%g in ("%PLUGIN_DIR%\*%%f") do (
-        if exist "%%g" (
-            del /f "%%g" 2>&1
-            if exist "%%g" (
-                echo   FAILED: %%~nxg
-                set /a ERRORS+=1
-            ) else (
-                echo   Removed: %%~nxg
-                set /a REMOVED+=1
-            )
-        )
+for /f "delims=" %%f in ('dir /b "%PLUGIN_DIR%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do (
+    del /f "%PLUGIN_DIR%\%%f" 2>&1
+    if exist "%PLUGIN_DIR%\%%f" (
+        echo   FAILED: %%f
+        set /a ERRORS+=1
+    ) else (
+        echo   Removed: %%f
+        set /a REMOVED+=1
     )
 )
-
-:: Remove license files (any numeric prefix)
-for %%f in (%LICENSES%) do (
-    for %%g in ("%PLUGIN_DIR%\*%%f") do (
-        if exist "%%g" (
-            del /f "%%g" 2>&1
-            if exist "%%g" (
-                echo   FAILED: %%~nxg
-                set /a ERRORS+=1
-            ) else (
-                set /a REMOVED+=1
-            )
-        )
-    )
+for /f "delims=" %%f in ('dir /b "%PLUGIN_DIR%\*Shader-LICENSE.txt" 2^>nul ^| findstr /r "^[0-9]"') do (
+    del /f "%PLUGIN_DIR%\%%f" 2>&1
+    if not exist "%PLUGIN_DIR%\%%f" set /a REMOVED+=1
 )
 
 :: Remove shipping presets

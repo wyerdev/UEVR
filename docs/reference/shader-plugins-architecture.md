@@ -8,7 +8,7 @@ All shader plugins share the DX11/DX12 rendering pipeline and the new UEVR core 
 
 ## Plugin Load Order
 
-Plugins are loaded by DLL filename in lexical order; each plugin's numeric prefix (`OUTPUT_NAME` in [cmake.toml](../cmake.toml)) encodes its position in the chain (scene shape → color correction → grading → AA cleanup → detail/sharpening → final cleanup). Each plugin also reports a sparse `render_order()` used by presets and the status UI. All shipped plugins ship disabled by default and run on the shared `EffectRuntime`.
+Execution order is determined by each plugin's `render_order()` return value at runtime. The numeric DLL filename prefix (`NN_`) is assigned automatically at package time by `scripts/assign_shader_order.py` — it reads `render_order()` from each `.cpp`, sorts, and assigns sequential prefixes. `cmake.toml` uses bare `OUTPUT_NAME` values (no prefix). All shipped plugins ship disabled by default and run on the shared `EffectRuntime`.
 
 ## Problem Statement
 

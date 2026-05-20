@@ -163,7 +163,7 @@ sources = ["examples/fakehdr_plugin/FakeHDRPlugin.cpp"]
 headers = ["examples/fakehdr_plugin/**.hpp", "examples/fakehdr_plugin/**.h"]
 
 [target.fakehdr_plugin.properties]
-OUTPUT_NAME = "07_FakeHDRShader"
+OUTPUT_NAME = "FakeHDRShader"
 
 [target.curves_plugin]
 type = "plugin"
@@ -171,7 +171,7 @@ sources = ["examples/curves_plugin/CurvesPlugin.cpp"]
 headers = ["examples/curves_plugin/**.hpp", "examples/curves_plugin/**.h"]
 
 [target.curves_plugin.properties]
-OUTPUT_NAME = "06_CurvesShader"
+OUTPUT_NAME = "CurvesShader"
 
 [target.technicolor_plugin]
 type = "plugin"
@@ -179,7 +179,7 @@ sources = ["examples/technicolor_plugin/TechnicolorPlugin.cpp"]
 headers = ["examples/technicolor_plugin/**.hpp", "examples/technicolor_plugin/**.h"]
 
 [target.technicolor_plugin.properties]
-OUTPUT_NAME = "09_TechnicolorShader"
+OUTPUT_NAME = "TechnicolorShader"
 
 [target.technicolor2_plugin]
 type = "plugin"
@@ -187,7 +187,7 @@ sources = ["examples/technicolor2_plugin/Technicolor2Plugin.cpp"]
 headers = ["examples/technicolor2_plugin/**.hpp", "examples/technicolor2_plugin/**.h"]
 
 [target.technicolor2_plugin.properties]
-OUTPUT_NAME = "09_5_Technicolor2Shader"
+OUTPUT_NAME = "Technicolor2Shader"
 
 [target.filmgrain2_plugin]
 type = "plugin"
@@ -195,7 +195,7 @@ sources = ["examples/filmgrain2_plugin/FilmGrain2Plugin.cpp"]
 headers = ["examples/filmgrain2_plugin/**.hpp", "examples/filmgrain2_plugin/**.h"]
 
 [target.filmgrain2_plugin.properties]
-OUTPUT_NAME = "15_FilmGrain2Shader"
+OUTPUT_NAME = "FilmGrain2Shader"
 
 [target.levelsplus_plugin]
 type = "plugin"
@@ -203,7 +203,7 @@ sources = ["examples/levelsplus_plugin/LevelsPlusPlugin.cpp"]
 headers = ["examples/levelsplus_plugin/**.hpp", "examples/levelsplus_plugin/**.h"]
 
 [target.levelsplus_plugin.properties]
-OUTPUT_NAME = "01_LevelsPlusShader"
+OUTPUT_NAME = "LevelsPlusShader"
 
 [target.colourfulness_plugin]
 type = "plugin"
@@ -211,7 +211,7 @@ sources = ["examples/colourfulness_plugin/ColourfulnessPlugin.cpp"]
 headers = ["examples/colourfulness_plugin/**.hpp", "examples/colourfulness_plugin/**.h"]
 
 [target.colourfulness_plugin.properties]
-OUTPUT_NAME = "10_ColourfulnessShader"
+OUTPUT_NAME = "ColourfulnessShader"
 
 [target.liftgammagain_plugin]
 type = "plugin"
@@ -219,7 +219,7 @@ sources = ["examples/liftgammagain_plugin/LiftGammaGainPlugin.cpp"]
 headers = ["examples/liftgammagain_plugin/**.hpp", "examples/liftgammagain_plugin/**.h"]
 
 [target.liftgammagain_plugin.properties]
-OUTPUT_NAME = "02_LiftGammaGainShader"
+OUTPUT_NAME = "LiftGammaGainShader"
 
 [target.vibrance_plugin]
 type = "plugin"
@@ -227,7 +227,7 @@ sources = ["examples/vibrance_plugin/VibrancePlugin.cpp"]
 headers = ["examples/vibrance_plugin/**.hpp", "examples/vibrance_plugin/**.h"]
 
 [target.vibrance_plugin.properties]
-OUTPUT_NAME = "11_VibranceShader"
+OUTPUT_NAME = "VibranceShader"
 
 [target.tonemap_plugin]
 type = "plugin"
@@ -235,7 +235,7 @@ sources = ["examples/tonemap_plugin/TonemapPlugin.cpp"]
 headers = ["examples/tonemap_plugin/**.hpp", "examples/tonemap_plugin/**.h"]
 
 [target.tonemap_plugin.properties]
-OUTPUT_NAME = "05_TonemapShader"
+OUTPUT_NAME = "TonemapShader"
 
 [target.dpx_plugin]
 type = "plugin"
@@ -243,7 +243,7 @@ sources = ["examples/dpx_plugin/DPXPlugin.cpp"]
 headers = ["examples/dpx_plugin/**.hpp", "examples/dpx_plugin/**.h"]
 
 [target.dpx_plugin.properties]
-OUTPUT_NAME = "08_DPXShader"
+OUTPUT_NAME = "DPXShader"
 
 [target.hslshift_plugin]
 type = "plugin"
@@ -251,7 +251,7 @@ sources = ["examples/hslshift_plugin/HSLShiftPlugin.cpp"]
 headers = ["examples/hslshift_plugin/**.hpp", "examples/hslshift_plugin/**.h"]
 
 [target.hslshift_plugin.properties]
-OUTPUT_NAME = "12_HSLShiftShader"
+OUTPUT_NAME = "HSLShiftShader"
 
 [target.filmicpass_plugin]
 type = "plugin"
@@ -259,7 +259,7 @@ sources = ["examples/filmicpass_plugin/FilmicPassPlugin.cpp"]
 headers = ["examples/filmicpass_plugin/**.hpp", "examples/filmicpass_plugin/**.h"]
 
 [target.filmicpass_plugin.properties]
-OUTPUT_NAME = "13_FilmicPassShader"
+OUTPUT_NAME = "FilmicPassShader"
 
 [target.clarity_plugin]
 type = "plugin"
@@ -267,7 +267,7 @@ sources = ["examples/clarity_plugin/ClarityPlugin.cpp"]
 headers = ["examples/clarity_plugin/**.hpp", "examples/clarity_plugin/**.h"]
 
 [target.clarity_plugin.properties]
-OUTPUT_NAME = "16_ClarityShader"
+OUTPUT_NAME = "ClarityShader"
 
 [target.cas_plugin]
 type = "plugin"
@@ -275,7 +275,7 @@ sources = ["examples/cas_plugin/CASPlugin.cpp"]
 headers = ["examples/cas_plugin/**.hpp", "examples/cas_plugin/**.h"]
 
 [target.cas_plugin.properties]
-OUTPUT_NAME = "17_CASShader"
+OUTPUT_NAME = "CASShader"
 
 [target.lumasharpen_plugin]
 type = "plugin"
@@ -283,7 +283,7 @@ sources = ["examples/lumasharpen_plugin/LumaSharpenPlugin.cpp"]
 headers = ["examples/lumasharpen_plugin/**.hpp", "examples/lumasharpen_plugin/**.h"]
 
 [target.lumasharpen_plugin.properties]
-OUTPUT_NAME = "18_LumaSharpenShader"
+OUTPUT_NAME = "LumaSharpenShader"
 
 [target.deband_plugin]
 type = "plugin"
@@ -291,7 +291,7 @@ sources = ["examples/deband_plugin/DebandPlugin.cpp"]
 headers = ["examples/deband_plugin/**.hpp", "examples/deband_plugin/**.h"]
 
 [target.deband_plugin.properties]
-OUTPUT_NAME = "19_DebandShader"
+OUTPUT_NAME = "DebandShader"
 
 [target.lut_plugin]
 type = "plugin"
@@ -299,7 +299,7 @@ sources = ["examples/lut_plugin/LUTPlugin.cpp"]
 headers = ["examples/lut_plugin/**.hpp", "examples/lut_plugin/**.h"]
 
 [target.lut_plugin.properties]
-OUTPUT_NAME = "14_LUTShader"
+OUTPUT_NAME = "LUTShader"
 
 [target.fxaa_plugin]
 type = "plugin"
@@ -307,7 +307,7 @@ sources = ["examples/fxaa_plugin/FXAAPlugin.cpp"]
 headers = ["examples/fxaa_plugin/**.hpp", "examples/fxaa_plugin/**.h"]
 
 [target.fxaa_plugin.properties]
-OUTPUT_NAME = "14_Z_FXAAShader"
+OUTPUT_NAME = "FXAAShader"
 
 [target.bloom_plugin]
 type = "plugin"
@@ -315,7 +315,7 @@ sources = ["examples/bloom_plugin/BloomPlugin.cpp"]
 headers = ["examples/bloom_plugin/**.hpp", "examples/bloom_plugin/**.h"]
 
 [target.bloom_plugin.properties]
-OUTPUT_NAME = "20_BloomShader"
+OUTPUT_NAME = "BloomShader"
 
 [target.adaptive_tonemapper_plugin]
 type = "plugin"
@@ -323,7 +323,7 @@ sources = ["examples/adaptive_tonemapper_plugin/AdaptiveTonemapperPlugin.cpp"]
 headers = ["examples/adaptive_tonemapper_plugin/**.hpp", "examples/adaptive_tonemapper_plugin/**.h"]
 
 [target.adaptive_tonemapper_plugin.properties]
-OUTPUT_NAME = "04_AdaptiveTonemapperShader"
+OUTPUT_NAME = "AdaptiveTonemapperShader"
 
 [target.fgfx_large_scale_perceptual_obscurance_irradiance_plugin]
 type = "plugin"
@@ -331,7 +331,7 @@ sources = ["examples/fgfx_large_scale_perceptual_obscurance_irradiance_plugin/FG
 headers = ["examples/fgfx_large_scale_perceptual_obscurance_irradiance_plugin/**.hpp", "examples/fgfx_large_scale_perceptual_obscurance_irradiance_plugin/**.h"]
 
 [target.fgfx_large_scale_perceptual_obscurance_irradiance_plugin.properties]
-OUTPUT_NAME = "00_FGFXLargeScalePerceptualObscuranceIrradianceShader"
+OUTPUT_NAME = "FGFXLargeScalePerceptualObscuranceIrradianceShader"
 
 [target.eyeadaption_plugin]
 type = "plugin"
@@ -339,7 +339,7 @@ sources = ["examples/eyeadaption_plugin/EyeAdaptionPlugin.cpp"]
 headers = ["examples/eyeadaption_plugin/**.hpp", "examples/eyeadaption_plugin/**.h"]
 
 [target.eyeadaption_plugin.properties]
-OUTPUT_NAME = "04_5_EyeAdaptionShader"
+OUTPUT_NAME = "EyeAdaptionShader"
 
 [target.blackcrush_plugin]
 type = "plugin"
@@ -347,7 +347,7 @@ sources = ["examples/blackcrush_plugin/BlackCrushPlugin.cpp"]
 headers = ["examples/blackcrush_plugin/**.hpp", "examples/blackcrush_plugin/**.h"]
 
 [target.blackcrush_plugin.properties]
-OUTPUT_NAME = "03_BlackCrushShader"
+OUTPUT_NAME = "BlackCrushShader"
 
 [target.cartoon_plugin]
 type = "plugin"
@@ -355,7 +355,7 @@ sources = ["examples/cartoon_plugin/CartoonPlugin.cpp"]
 headers = ["examples/cartoon_plugin/**.hpp", "examples/cartoon_plugin/**.h"]
 
 [target.cartoon_plugin.properties]
-OUTPUT_NAME = "13_5_CartoonShader"
+OUTPUT_NAME = "CartoonShader"
 
 [target.sdk-test]
 type = "shared"

@@ -469,7 +469,7 @@ target_link_libraries(fakehdr_plugin PUBLIC
 
 set_target_properties(fakehdr_plugin PROPERTIES
 	OUTPUT_NAME
-		07_FakeHDRShader
+		FakeHDRShader
 )
 
 unset(CMKR_TARGET)
@@ -511,7 +511,7 @@ target_link_libraries(curves_plugin PUBLIC
 
 set_target_properties(curves_plugin PROPERTIES
 	OUTPUT_NAME
-		06_CurvesShader
+		CurvesShader
 )
 
 unset(CMKR_TARGET)
@@ -553,7 +553,7 @@ target_link_libraries(technicolor_plugin PUBLIC
 
 set_target_properties(technicolor_plugin PROPERTIES
 	OUTPUT_NAME
-		09_TechnicolorShader
+		TechnicolorShader
 )
 
 unset(CMKR_TARGET)
@@ -595,7 +595,7 @@ target_link_libraries(technicolor2_plugin PUBLIC
 
 set_target_properties(technicolor2_plugin PROPERTIES
 	OUTPUT_NAME
-		09_5_Technicolor2Shader
+		Technicolor2Shader
 )
 
 unset(CMKR_TARGET)
@@ -637,7 +637,7 @@ target_link_libraries(filmgrain2_plugin PUBLIC
 
 set_target_properties(filmgrain2_plugin PROPERTIES
 	OUTPUT_NAME
-		15_FilmGrain2Shader
+		FilmGrain2Shader
 )
 
 unset(CMKR_TARGET)
@@ -679,7 +679,7 @@ target_link_libraries(levelsplus_plugin PUBLIC
 
 set_target_properties(levelsplus_plugin PROPERTIES
 	OUTPUT_NAME
-		01_LevelsPlusShader
+		LevelsPlusShader
 )
 
 unset(CMKR_TARGET)
@@ -721,7 +721,7 @@ target_link_libraries(colourfulness_plugin PUBLIC
 
 set_target_properties(colourfulness_plugin PROPERTIES
 	OUTPUT_NAME
-		10_ColourfulnessShader
+		ColourfulnessShader
 )
 
 unset(CMKR_TARGET)
@@ -763,7 +763,7 @@ target_link_libraries(liftgammagain_plugin PUBLIC
 
 set_target_properties(liftgammagain_plugin PROPERTIES
 	OUTPUT_NAME
-		02_LiftGammaGainShader
+		LiftGammaGainShader
 )
 
 unset(CMKR_TARGET)
@@ -805,7 +805,7 @@ target_link_libraries(vibrance_plugin PUBLIC
 
 set_target_properties(vibrance_plugin PROPERTIES
 	OUTPUT_NAME
-		11_VibranceShader
+		VibranceShader
 )
 
 unset(CMKR_TARGET)
@@ -847,7 +847,7 @@ target_link_libraries(tonemap_plugin PUBLIC
 
 set_target_properties(tonemap_plugin PROPERTIES
 	OUTPUT_NAME
-		05_TonemapShader
+		TonemapShader
 )
 
 unset(CMKR_TARGET)
@@ -889,7 +889,7 @@ target_link_libraries(dpx_plugin PUBLIC
 
 set_target_properties(dpx_plugin PROPERTIES
 	OUTPUT_NAME
-		08_DPXShader
+		DPXShader
 )
 
 unset(CMKR_TARGET)
@@ -931,7 +931,7 @@ target_link_libraries(hslshift_plugin PUBLIC
 
 set_target_properties(hslshift_plugin PROPERTIES
 	OUTPUT_NAME
-		12_HSLShiftShader
+		HSLShiftShader
 )
 
 unset(CMKR_TARGET)
@@ -973,7 +973,7 @@ target_link_libraries(filmicpass_plugin PUBLIC
 
 set_target_properties(filmicpass_plugin PROPERTIES
 	OUTPUT_NAME
-		13_FilmicPassShader
+		FilmicPassShader
 )
 
 unset(CMKR_TARGET)
@@ -1015,7 +1015,7 @@ target_link_libraries(clarity_plugin PUBLIC
 
 set_target_properties(clarity_plugin PROPERTIES
 	OUTPUT_NAME
-		16_ClarityShader
+		ClarityShader
 )
 
 unset(CMKR_TARGET)
@@ -1057,7 +1057,7 @@ target_link_libraries(cas_plugin PUBLIC
 
 set_target_properties(cas_plugin PROPERTIES
 	OUTPUT_NAME
-		17_CASShader
+		CASShader
 )
 
 unset(CMKR_TARGET)
@@ -1099,7 +1099,7 @@ target_link_libraries(lumasharpen_plugin PUBLIC
 
 set_target_properties(lumasharpen_plugin PROPERTIES
 	OUTPUT_NAME
-		18_LumaSharpenShader
+		LumaSharpenShader
 )
 
 unset(CMKR_TARGET)
@@ -1141,7 +1141,7 @@ target_link_libraries(deband_plugin PUBLIC
 
 set_target_properties(deband_plugin PROPERTIES
 	OUTPUT_NAME
-		19_DebandShader
+		DebandShader
 )
 
 unset(CMKR_TARGET)
@@ -1183,7 +1183,7 @@ target_link_libraries(lut_plugin PUBLIC
 
 set_target_properties(lut_plugin PROPERTIES
 	OUTPUT_NAME
-		14_LUTShader
+		LUTShader
 )
 
 unset(CMKR_TARGET)
@@ -1225,7 +1225,7 @@ target_link_libraries(fxaa_plugin PUBLIC
 
 set_target_properties(fxaa_plugin PROPERTIES
 	OUTPUT_NAME
-		14_Z_FXAAShader
+		FXAAShader
 )
 
 unset(CMKR_TARGET)
@@ -1267,7 +1267,7 @@ target_link_libraries(bloom_plugin PUBLIC
 
 set_target_properties(bloom_plugin PROPERTIES
 	OUTPUT_NAME
-		20_BloomShader
+		BloomShader
 )
 
 unset(CMKR_TARGET)
@@ -1309,7 +1309,7 @@ target_link_libraries(adaptive_tonemapper_plugin PUBLIC
 
 set_target_properties(adaptive_tonemapper_plugin PROPERTIES
 	OUTPUT_NAME
-		04_AdaptiveTonemapperShader
+		AdaptiveTonemapperShader
 )
 
 unset(CMKR_TARGET)
@@ -1351,7 +1351,7 @@ target_link_libraries(fgfx_large_scale_perceptual_obscurance_irradiance_plugin P
 
 set_target_properties(fgfx_large_scale_perceptual_obscurance_irradiance_plugin PROPERTIES
 	OUTPUT_NAME
-		00_FGFXLargeScalePerceptualObscuranceIrradianceShader
+		FGFXLargeScalePerceptualObscuranceIrradianceShader
 )
 
 unset(CMKR_TARGET)
@@ -1393,7 +1393,7 @@ target_link_libraries(eyeadaption_plugin PUBLIC
 
 set_target_properties(eyeadaption_plugin PROPERTIES
 	OUTPUT_NAME
-		04_5_EyeAdaptionShader
+		EyeAdaptionShader
 )
 
 unset(CMKR_TARGET)
@@ -1435,7 +1435,7 @@ target_link_libraries(blackcrush_plugin PUBLIC
 
 set_target_properties(blackcrush_plugin PROPERTIES
 	OUTPUT_NAME
-		03_BlackCrushShader
+		BlackCrushShader
 )
 
 unset(CMKR_TARGET)
@@ -1477,7 +1477,7 @@ target_link_libraries(cartoon_plugin PUBLIC
 
 set_target_properties(cartoon_plugin PROPERTIES
 	OUTPUT_NAME
-		13_5_CartoonShader
+		CartoonShader
 )
 
 unset(CMKR_TARGET)
