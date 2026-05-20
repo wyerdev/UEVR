@@ -12,8 +12,12 @@ Usage:
 """
 
 import argparse
+import re
 import subprocess
 import sys
+
+# Conventional-commits-style match: fix / feat, optional (scope), optional !, then ':'
+COMMIT_RE = re.compile(r"^(fix|feat)(\([^)]+\))?!?:", re.IGNORECASE)
 
 
 def git(*args: str) -> str:
@@ -57,7 +61,7 @@ def get_changelog() -> str:
     raw = git(
         "log", log_range,
         "--no-merges",
-        "--pretty=format:%s|%h|%an|%as",
+        "--pretty=format:%s|%h|%as",
     )
 
     if not raw:
@@ -68,13 +72,13 @@ def get_changelog() -> str:
         line = line.strip()
         if not line:
             continue
-        parts = line.split("|", 3)
-        if len(parts) != 4:
+        parts = line.split("|", 2)
+        if len(parts) != 3:
             continue
-        subject, short_sha, author, date = parts
-        if not subject.lower().startswith(("fix", "feat")):
+        subject, short_sha, date = parts
+        if not COMMIT_RE.match(subject):
             continue
-        entries.append(f"- {subject} ({short_sha}) by {author} [{date}]")
+        entries.append(f"- {subject} ({short_sha}) [{date}]")
 
     if not entries:
         return "- No fix/feat commits in this build"
