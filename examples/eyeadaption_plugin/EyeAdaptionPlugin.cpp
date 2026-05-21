@@ -365,7 +365,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("EyeAdaption", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s - brussell EyeAdaption.fx port", EYEADAPTION_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade EyeAdaption.fx (see EyeAdaptionShader-LICENSE.txt)", EYEADAPTION_VERSION);
             ImGui::TextWrapped(
                 "Exposure compensation that reacts to scene brightness over time, like eyes adjusting when you move between bright and dark spaces. "
                 "Use it when you want adaptive brightness without AdaptiveTonemapper's extra tone curve. Start with Strength around 0.5-1.0, then tune brightening and darkening separately.");

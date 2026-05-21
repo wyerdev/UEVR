@@ -10,13 +10,10 @@ FOR /F "tokens=*" %%g IN ('git rev-parse HEAD') DO (SET UEVR_COMMIT_HASH=%%g)
 FOR /F "tokens=*" %%t IN ('git describe --tags --abbrev^=0') DO (SET UEVR_TAG=%%t)
 IF "%UEVR_TAG%"=="" (SET UEVR_TAG=no_tag)
 
-FOR /F "tokens=*" %%c IN ('git describe --tags --long') DO (
-FOR /F "tokens=1,2 delims=-" %%a IN ("%%c") DO (
-SET UEVR_TAG_LONG=%%a
-SET UEVR_COMMITS_PAST_TAG=%%b
+SET UEVR_TAG_LONG=%UEVR_TAG%
+IF NOT "%UEVR_TAG%"=="no_tag" (
+FOR /F "tokens=*" %%n IN ('git rev-list %UEVR_TAG%..HEAD --count') DO (SET UEVR_COMMITS_PAST_TAG=%%n)
 )
-)
-
 IF "%UEVR_COMMITS_PAST_TAG%"=="" (SET UEVR_COMMITS_PAST_TAG=0)
 
 FOR /F "tokens=*" %%b IN ('git rev-parse --abbrev-ref HEAD') DO (SET UEVR_BRANCH=%%b)
@@ -24,9 +21,7 @@ FOR /F "tokens=*" %%b IN ('git rev-parse --abbrev-ref HEAD') DO (SET UEVR_BRANCH
 FOR /F "tokens=*" %%n IN ('git rev-list --count HEAD') DO (SET UEVR_TOTAL_COMMITS=%%n)
 IF "%UEVR_TOTAL_COMMITS%"=="" (SET UEVR_TOTAL_COMMITS=0)
 
-FOR /F "tokens=2 delims==" %%a IN ('wmic OS get localdatetime /value') DO (
-SET datetime=%%a
-)
+FOR /F "tokens=*" %%a IN ('powershell -NoProfile -Command "Get-Date -Format 'yyyyMMddHHmm'"') DO (SET datetime=%%a)
 
 SET year=%datetime:~0,4%
 SET month=%datetime:~4,2%

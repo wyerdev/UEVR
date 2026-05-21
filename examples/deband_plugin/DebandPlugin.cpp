@@ -208,7 +208,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Deband Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", DEBAND_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade Deband.fx (see DebandShader-LICENSE.txt)", DEBAND_VERSION);
             ImGui::TextWrapped("Smooths color banding (visible 'rings' in skies/gradients) by averaging detected flat regions and adding subtle dither. Hits perf hardest of any shader here. Use only when you actually see banding.");
             bool ch = false;
             ch |= ImGui::Checkbox("Enabled##DB", &m_enabled);

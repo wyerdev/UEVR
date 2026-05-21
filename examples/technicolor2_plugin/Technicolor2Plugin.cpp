@@ -157,7 +157,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Technicolor2 Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", TECH2_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade Technicolor2.fx (see Technicolor2Shader-LICENSE.txt)", TECH2_VERSION);
             ImGui::TextWrapped("Stylized colour grading that darkens and intensifies colours. Tends to oversaturate — use Saturation to compensate. Different from Technicolor v1 (film emulation).");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##tech2", &m_enabled);

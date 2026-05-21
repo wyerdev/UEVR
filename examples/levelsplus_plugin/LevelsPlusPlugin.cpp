@@ -268,7 +268,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("LevelsPlus Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", LEVELSPLUS_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade LevelsPlus.fx (see LevelsPlusShader-LICENSE.txt)", LEVELSPLUS_VERSION);
             ImGui::TextWrapped("The #1 fix for VR. Remaps black/white points so darks are actually dark and whites are bright. Trades some shadow detail for deeper blacks — almost always worth it. Has per-channel gamma and optional ACES tone mapping. Start here.");
             bool changed = false;
 

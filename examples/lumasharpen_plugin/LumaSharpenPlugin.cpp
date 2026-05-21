@@ -184,7 +184,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("LumaSharpen Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", LS_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade LumaSharpen.fx (see LumaSharpenShader-LICENSE.txt)", LS_VERSION);
             ImGui::TextWrapped("Sharpens in luminance only to avoid color fringing. 4 sampling patterns with adjustable strength and halo clamp. Best for fine detail recovery on top of CAS.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##LumaSharpen", &m_enabled);

@@ -162,7 +162,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Tonemap Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", TM_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade Tonemap.fx (see TonemapShader-LICENSE.txt)", TM_VERSION);
             ImGui::TextWrapped("Adjust gamma, exposure, and saturation. Also has bleach bypass (desaturated high-contrast film look). Exposure can clip highlights; defog subtracts color.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##TM", &m_enabled);

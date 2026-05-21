@@ -241,7 +241,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Clarity Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", CL_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade Clarity.fx (see ClarityShader-LICENSE.txt)", CL_VERSION);
             ImGui::TextWrapped("Local-contrast pop. Bigger blur radius = broader 'haze removal' feel; smaller = pure micro-contrast. Push too far and edges halo. Subtle wins.");
             bool ch = false;
             ch |= ImGui::Checkbox("Enabled##CLA", &m_enabled);

@@ -187,7 +187,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("DPX Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", DPX_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade DPX.fx (see DPXShader-LICENSE.txt)", DPX_VERSION);
             ImGui::TextWrapped("Emulates Cineon film stock. Gives a warm, cinematic color shift. Good for games that look too cold or digital.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##DPX", &m_enabled);

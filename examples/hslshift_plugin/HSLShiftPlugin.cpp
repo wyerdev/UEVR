@@ -223,7 +223,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("HSLShift Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", HSL_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade HSLShift.fx (see HSLShiftShader-LICENSE.txt)", HSL_VERSION);
             ImGui::TextWrapped("Remaps each of 8 hue regions to a target color. Powerful for grading skin/sky/foliage independently. Subtle shifts work better than extreme ones.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##HSL", &m_enabled);

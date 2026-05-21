@@ -210,7 +210,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("FilmGrain2 Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", FILMGRAIN2_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade FilmGrain2.fx (see FilmGrain2Shader-LICENSE.txt)", FILMGRAIN2_VERSION);
             ImGui::TextWrapped("Animated film grain via 3D Perlin noise. Subtle adds realism, heavy looks like compression noise. Pair with FilmicPass for retro feel.");
             bool ch = false;
             ch |= ImGui::Checkbox("Enabled##FG2", &m_enabled);

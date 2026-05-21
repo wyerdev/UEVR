@@ -137,7 +137,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("CAS Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", CAS_VERSION);
+            ImGui::TextDisabled("v%s based on AMD FidelityFX CAS (see CASShader-LICENSE.txt)", CAS_VERSION);
             ImGui::TextWrapped("AMD's contrast-adaptive sharpening. Sharpens edges without amplifying noise. Less haloing than LumaSharpen. Pair with FSR/temporal upscalers.");
             bool ch = false;
             ch |= ImGui::Checkbox("Enabled##CAS", &m_enabled);
@@ -147,10 +147,15 @@ public:
             ImGui::SameLine();
             if (ImGui::Button("Reset##CAS_contrast")) { m_contrast = CAS_DEFAULT_CONTRAST; ch = true; }
 
-            ch |= ImGui::SliderFloat("Sharpening", &m_sharpening, 0.0f, 1.0f, "%.2f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Final blend strength with original");
+            ch |= ImGui::SliderFloat("Sharpening", &m_sharpening, 0.0f, 5.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much sharpening to apply. 1.0 = full effect, above 1.0 = extra aggressive sharpening (may clip bright/dark edges)");
             ImGui::SameLine();
             if (ImGui::Button("Reset##CAS_sharp")) { m_sharpening = CAS_DEFAULT_SHARPENING; ch = true; }
+            if (m_sharpening > 1.0f) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.9f, 0.2f, 1.0f));
+                ImGui::TextWrapped("Warning: Values above 1.0 over-sharpen and may cause bright/dark edge clipping");
+                ImGui::PopStyleColor();
+            }
 
             ImGui::Spacing();
             if (ImGui::Button("Reset All##CAS")) {

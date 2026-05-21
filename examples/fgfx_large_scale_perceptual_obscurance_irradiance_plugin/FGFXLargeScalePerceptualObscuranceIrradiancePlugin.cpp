@@ -642,7 +642,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("FGFX Large Scale Perceptual Obscurance/Irradiance", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s - Large Scale Perceptual Obscurance and Irradiance", LSPOIRR_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade FGFXLargeScalePerceptualObscuranceIrradiance.fx (see FGFXLargeScalePerceptualObscuranceIrradianceShader-LICENSE.txt)", LSPOIRR_VERSION);
             ImGui::TextWrapped(
                 "Large-radius scene blur blended back as low-frequency occlusion and light bounce. It can add depth and body before the color-correction chain, "
                 "but it is easy to overdo in VR. Start from OLED VR or lower Effect Intensity first, then balance Occlusion, Irradiance, and Recovery until dark areas gain shape without looking dirty.");

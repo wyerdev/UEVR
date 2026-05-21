@@ -167,7 +167,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Curves Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", CURVES_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade Curves.fx (see CurvesShader-LICENSE.txt)", CURVES_VERSION);
             ImGui::TextWrapped("11 mathematical contrast curves applied to luma, chroma, or RGB. Use after LevelsPlus for cinematic feel. Different formulas have different roll-off; experiment.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##CRV", &m_enabled);

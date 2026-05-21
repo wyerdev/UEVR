@@ -120,7 +120,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Cartoon Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", CARTOON_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade Cartoon.fx (see CartoonShader-LICENSE.txt)", CARTOON_VERSION);
             ImGui::TextWrapped(
                 "Stylized toon outlining. It detects diagonal luminance changes and darkens those edges, which works best on clean shapes, foliage silhouettes, props, and character outlines. "
                 "Start with the defaults, raise Power until outlines are visible, then raise Edge Slope only if too many texture details are being outlined.");

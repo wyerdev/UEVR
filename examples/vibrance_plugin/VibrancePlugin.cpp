@@ -133,7 +133,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Vibrance Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", VIB_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade Vibrance.fx (see VibranceShader-LICENSE.txt)", VIB_VERSION);
             ImGui::TextWrapped("Boosts unsaturated colors more than saturated ones. Avoids clipping. Good for making dull games pop without oversaturating skin tones.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##Vib", &m_enabled);

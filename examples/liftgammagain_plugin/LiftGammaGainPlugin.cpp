@@ -134,7 +134,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Lift Gamma Gain", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", LGG_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade LiftGammaGain.fx (see LiftGammaGainShader-LICENSE.txt)", LGG_VERSION);
             ImGui::TextWrapped("Fine-tune shadows, midtones, and highlights separately per RGB channel. Use if LevelsPlus alone isn't enough. Gain can clip highlights if pushed high.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##LGG", &m_enabled);

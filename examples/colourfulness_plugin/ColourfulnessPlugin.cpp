@@ -182,7 +182,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Colourfulness Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", COLOURFULNESS_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade Colourfulness.fx (see ColourfulnessShader-LICENSE.txt)", COLOURFULNESS_VERSION);
             ImGui::TextWrapped("Smarter saturation. Boosts color where there's room without clipping highlights or shadows. Less prone to neon shifts than Vibrance. Pushing past 1.0 may oversaturate skin tones.");
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##COL", &m_enabled);

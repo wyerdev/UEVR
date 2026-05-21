@@ -78,7 +78,7 @@ def get_changelog() -> str:
         subject, short_sha, date = parts
         if not COMMIT_RE.match(subject):
             continue
-        entries.append(f"- {subject} ({short_sha}) [{date}]")
+        entries.append(f"- [{date}] {subject} ({short_sha})")
 
     if not entries:
         return "- No fix/feat commits in this build"

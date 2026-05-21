@@ -268,7 +268,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("LUT Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", LUT_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade LUT.fx (see LUTShader-LICENSE.txt)", LUT_VERSION);
             ImGui::TextWrapped(
                 "Color grading via a 1024x32 LUT PNG. Add presets as `lut_<name>.png` in:\n"
                 "  Global  : <UEVR>/data/plugins/shader_assets/   (all games)\n"

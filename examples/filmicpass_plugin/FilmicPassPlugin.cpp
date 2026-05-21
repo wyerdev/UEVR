@@ -267,7 +267,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Filmic Pass Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s", FP_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade FilmicPass.fx (see FilmicPassShader-LICENSE.txt)", FP_VERSION);
             ImGui::TextWrapped("Cinematic film tone mapping. Per-channel sigmoid curves + bleach + fade matrix. Heavier than LevelsPlus, more stylized. Strength below 1.0 keeps it subtle.");
             bool ch = false;
             ch |= ImGui::Checkbox("Enabled##FP", &m_enabled);

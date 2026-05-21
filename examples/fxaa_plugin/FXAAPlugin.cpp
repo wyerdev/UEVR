@@ -510,7 +510,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("FXAA", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s - NVIDIA FXAA 3.11 quality preset 15", FXAA_VERSION);
+            ImGui::TextDisabled("v%s based on NVIDIA FXAA 3.11 (see FXAAShader-LICENSE.txt)", FXAA_VERSION);
             ImGui::TextWrapped(
                 "Fast approximate anti-aliasing for leftover stair-stepping after the game's own AA. "
                 "Run it after LUT/color grading and before film grain or sharpening. Start with the defaults; "

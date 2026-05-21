@@ -773,7 +773,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Bloom + Lens Flares", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s — Marty McFly Bloom.fx port", BLOOM_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade Bloom.fx (see BloomShader-LICENSE.txt)", BLOOM_VERSION);
             ImGui::TextWrapped(
                 "Retained reference port for Bloom, lens dirt, flares, and godrays. This is not a normal VR color-fix shader: UEVR receives an already-tonemapped LDR scene, so there are no HDR source highlights for faithful bloom. "
                 "Use only for experiments. If you enable it anyway, keep Threshold high, Amount low, and disable centered flare/godray features in native-stereo games.");

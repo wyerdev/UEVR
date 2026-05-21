@@ -503,7 +503,7 @@ public:
 
     void on_draw_ui() override {
         if (ImGui::CollapsingHeader("Adaptive Tonemapper", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("v%s — luluco250 AdaptiveTonemapper.fx port", ATM_VERSION);
+            ImGui::TextDisabled("v%s based on ReShade AdaptiveTonemapper.fx (see AdaptiveTonemapperShader-LICENSE.txt)", ATM_VERSION);
             ImGui::TextWrapped(
                 "Auto-exposure for VR. Measures how bright the scene is, then dims bright "
                 "scenes / brightens dark ones over time, like a real camera or your eyes "
