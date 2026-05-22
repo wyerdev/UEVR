@@ -22,10 +22,6 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Build
-        run: call build.bat
-        shell: cmd
-
       - name: Read base nightly tag
         run: |
           $tag = (Get-Content "${{github.workspace}}/BASE_NIGHTLY" -Raw).Trim()
@@ -38,6 +34,17 @@ jobs:
           echo "NIGHTLY_NUM=$num" >> $env:GITHUB_ENV
           echo "ZIP_NAME=uevr-patched-$num-${{github.run_number}}" >> $env:GITHUB_ENV
         shell: powershell
+
+      - name: Create annotated tag locally
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag -a "patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}" -m "UEVR Patched ${{env.NIGHTLY_NUM}}-${{github.run_number}}"
+        shell: bash
+
+      - name: Build
+        run: call build.bat
+        shell: cmd
 
       - name: Compress artifacts
         run: |
@@ -118,12 +125,10 @@ jobs:
             --out-file "${{github.workspace}}/RELEASE_NOTES.md"
         shell: powershell
 
-      - name: Create annotated tag
+      - name: Push annotated tag
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git tag -a "patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}" -m "UEVR Patched ${{env.NIGHTLY_NUM}}-${{github.run_number}}"
           git push origin "patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}"
+        shell: bash
 
       - name: Create Release
         uses: ncipollo/release-action@v1
