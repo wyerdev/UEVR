@@ -15,15 +15,20 @@ set "PLUGIN_DST=%UEVR_DATA%\UEVR\plugins"
 set "PRESET_DST=%UEVR_DATA%\UEVR\data\plugins\shipping_presets"
 set "ASSET_DST=%UEVR_DATA%\UEVR\data\plugins\shader_assets"
 
+:: Since the release zip layout uses pre-indexed "NN_*Shader.dll" filenames,
+:: we want local installation to behave exactly the same way to ensure the
+:: user's runtime and settings registry are tested against the actual release layout.
+:: To do this, we always stage the local DLLs first, assign sequential NN_ prefixes
+:: from render_order(), and then perform the install using those prefixed files.
+::
 :: Two supported layouts:
 ::   1) Release-zip layout: a `plugins/` folder next to this script containing
-::      already-prefixed `NN_*Shader.dll` files (CI ran assign_shader_order.py
-::      from each plugin's render_order() before zipping). No Python required.
+::      already-prefixed `NN_*Shader.dll` files. No Python required; we just
+::      install immediately.
 ::   2) Dev / local-build layout: this script is at the repo root and bare-named
-::      `*Shader.dll` files live in `build\Release\`. In this case we stage the
-::      DLLs to a temp dir, invoke scripts\assign_shader_order.py to assign the
-::      NN_ prefix (and copy LICENSE files), then install from staging. Python
-::      is required for this path.
+::      `*Shader.dll` files live in `build\Release\`. We stage them into a temp
+::      directory, run the Python script to assign the NN_ prefixes and copy
+::      LICENSE files, and then install from that staged folder.
 set "STAGE_TMP="
 if exist "%SCRIPT_DIR%plugins\" (
     set "PLUGIN_SRC=%SCRIPT_DIR%plugins"
@@ -46,7 +51,7 @@ if exist "%SCRIPT_DIR%plugins\" (
     echo Staging bare-named DLLs from build\Release\ to !STAGE_TMP! ...
     copy /Y "%SCRIPT_DIR%build\Release\*Shader.dll" "!STAGE_TMP!\" >nul
     echo Assigning NN_ prefixes from render_order^(^) ...
-    python "%SCRIPT_DIR%scripts\assign_shader_order.py" "!STAGE_TMP!" --exclude Bloom --copy-licenses
+    python "%SCRIPT_DIR%scripts\assign_shader_order.py" "!STAGE_TMP!" --exclude Bloom --license-src
     if errorlevel 1 (
         echo ERROR: assign_shader_order.py failed.
         rmdir /s /q "!STAGE_TMP!" >nul 2>&1

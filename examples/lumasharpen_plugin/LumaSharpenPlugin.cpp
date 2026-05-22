@@ -164,7 +164,7 @@ public:
         };
         auto it = kv.find("enabled");
         if (it != kv.end()) m_enabled = (it->second != "0" && !it->second.empty());
-        get_float("sharp_strength", m_sharp_strength, 0.1f, 3.0f);
+        get_float("sharp_strength", m_sharp_strength, 0.1f, 10.0f);
         get_float("sharp_clamp",    m_sharp_clamp,    0.0f, 1.0f);
         get_int  ("pattern",        m_pattern,        0,    3);
         get_float("offset_bias",    m_offset_bias,    0.0f, 6.0f);
@@ -189,10 +189,21 @@ public:
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##LumaSharpen", &m_enabled);
 
-            changed |= ImGui::DragFloat("Strength##LS", &m_sharp_strength, 0.01f, 0.1f, 3.0f, "%.2f");
+            changed |= ImGui::DragFloat("Strength##LS", &m_sharp_strength, 0.01f, 0.1f, 10.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Strength of the sharpening effect");
             ImGui::SameLine();
             if (ImGui::Button("Reset##LS_strength")) { m_sharp_strength = LS_DEFAULT_SHARP_STRENGTH; changed = true; }
+            ImGui::SameLine();
+            if (ImGui::Button(m_sharp_strength > 3.0f ? "Set 3##LS_toggle" : "Set 10##LS_toggle")) {
+                m_sharp_strength = (m_sharp_strength > 3.0f) ? 3.0f : 10.0f;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle between 3.0 and 10.0 for A/B testing");
+            if (m_sharp_strength > 3.0f) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.9f, 0.2f, 1.0f));
+                ImGui::TextWrapped("Warning: Values above 3.0 over-sharpen and may cause visible artifacts");
+                ImGui::PopStyleColor();
+            }
 
             changed |= ImGui::DragFloat("Clamp##LS", &m_sharp_clamp, 0.001f, 0.0f, 1.0f, "%.3f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Limits maximum sharpening per pixel to prevent halos");

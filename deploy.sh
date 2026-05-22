@@ -25,39 +25,44 @@ for pair in \
   fi
 done
 
-# Deploy shader DLLs and their license files
-PLUGIN_SRC="$SCRIPT_DIR/build/Release"
+# Deploy shader DLLs and their license files with sequential NN_ prefixes
 PLUGIN_DST="$UEVR_DATA/UEVR/plugins"
 mkdir -p "$PLUGIN_DST"
-for dll in "$PLUGIN_SRC"/*Shader.dll; do
-  if [[ -f "$dll" ]]; then
-    cp -f "$dll" "$PLUGIN_DST/"
-    echo "  Copied $(basename "$dll")"
+
+# Create a staging directory
+STAGE_TMP=$(mktemp -d 2>/dev/null || (mkdir -p "$SCRIPT_DIR/build/deploy_stage" && echo "$SCRIPT_DIR/build/deploy_stage"))
+
+# Copy bare-named DLLs to staging
+cp -f "$SCRIPT_DIR/build/Release"/*Shader.dll "$STAGE_TMP/"
+
+# Assign sequential NN_ prefixes from render_order() and copy LICENSE files
+python "$SCRIPT_DIR/scripts/assign_shader_order.py" "$STAGE_TMP" --exclude Bloom --license-src
+
+# Clean up previously-installed shader DLLs and their license files (both prefixed and unprefixed)
+rm -f "$PLUGIN_DST"/*Shader.dll
+rm -f "$PLUGIN_DST"/*Shader-LICENSE.txt
+
+# Copy all files from staging to target
+for file in "$STAGE_TMP"/*; do
+  if [[ -f "$file" ]]; then
+    cp -f "$file" "$PLUGIN_DST/"
+    echo "  Copied $(basename "$file")"
     ((COPIED++))
   fi
 done
 
-# Deploy per-plugin license files
-for lic in "$SCRIPT_DIR"/examples/*/*-LICENSE.txt; do
-  if [[ -f "$lic" ]]; then
-    cp -f "$lic" "$PLUGIN_DST/"
-    echo "  Copied $(basename "$lic")"
-    ((COPIED++))
-  fi
-done
+# Clean up staging directory
+rm -rf "$STAGE_TMP"
 
 # Deploy shipping presets (always overwrite — these are built-in, not user presets)
 PRESET_SRC="$SCRIPT_DIR/presets"
 PRESET_DST="$UEVR_DATA/UEVR/data/plugins/shipping_presets"
 if [[ -d "$PRESET_SRC" ]]; then
   mkdir -p "$PRESET_DST"
-  for preset_dir in "$PRESET_SRC"/*/; do
-    preset_name="$(basename "$preset_dir")"
-    mkdir -p "$PRESET_DST/$preset_name"
-    cp -f "$preset_dir"* "$PRESET_DST/$preset_name/"
-    echo "  Deployed preset: $preset_name"
-    ((COPIED++))
-  done
+  # Copy flat files. The release zip and runtime only expects flat .uevrpreset files in shipping_presets.
+  cp -f "$PRESET_SRC"/*.uevrpreset "$PRESET_DST/"
+  echo "  Deployed presets from $PRESET_SRC"
+  ((COPIED++))
 fi
 
 LOG="$UEVR_DATA/CreaturesOfAva-Win64-Shipping/log.txt"

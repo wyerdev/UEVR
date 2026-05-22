@@ -147,7 +147,7 @@ public:
             ImGui::SameLine();
             if (ImGui::Button("Reset##CAS_contrast")) { m_contrast = CAS_DEFAULT_CONTRAST; ch = true; }
 
-            ch |= ImGui::SliderFloat("Sharpening", &m_sharpening, 0.0f, 5.0f, "%.2f");
+            ch |= ImGui::SliderFloat("Sharpening", &m_sharpening, 0.0f, 10.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much sharpening to apply. 1.0 = full effect, above 1.0 = extra aggressive sharpening (may clip bright/dark edges)");
             ImGui::SameLine();
             if (ImGui::Button("Reset##CAS_sharp")) { m_sharpening = CAS_DEFAULT_SHARPENING; ch = true; }
