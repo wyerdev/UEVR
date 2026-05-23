@@ -28,6 +28,25 @@ namespace uevr::fx {
 inline constexpr int INPUT_SCENE  = -1;
 inline constexpr int OUTPUT_SCENE = -1;
 
+// Magic INPUT id meaning "the per-eye depth buffer captured from UE's
+// `SceneDepthZ` pooled render target". Input-only — illegal as an output.
+//
+// When a PassDesc lists INPUT_DEPTH the runtime:
+//   1. resolves the active pooled SceneDepthZ via the plugin API,
+//   2. reinterprets the typeless DSV-format resource as an R-channel SRV
+//      (D24S8 → R24_UNORM_X8_TYPELESS, D32_FLOAT[_S8X24] → R32_FLOAT),
+//   3. wraps the pass in DEPTH_WRITE -> DEPTH_READ|PIXEL_SHADER_RESOURCE
+//      -> DEPTH_WRITE barriers (DX12 only; DX11 has no transition concept),
+//   4. binds the SRV at the slot immediately after the pass's color inputs,
+//   5. auto-injects a HLSL preamble exposing `Texture2D fx_depth_tex`,
+//      `cbuffer fx_depth_info { fx_z_near, fx_z_far, fx_reversed_z,
+//      fx_perspective }`, and helpers `fx_linearize_depth(z)`,
+//      `fx_sample_depth_linear(uv)`, `fx_sample_depth_01(uv)`.
+//
+// VR.is_depth_enabled() must be on (UEVR "Enable Depth" toggle); the runtime
+// silently skips depth-bearing passes when the SceneDepthZ slot is empty.
+inline constexpr int INPUT_DEPTH  = -2;
+
 // Magic offset for external-texture ids returned by `load_external_texture_png`.
 // Texture ids are >= EXTERNAL_TEX_BASE; intermediate RT ids returned by
 // `declare_rt` are 0..N-1; INPUT_SCENE/OUTPUT_SCENE is -1.

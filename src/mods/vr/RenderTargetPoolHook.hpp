@@ -58,30 +58,36 @@ public:
 private:
     bool hook();
 
-    // Stuff past name param is added in newer UE versions.
+    // [fork] Both UE4-classic and UE5/Respawn-UE4 layouts of
+    // FRenderTargetPool::FindFreeElement are handled by a single raw-slot
+    // post-callback. The two hook trampolines forward arguments
+    // bit-positionally regardless of semantic interpretation; the post-callback
+    // probes which slot holds a valid wide-string pool name and caches the
+    // detected layout per session. This makes depth tracking work on titles
+    // whose engine fork compiled FindFreeElement without the FRHICommandList&
+    // parameter (e.g. Respawn UE 4.27 / Jedi Survivor) without crashing.
     static bool find_free_element_hook(
-        sdk::FRenderTargetPool* pool, 
-        sdk::FRHICommandListBase* cmd_list,
-        sdk::FPooledRenderTargetDesc* desc,
-        TRefCountPtr<IPooledRenderTarget>* out,
-        const wchar_t* name,
-        // these arent uintptrs, just defending against future changes to the size of the params
+        sdk::FRenderTargetPool* pool,
+        uintptr_t slot_rdx,
+        uintptr_t slot_r8,
+        uintptr_t slot_r9,
+        uintptr_t slot_stack0,
         uintptr_t a6, uintptr_t a7, uintptr_t a8, uintptr_t a9, uintptr_t a10);
 
     static bool find_free_element_hook_ue5(
         sdk::FRenderTargetPool* pool,
-        sdk::FPooledRenderTargetDesc* desc,
-        TRefCountPtr<IPooledRenderTarget>* out,
-        const wchar_t* name,
-        // these arent uintptrs, just defending against future changes to the size of the params
-        uintptr_t a5, uintptr_t a6, uintptr_t a7, uintptr_t a8, uintptr_t a9, uintptr_t a10
-    );
+        uintptr_t slot_rdx,
+        uintptr_t slot_r8,
+        uintptr_t slot_r9,
+        uintptr_t slot_stack0,
+        uintptr_t a6, uintptr_t a7, uintptr_t a8, uintptr_t a9, uintptr_t a10);
 
-    void on_post_find_free_element(sdk::FRenderTargetPool* pool, 
-        sdk::FPooledRenderTargetDesc* desc, 
-        TRefCountPtr<IPooledRenderTarget>* out, 
-        const wchar_t* name
-    );
+    void on_post_find_free_element_raw(
+        sdk::FRenderTargetPool* pool,
+        uintptr_t slot_rdx,
+        uintptr_t slot_r8,
+        uintptr_t slot_r9,
+        uintptr_t slot_stack0);
 
     bool m_attempted_hook{false};
     bool m_hooked{false};

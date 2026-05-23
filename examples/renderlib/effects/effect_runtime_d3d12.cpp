@@ -80,6 +80,7 @@ private:
         const char*               key    = nullptr;
         DXGI_FORMAT               format = DXGI_FORMAT_UNKNOWN;
         int                       cs_sel = -1;        // scene_decode_cache_selector(cs, opt_in)
+        int                       depth_slot = -1;    // [fork] depth SRV slot index, -1 if no depth
         ComPtr<ID3D12PipelineState> pso;
     };
     std::vector<PassPSO> m_pso_cache;
@@ -146,10 +147,31 @@ private:
     ComPtr<ID3D12DescriptorHeap> m_mipgen_srv_heap;   // shader-visible, k_mipgen_ring slots
     UINT                         m_mipgen_invocation = 0;
 
+    // [fork] Per-identity SRV cache for the SceneDepthZ pooled RT. UEVR keeps
+    // SceneDepthZ in ENGINE_SRC_DEPTH (DEPTH_READ|NON_PSR|PSR) by the time the
+    // plugin command list runs, so we never need to barrier the depth resource.
+    // Each slot owns a 1-descriptor non-shader-visible heap; the descriptor is
+    // copied into each pass's shader-visible ring at draw time.
+    struct DepthSlot {
+        ID3D12Resource*              identity = nullptr; // weak
+        DXGI_FORMAT                  fmt      = DXGI_FORMAT_UNKNOWN;
+        ComPtr<ID3D12DescriptorHeap> srv_heap;
+    };
+    DepthSlot              m_depth_slots[2]{};
+    // fx_depth_info upload ring; one 256-byte chunk per invocation slot.
+    ComPtr<ID3D12Resource> m_depth_cb;
+    uint8_t*               m_depth_cb_mapped = nullptr;
+
     bool ensure_static_state(ID3D12Device* device);
     bool ensure_pso(ID3D12Device* device, const char* ps_hlsl, DXGI_FORMAT fmt,
-                    SceneRTColorSpace cs, bool decode_opt_in, ID3D12PipelineState** out);
+                    SceneRTColorSpace cs, bool decode_opt_in, int depth_slot,
+                    ID3D12PipelineState** out);
     bool ensure_pass_resources(ID3D12Device* device, size_t pi, size_t cb_size);
+    // [fork] Resolves/caches the SceneDepthZ SRV (non-shader-visible source);
+    // returns the CPU descriptor handle, or {.ptr=0} if depth is unavailable.
+    D3D12_CPU_DESCRIPTOR_HANDLE ensure_depth_srv(ID3D12Device* device);
+    // [fork] Creates the fx_depth_info upload ring.
+    bool ensure_depth_cb(ID3D12Device* device);
     SceneSlot* ensure_scene_slot(ID3D12Device* device, ID3D12Resource* native, UINT w, UINT h, DXGI_FORMAT fmt, UINT mip_levels);
     bool ensure_int_rt(ID3D12Device* device, SceneSlot* scene, size_t idx, const RTDesc& desc);
     // Returns the IntRT slot for `idx` — backend-shared pool when the desc opts
@@ -187,6 +209,10 @@ bool DX12Backend::ensure_static_state(ID3D12Device* device) {
         m_dummy_cb.Reset();
         m_mipgen_srv_heap.Reset();
         m_mipgen_invocation = 0;
+        // [fork] Depth-path state is device-owned; reset alongside other state.
+        for (auto& d : m_depth_slots) d = {};
+        m_depth_cb.Reset();
+        m_depth_cb_mapped = nullptr;
         m_srv_descriptor_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         m_rtv_descriptor_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     }
@@ -198,7 +224,12 @@ bool DX12Backend::ensure_static_state(ID3D12Device* device) {
         srv_range.BaseShaderRegister = 0;
         srv_range.Flags              = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
 
-        D3D12_ROOT_PARAMETER1 rp[2]{};
+        // [fork] Root params: b0 = pass user CB, b1 = fx_depth_info (optional),
+        // SRV table = t0..t7 color/depth inputs. Static samplers: s0 = linear/clamp
+        // (color), s1..s7 = point/clamp (depth, when bound at slot >=1). Passes
+        // that don't bind depth simply leave root param 2 unset (D3D12 doesn't
+        // require all root params to be set if the shader doesn't reference them).
+        D3D12_ROOT_PARAMETER1 rp[3]{};
         rp[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
         rp[0].Descriptor.ShaderRegister = 0;
         rp[0].Descriptor.Flags          = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE;
@@ -207,20 +238,34 @@ bool DX12Backend::ensure_static_state(ID3D12Device* device) {
         rp[1].DescriptorTable.NumDescriptorRanges = 1;
         rp[1].DescriptorTable.pDescriptorRanges   = &srv_range;
         rp[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+        rp[2].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        rp[2].Descriptor.ShaderRegister = 1; // [fork] fx_depth_info
+        rp[2].Descriptor.Flags          = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE;
+        rp[2].ShaderVisibility          = D3D12_SHADER_VISIBILITY_PIXEL;
 
-        D3D12_STATIC_SAMPLER_DESC ss{};
-        ss.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        ss.AddressU = ss.AddressV = ss.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        ss.ComparisonFunc   = D3D12_COMPARISON_FUNC_NEVER;
-        ss.MaxLOD           = D3D12_FLOAT32_MAX;
-        ss.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_STATIC_SAMPLER_DESC ss[8]{};
+        ss[0].Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        ss[0].AddressU = ss[0].AddressV = ss[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        ss[0].ComparisonFunc   = D3D12_COMPARISON_FUNC_NEVER;
+        ss[0].MaxLOD           = D3D12_FLOAT32_MAX;
+        ss[0].ShaderRegister   = 0;
+        ss[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        // [fork] s1..s7 point/clamp so depth sampling at any input slot >=1 is correct.
+        for (UINT i = 1; i < 8; ++i) {
+            ss[i].Filter           = D3D12_FILTER_MIN_MAG_MIP_POINT;
+            ss[i].AddressU = ss[i].AddressV = ss[i].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            ss[i].ComparisonFunc   = D3D12_COMPARISON_FUNC_NEVER;
+            ss[i].MaxLOD           = D3D12_FLOAT32_MAX;
+            ss[i].ShaderRegister   = i;
+            ss[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        }
 
         D3D12_VERSIONED_ROOT_SIGNATURE_DESC rsd{};
         rsd.Version                       = D3D_ROOT_SIGNATURE_VERSION_1_1;
-        rsd.Desc_1_1.NumParameters        = 2;
+        rsd.Desc_1_1.NumParameters        = 3;
         rsd.Desc_1_1.pParameters          = rp;
-        rsd.Desc_1_1.NumStaticSamplers    = 1;
-        rsd.Desc_1_1.pStaticSamplers      = &ss;
+        rsd.Desc_1_1.NumStaticSamplers    = 8;
+        rsd.Desc_1_1.pStaticSamplers      = ss;
         ComPtr<ID3DBlob> sb, se;
         if (FAILED(D3D12SerializeVersionedRootSignature(&rsd, &sb, &se))) {
             if (se) uevr::API::get()->log_error("[fx/dx12] root sig: %s", (const char*)se->GetBufferPointer());
@@ -260,11 +305,11 @@ bool DX12Backend::ensure_static_state(ID3D12Device* device) {
 }
 
 bool DX12Backend::ensure_pso(ID3D12Device* device, const char* ps_hlsl, DXGI_FORMAT fmt,
-                              SceneRTColorSpace cs, bool decode_opt_in,
+                              SceneRTColorSpace cs, bool decode_opt_in, int depth_slot,
                               ID3D12PipelineState** out) {
     const int cs_sel = detail::scene_decode_cache_selector(cs, decode_opt_in);
     for (auto& e : m_pso_cache) {
-        if (e.key == ps_hlsl && e.format == fmt && e.cs_sel == cs_sel) {
+        if (e.key == ps_hlsl && e.format == fmt && e.cs_sel == cs_sel && e.depth_slot == depth_slot) {
             *out = e.pso.Get();
             return e.pso != nullptr;
         }
@@ -272,10 +317,15 @@ bool DX12Backend::ensure_pso(ID3D12Device* device, const char* ps_hlsl, DXGI_FOR
     std::string combined;
     const char* src_ptr = ps_hlsl;
     size_t      src_len = std::strlen(ps_hlsl);
-    if (decode_opt_in) {
-        const char* macros = detail::scene_decode_macro_block(cs);
-        combined.reserve(std::strlen(macros) + src_len);
+    // [fork] Same preamble injection as DX11: scene-decode macros and/or depth helpers.
+    const bool  has_depth = (depth_slot >= 0);
+    if (decode_opt_in || has_depth) {
+        const char* macros = decode_opt_in ? detail::scene_decode_macro_block(cs) : "";
+        std::string depth_block;
+        if (has_depth) depth_block = detail::depth_preamble_block(static_cast<unsigned>(depth_slot));
+        combined.reserve(std::strlen(macros) + depth_block.size() + src_len);
         combined.append(macros);
+        combined.append(depth_block);
         combined.append(ps_hlsl, src_len);
         src_ptr = combined.c_str();
         src_len = combined.size();
@@ -286,10 +336,10 @@ bool DX12Backend::ensure_pso(ID3D12Device* device, const char* ps_hlsl, DXGI_FOR
         if (pse) uevr::API::get()->log_error("[fx/dx12] PS compile (cs_sel=%d, fmt=%s): %s",
                                               cs_sel, detail::dxgi_format_name(fmt),
                                               (const char*)pse->GetBufferPointer());
-        m_pso_cache.push_back({ ps_hlsl, fmt, cs_sel, nullptr });
+        m_pso_cache.push_back({ ps_hlsl, fmt, cs_sel, depth_slot, nullptr });
         return false;
     }
-    PassPSO entry{ ps_hlsl, fmt, cs_sel, {} };
+    PassPSO entry{ ps_hlsl, fmt, cs_sel, depth_slot, {} };
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
     pd.pRootSignature                       = m_root_sig.Get();
     pd.VS                                   = { m_vs_blob->GetBufferPointer(), m_vs_blob->GetBufferSize() };
@@ -349,6 +399,101 @@ bool DX12Backend::ensure_pass_resources(ID3D12Device* device, size_t pi, size_t 
             r.cb->Map(0, nullptr, reinterpret_cast<void**>(&r.cb_mapped));
             r.cb_chunk = aligned;
         }
+    }
+    return true;
+}
+
+// [fork] Resolve current SceneDepthZ pooled RT, reinterpret as R-channel SRV.
+// Returns {.ptr=0} if depth is unavailable. UE keeps SceneDepthZ in
+// ENGINE_SRC_DEPTH (DEPTH_READ|NON_PSR|PSR) by the time the plugin command list
+// runs, so no resource barrier is needed before sampling.
+D3D12_CPU_DESCRIPTOR_HANDLE DX12Backend::ensure_depth_srv(ID3D12Device* device) {
+    D3D12_CPU_DESCRIPTOR_HANDLE empty{};
+    auto& api = uevr::API::get();
+    auto* rt_obj = uevr::API::RenderTargetPoolHook::get_render_target(L"SceneDepthZ");
+    if (rt_obj == nullptr) {
+        static bool s = false; if (!s) { s = true;
+            api->log_warn("[fx/dx12] depth: SceneDepthZ not in pool — enable 'Enable Depth' in UEVR's VR settings (Engine-specific options). The depth pool hook is gated by that toggle because it crashes some UE titles."); }
+        return empty;
+    }
+    auto* rhi_tex = uevr::API::RenderTargetPoolHook::get_render_target_texture(rt_obj);
+    if (rhi_tex == nullptr) {
+        static bool s = false; if (!s) { s = true;
+            api->log_warn("[fx/dx12] depth: SceneDepthZ pooled RT present but its FRHITexture is null"); }
+        return empty;
+    }
+    auto* native = static_cast<ID3D12Resource*>(rhi_tex->get_native_resource());
+    if (native == nullptr) {
+        static bool s = false; if (!s) { s = true;
+            api->log_warn("[fx/dx12] depth: SceneDepthZ FRHITexture has null native ID3D12Resource"); }
+        return empty;
+    }
+
+    auto td = native->GetDesc();
+    const auto srv_fmt = detail::scene_depth_format_to_srv(td.Format);
+    if (srv_fmt == DXGI_FORMAT_UNKNOWN) {
+        static DXGI_FORMAT s_warned = DXGI_FORMAT_UNKNOWN;
+        if (s_warned != td.Format) {
+            s_warned = td.Format;
+            api->log_warn("[fx/dx12] depth: SceneDepthZ format %s not in allow-list (D24S8/D32/D32S8/D16); depth binding skipped",
+                          detail::dxgi_format_name(td.Format));
+        }
+        return empty;
+    }
+
+    DepthSlot* slot = nullptr;
+    for (auto& s : m_depth_slots) if (s.identity == native) { slot = &s; break; }
+    if (slot == nullptr) {
+        for (auto& s : m_depth_slots) if (s.identity == nullptr) { slot = &s; break; }
+        if (slot == nullptr) slot = &m_depth_slots[1]; // evict
+    }
+    if (slot->identity != native || slot->fmt != srv_fmt || !slot->srv_heap) {
+        const bool reidentified = (slot->identity != nullptr) && (slot->identity != native);
+        *slot = {};
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.NumDescriptors = 1;
+        if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&slot->srv_heap)))) {
+            api->log_warn("[fx/dx12] depth: CreateDescriptorHeap(depth) failed");
+            return empty;
+        }
+        D3D12_SHADER_RESOURCE_VIEW_DESC svd{};
+        svd.Format                  = srv_fmt;
+        svd.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        svd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        svd.Texture2D.MipLevels     = 1;
+        device->CreateShaderResourceView(native, &svd,
+                                         slot->srv_heap->GetCPUDescriptorHandleForHeapStart());
+        slot->identity = native;
+        slot->fmt      = srv_fmt;
+        api->log_info("[fx/dx12] depth: SceneDepthZ SRV %s (native=%p fmt=%s -> srv=%s %ux%u)",
+                      reidentified ? "re-created (identity changed)" : "ready",
+                      native, detail::dxgi_format_name(td.Format),
+                      detail::dxgi_format_name(srv_fmt),
+                      (unsigned)td.Width, (unsigned)td.Height);
+    }
+    return slot->srv_heap->GetCPUDescriptorHandleForHeapStart();
+}
+
+bool DX12Backend::ensure_depth_cb(ID3D12Device* device) {
+    if (m_depth_cb) return true;
+    const UINT64 chunk = 256; // CBV alignment; DepthInfoCB is 16 bytes.
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bd{};
+    bd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width            = chunk * k_invocation_ring;
+    bd.Height           = 1;
+    bd.DepthOrArraySize = 1;
+    bd.MipLevels        = 1;
+    bd.Format           = DXGI_FORMAT_UNKNOWN;
+    bd.SampleDesc.Count = 1;
+    bd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
+                                               D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                               IID_PPV_ARGS(&m_depth_cb)))) return false;
+    if (FAILED(m_depth_cb->Map(0, nullptr, reinterpret_cast<void**>(&m_depth_cb_mapped)))) {
+        m_depth_cb.Reset();
+        return false;
     }
     return true;
 }
@@ -495,7 +640,7 @@ void DX12Backend::generate_mips(ID3D12GraphicsCommandList* cmd, ID3D12Resource* 
 
     // Acquire / cache mip-gen PSO for this format.
     ID3D12PipelineState* mipgen_pso = nullptr;
-    if (!ensure_pso(m_device.Get(), k_mipgen_ps, fmt, SceneRTColorSpace::Unknown, false, &mipgen_pso) || mipgen_pso == nullptr) return;
+    if (!ensure_pso(m_device.Get(), k_mipgen_ps, fmt, SceneRTColorSpace::Unknown, false, -1, &mipgen_pso) || mipgen_pso == nullptr) return;
 
     cmd->SetGraphicsRootSignature(m_root_sig.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -767,8 +912,16 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
 
         ID3D12PipelineState* pso = nullptr;
         const auto pass_cs = detail::classify_scene_rt_colorspace(scene->fmt);
+        // [fork] Find depth slot (if pass requests INPUT_DEPTH).
+        int depth_slot = -1;
+        {
+            const size_t n_scan = std::min<size_t>(p.inputs.size(), (size_t)k_max_srvs_per_pass);
+            for (size_t i = 0; i < n_scan; ++i) {
+                if (p.inputs[i] == INPUT_DEPTH) { depth_slot = static_cast<int>(i); break; }
+            }
+        }
         if (!ensure_pso(device, p.ps_hlsl, out_fmt, pass_cs,
-                         p.needs_scene_colorspace_decode, &pso) || pso == nullptr) {
+                         p.needs_scene_colorspace_decode, depth_slot, &pso) || pso == nullptr) {
             static int s_skip = -1; if (s_skip != (int)pi) { s_skip = (int)pi;
                 api->log_warn("[fx/dx12] pass %zu skipped: PSO compile/create failed (out_fmt=%s)",
                               pi, detail::dxgi_format_name(out_fmt)); }
@@ -798,6 +951,21 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
             D3D12_CPU_DESCRIPTOR_HANDLE src{};
             if (id == INPUT_SCENE) {
                 src = scene->copy_srv_heap->GetCPUDescriptorHandleForHeapStart();
+            } else if (id == INPUT_DEPTH) {
+                // [fork] Resolve current SceneDepthZ SRV (non-shader-visible CPU handle);
+                // skip pass if depth unavailable or format unsupported.
+                if (!ensure_depth_cb(device)) {
+                    static int s = -1; if (s != (int)pi) { s = (int)pi;
+                        api->log_warn("[fx/dx12] pass %zu skipped: ensure_depth_cb failed", pi); }
+                    inputs_ok = false; break;
+                }
+                D3D12_CPU_DESCRIPTOR_HANDLE depth_src = ensure_depth_srv(device);
+                if (depth_src.ptr == 0) {
+                    static int s = -1; if (s != (int)pi) { s = (int)pi;
+                        api->log_warn("[fx/dx12] pass %zu skipped: SceneDepthZ unavailable (hook not active, pool empty, or format not in allow-list)", pi); }
+                    inputs_ok = false; break;
+                }
+                src = depth_src;
             } else if (id >= EXTERNAL_TEX_BASE) {
                 const size_t ext_idx = static_cast<size_t>(id - EXTERNAL_TEX_BASE);
                 if (ext_idx >= ext_tex_paths.size() ||
@@ -862,6 +1030,15 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
         if (p.cb_size > 0 && res.cb && res.cb_chunk > 0) {
             cmd->SetGraphicsRootConstantBufferView(
                 0, res.cb->GetGPUVirtualAddress() + invocation_slot * res.cb_chunk);
+        }
+        // [fork] Upload fx_depth_info and bind at b1 (root param 2) when this pass uses depth.
+        if (depth_slot >= 0 && m_depth_cb && m_depth_cb_mapped) {
+            detail::DepthInfoCB dcb{};
+            detail::extract_depth_info_cb(dcb);
+            const UINT64 chunk = 256;
+            std::memcpy(m_depth_cb_mapped + invocation_slot * chunk, &dcb, sizeof(dcb));
+            cmd->SetGraphicsRootConstantBufferView(
+                2, m_depth_cb->GetGPUVirtualAddress() + invocation_slot * chunk);
         }
         ID3D12DescriptorHeap* heaps[] = { res.srv_heap.Get() };
         cmd->SetDescriptorHeaps(1, heaps);

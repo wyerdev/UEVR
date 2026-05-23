@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <d3d11.h>
@@ -14,6 +15,9 @@
 #include <dxgiformat.h>
 
 #include "effect_runtime.hpp"
+
+#include "uevr/API.h"
+#include "uevr/API.hpp"
 
 namespace uevr::fx {
 
@@ -104,6 +108,110 @@ inline const char* scene_decode_macro_block(SceneRTColorSpace cs) {
 // colorspace changes (no preamble injected = no recompile needed).
 inline int scene_decode_cache_selector(SceneRTColorSpace cs, bool opt_in) {
     return opt_in ? static_cast<int>(cs) : -1;
+}
+
+// ---------------------------------------------------------------------------
+// Depth plumbing (INPUT_DEPTH). Used by both backends.
+// ---------------------------------------------------------------------------
+
+// Allow-listed conversion from a UE SceneDepthZ typeless/DSV format to the
+// matching R-channel SRV format. Returns DXGI_FORMAT_UNKNOWN for formats we
+// don't recognize as depth, in which case the runtime skips depth binding for
+// the affected pass (logged once, debug visualization will be wrong but no
+// crash). Allow-list keeps us safe against UE versions that may use unusual
+// depth formats.
+inline DXGI_FORMAT scene_depth_format_to_srv(DXGI_FORMAT fmt) {
+    switch (fmt) {
+        // D24S8 family — stencil sits in X8, depth read via R24_UNORM.
+        case DXGI_FORMAT_R24G8_TYPELESS:
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:
+            return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        // D32 float — most common in UE5.
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT:
+            return DXGI_FORMAT_R32_FLOAT;
+        // D32 float + S8 stencil.
+        case DXGI_FORMAT_R32G8X24_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+            return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+        // D16
+        case DXGI_FORMAT_R16_TYPELESS:
+        case DXGI_FORMAT_D16_UNORM:
+            return DXGI_FORMAT_R16_UNORM;
+        default:
+            return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+// CB layout matching `cbuffer fx_depth_info` in the injected HLSL preamble.
+// Bound at register b1 (pass user CB stays at b0). 16-byte aligned.
+struct DepthInfoCB {
+    float    z_near      = 0.1f;
+    float    z_far       = 10000.0f;
+    uint32_t reversed_z  = 1;
+    uint32_t perspective = 1;
+};
+static_assert(sizeof(DepthInfoCB) == 16, "DepthInfoCB must be 16 bytes");
+
+// Populates `out` with depth-linearization parameters derived from the active
+// UE projection matrix. P0 assumptions documented in the cbuffer comment:
+// reversed-Z + perspective are hardcoded true; near is read from the matrix
+// (column 3 row 2, matches UEVR's `update_matrices()` glm column-major layout);
+// far is a synthetic constant because UEVR's projection is INFINITE-FAR
+// (no finite far stored in the matrix). 10000 (UU) is the visualization range.
+inline void extract_depth_info_cb(DepthInfoCB& out) {
+    out = {};
+    auto& api = uevr::API::get();
+    if (!api) return;
+    const auto proj = uevr::API::VR::get_ue_projection_matrix(uevr::API::VR::Eye::LEFT);
+    // glm column-major: m[col][row]. UEVR stores nearz at m[3][2].
+    const float n = proj.m[3][2];
+    if (n > 1e-5f && n < 1e5f) out.z_near = n;
+}
+
+// HLSL preamble injected when a pass requests INPUT_DEPTH. Provides:
+//   Texture2D fx_depth_tex                    bound at register tN
+//   SamplerState fx_depth_smp                 bound at register sN (point/clamp)
+//   cbuffer fx_depth_info : register(b1)      { z_near, z_far, reversed_z, perspective }
+//   float fx_linearize_depth(float z)         depth-buffer value -> view-space units
+//   float fx_sample_depth_linear(float2 uv)   sample + linearize
+//   float fx_sample_depth_01(float2 uv)       sample + linearize + normalize to [0,1]
+//
+// `depth_srv_slot` is the t-register slot the runtime binds depth at
+// (immediately after the pass's color inputs).
+//
+// NOTE on the linearization formula: UE typically uses INFINITE-FAR reverse-Z,
+// for which the exact form is `z_view = z_near / z`. We use the finite-far
+// reverse-Z form (z01 = 1-z; z_view = near*far / (far - z01*(far-near))) so the
+// same code path works for both conventions; for the infinite-far case z_far
+// only affects the long-distance saturation in fx_sample_depth_01.
+inline std::string depth_preamble_block(unsigned depth_srv_slot) {
+    const std::string n = std::to_string(depth_srv_slot);
+    std::string s;
+    s.reserve(1024);
+    s += "Texture2D fx_depth_tex : register(t" + n + ");\n";
+    s += "SamplerState fx_depth_smp : register(s" + n + ");\n";
+    s += "cbuffer fx_depth_info : register(b1) {\n"
+         "    float fx_z_near;\n"
+         "    float fx_z_far;\n"
+         "    uint  fx_reversed_z;\n"
+         "    uint  fx_perspective;\n"
+         "};\n"
+         "float fx_linearize_depth(float z) {\n"
+         "    float z01 = fx_reversed_z ? (1.0 - z) : z;\n"
+         "    if (fx_perspective == 0) return lerp(fx_z_near, fx_z_far, z01);\n"
+         "    float denom = fx_z_far - z01 * (fx_z_far - fx_z_near);\n"
+         "    return (fx_z_near * fx_z_far) / max(denom, 1e-6);\n"
+         "}\n"
+         "float fx_sample_depth_linear(float2 uv) {\n"
+         "    float z = fx_depth_tex.SampleLevel(fx_depth_smp, uv, 0).r;\n"
+         "    return fx_linearize_depth(z);\n"
+         "}\n"
+         "float fx_sample_depth_01(float2 uv) {\n"
+         "    float lin = fx_sample_depth_linear(uv);\n"
+         "    return saturate((lin - fx_z_near) / max(fx_z_far - fx_z_near, 1e-3));\n"
+         "}\n";
+    return s;
 }
 
 // Decoded RGBA8 image, owned by `texture_loader`. Used by both backends to

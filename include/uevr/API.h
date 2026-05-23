@@ -487,6 +487,11 @@ DECLARE_UEVR_HANDLE(UEVR_IPooledRenderTargetHandle);
 typedef struct {
     void (*activate)();
     UEVR_IPooledRenderTargetHandle (*get_render_target)(const wchar_t* name);
+    /* [fork] Returns the underlying FRHITexture2D handle for the given pooled
+       render target, or NULL if unavailable. Additive: pre-existing fields
+       above are unchanged. Used by renderlib's depth plumbing so plugins do
+       not need to reach into upstream sdk/ headers. */
+    UEVR_FRHITexture2DHandle (*get_render_target_texture)(UEVR_IPooledRenderTargetHandle handle);
 } UEVR_FRenderTargetPoolHookFunctions;
 
 typedef struct {

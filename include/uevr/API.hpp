@@ -1671,6 +1671,15 @@ public:
             return (IPooledRenderTarget*)fn(name);
         }
 
+        // [fork] Resolves the underlying FRHITexture2D for a pooled RT.
+        // Returns nullptr if the slot is empty or the function pointer is
+        // unavailable (older host).
+        static FRHITexture2D* get_render_target_texture(IPooledRenderTarget* rt) {
+            static const auto fn = initialize()->get_render_target_texture;
+            if (fn == nullptr) return nullptr;
+            return (FRHITexture2D*)fn((UEVR_IPooledRenderTargetHandle)rt);
+        }
+
     private:
         static inline const UEVR_FRenderTargetPoolHookFunctions* s_functions{nullptr};
         static inline const UEVR_FRenderTargetPoolHookFunctions* initialize() {

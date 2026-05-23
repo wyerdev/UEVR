@@ -54,9 +54,22 @@ private:
         const char*               key      = nullptr;   // ps_hlsl pointer used as identity
         DXGI_FORMAT               format   = DXGI_FORMAT_UNKNOWN;
         int                       cs_sel   = -1;        // scene_decode_cache_selector(cs, opt_in)
+        int                       depth_slot = -1;      // [fork] depth SRV slot index, -1 if no depth
         ComPtr<ID3D11PixelShader> ps;
     };
     std::vector<PassPS> m_ps_cache;
+
+    // [fork] Per-identity SRV cache for the SceneDepthZ pooled RT. Reinterprets
+    // the typeless DSV resource as an R-channel SRV. Two slots cover the two
+    // simultaneous scene sizes seen during native-stereo-fix dispatches.
+    struct DepthSlot {
+        ID3D11Texture2D*                  identity = nullptr; // weak
+        DXGI_FORMAT                       fmt      = DXGI_FORMAT_UNKNOWN;
+        ComPtr<ID3D11ShaderResourceView>  srv;
+    };
+    DepthSlot                  m_depth_slots[2]{};
+    ComPtr<ID3D11Buffer>       m_depth_cb;       // fx_depth_info (b1), 16 bytes
+    ComPtr<ID3D11SamplerState> m_depth_sampler;  // point + clamp
 
     struct IntRT {
         UINT                              w = 0, h = 0;
@@ -98,7 +111,13 @@ private:
 
     bool ensure_static_state(ID3D11Device* device);
     bool ensure_pass_ps(ID3D11Device* device, const char* ps_hlsl, DXGI_FORMAT fmt,
-                        SceneRTColorSpace cs, bool decode_opt_in, ID3D11PixelShader** out_ps);
+                        SceneRTColorSpace cs, bool decode_opt_in, int depth_slot,
+                        ID3D11PixelShader** out_ps);
+    // [fork] Resolves/caches the SceneDepthZ SRV. Returns nullptr if depth is
+    // unavailable (VR depth off, empty slot, or unsupported DSV format).
+    ID3D11ShaderResourceView* ensure_depth_srv(ID3D11Device* device);
+    // [fork] Creates the b1 fx_depth_info constant buffer + point/clamp sampler.
+    bool ensure_depth_cb(ID3D11Device* device);
     SceneSlot* ensure_scene_slot(ID3D11Device* device, ID3D11Texture2D* native, UINT w, UINT h, DXGI_FORMAT fmt, UINT mip_levels);
     bool ensure_int_rt(ID3D11Device* device, SceneSlot* scene, size_t idx, const RTDesc& desc);
     // Returns the IntRT slot for `idx` — backend-shared pool when the desc opts in,
@@ -124,6 +143,10 @@ bool DX11Backend::ensure_static_state(ID3D11Device* device) {
         for (auto& e : m_ext_textures) e = {};
         m_pass_cbs.clear();
         m_pass_cb_sizes.clear();
+        // [fork] Depth-path state is device-owned; reset alongside other state.
+        for (auto& d : m_depth_slots) d = {};
+        m_depth_cb.Reset();
+        m_depth_sampler.Reset();
     }
     if (!m_ctx) device->GetImmediateContext(&m_ctx);
     if (!m_vs) {
@@ -144,24 +167,31 @@ bool DX11Backend::ensure_static_state(ID3D11Device* device) {
 }
 
 bool DX11Backend::ensure_pass_ps(ID3D11Device* device, const char* ps_hlsl, DXGI_FORMAT fmt,
-                                  SceneRTColorSpace cs, bool decode_opt_in,
+                                  SceneRTColorSpace cs, bool decode_opt_in, int depth_slot,
                                   ID3D11PixelShader** out_ps) {
     const int cs_sel = detail::scene_decode_cache_selector(cs, decode_opt_in);
     for (auto& e : m_ps_cache) {
-        if (e.key == ps_hlsl && e.format == fmt && e.cs_sel == cs_sel) {
+        if (e.key == ps_hlsl && e.format == fmt && e.cs_sel == cs_sel && e.depth_slot == depth_slot) {
             *out_ps = e.ps.Get();
             return e.ps != nullptr;
         }
     }
     // When the pass opts in, prepend the decode/encode macro block. Otherwise
     // compile the source verbatim (zero behavior change for existing plugins).
+    // [fork] When the pass requests INPUT_DEPTH, prepend the depth preamble
+    // (Texture2D + sampler at slot `depth_slot`, cbuffer fx_depth_info at b1,
+    // and the fx_linearize_depth/fx_sample_depth_* helper functions).
     std::string combined;
     const char* src_ptr = ps_hlsl;
     size_t      src_len = std::strlen(ps_hlsl);
-    if (decode_opt_in) {
-        const char* macros = detail::scene_decode_macro_block(cs);
-        combined.reserve(std::strlen(macros) + src_len);
+    const bool  has_depth = (depth_slot >= 0);
+    if (decode_opt_in || has_depth) {
+        const char* macros = decode_opt_in ? detail::scene_decode_macro_block(cs) : "";
+        std::string depth_block;
+        if (has_depth) depth_block = detail::depth_preamble_block(static_cast<unsigned>(depth_slot));
+        combined.reserve(std::strlen(macros) + depth_block.size() + src_len);
         combined.append(macros);
+        combined.append(depth_block);
         combined.append(ps_hlsl, src_len);
         src_ptr = combined.c_str();
         src_len = combined.size();
@@ -172,10 +202,10 @@ bool DX11Backend::ensure_pass_ps(ID3D11Device* device, const char* ps_hlsl, DXGI
         if (pse) uevr::API::get()->log_error("[fx/dx11] PS compile (cs_sel=%d, fmt=%s): %s",
                                               cs_sel, detail::dxgi_format_name(fmt),
                                               (const char*)pse->GetBufferPointer());
-        m_ps_cache.push_back({ ps_hlsl, fmt, cs_sel, nullptr });
+        m_ps_cache.push_back({ ps_hlsl, fmt, cs_sel, depth_slot, nullptr });
         return false;
     }
-    PassPS entry{ ps_hlsl, fmt, cs_sel, {} };
+    PassPS entry{ ps_hlsl, fmt, cs_sel, depth_slot, {} };
     if (FAILED(device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &entry.ps))) {
         m_ps_cache.push_back(std::move(entry));
         return false;
@@ -297,6 +327,89 @@ bool DX11Backend::ensure_pass_cb(ID3D11Device* device, size_t idx, size_t cb_siz
     return true;
 }
 
+// [fork] Resolve current SceneDepthZ pooled RT, reinterpret as R-channel SRV,
+// cache per native ID3D11Texture2D* identity. nullptr means depth unavailable.
+ID3D11ShaderResourceView* DX11Backend::ensure_depth_srv(ID3D11Device* device) {
+    auto& api = uevr::API::get();
+    auto* rt_obj = uevr::API::RenderTargetPoolHook::get_render_target(L"SceneDepthZ");
+    if (rt_obj == nullptr) {
+        static bool s = false; if (!s) { s = true;
+            api->log_warn("[fx/dx11] depth: SceneDepthZ not in pool — enable 'Enable Depth' in UEVR's VR settings (Engine-specific options). The depth pool hook is gated by that toggle because it crashes some UE titles."); }
+        return nullptr;
+    }
+    auto* rhi_tex = uevr::API::RenderTargetPoolHook::get_render_target_texture(rt_obj);
+    if (rhi_tex == nullptr) {
+        static bool s = false; if (!s) { s = true;
+            api->log_warn("[fx/dx11] depth: SceneDepthZ pooled RT present but its FRHITexture is null"); }
+        return nullptr;
+    }
+    auto* native = static_cast<ID3D11Texture2D*>(rhi_tex->get_native_resource());
+    if (native == nullptr) {
+        static bool s = false; if (!s) { s = true;
+            api->log_warn("[fx/dx11] depth: SceneDepthZ FRHITexture has null native ID3D11Texture2D"); }
+        return nullptr;
+    }
+
+    D3D11_TEXTURE2D_DESC td{}; native->GetDesc(&td);
+    const auto srv_fmt = detail::scene_depth_format_to_srv(td.Format);
+    if (srv_fmt == DXGI_FORMAT_UNKNOWN) {
+        static DXGI_FORMAT s_warned = DXGI_FORMAT_UNKNOWN;
+        if (s_warned != td.Format) {
+            s_warned = td.Format;
+            api->log_warn("[fx/dx11] depth: SceneDepthZ format %s not in allow-list (D24S8/D32/D32S8/D16); depth binding skipped",
+                          detail::dxgi_format_name(td.Format));
+        }
+        return nullptr;
+    }
+
+    DepthSlot* slot = nullptr;
+    for (auto& s : m_depth_slots) if (s.identity == native) { slot = &s; break; }
+    if (slot == nullptr) {
+        for (auto& s : m_depth_slots) if (s.identity == nullptr) { slot = &s; break; }
+        if (slot == nullptr) slot = &m_depth_slots[1]; // evict
+    }
+    if (slot->identity != native || slot->fmt != srv_fmt || !slot->srv) {
+        const bool reidentified = (slot->identity != nullptr) && (slot->identity != native);
+        *slot = {};
+        D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+        svd.Format = srv_fmt;
+        svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        svd.Texture2D.MipLevels = 1;
+        if (FAILED(device->CreateShaderResourceView(native, &svd, &slot->srv))) {
+            api->log_warn("[fx/dx11] depth: CreateShaderResourceView(depth) failed");
+            return nullptr;
+        }
+        slot->identity = native;
+        slot->fmt      = srv_fmt;
+        api->log_info("[fx/dx11] depth: SceneDepthZ SRV %s (native=%p fmt=%s -> srv=%s %ux%u)",
+                      reidentified ? "re-created (identity changed)" : "ready",
+                      native, detail::dxgi_format_name(td.Format),
+                      detail::dxgi_format_name(srv_fmt),
+                      (unsigned)td.Width, (unsigned)td.Height);
+    }
+    return slot->srv.Get();
+}
+
+bool DX11Backend::ensure_depth_cb(ID3D11Device* device) {
+    if (!m_depth_cb) {
+        D3D11_BUFFER_DESC cbd{};
+        cbd.ByteWidth      = sizeof(detail::DepthInfoCB);
+        cbd.Usage          = D3D11_USAGE_DYNAMIC;
+        cbd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+        cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(device->CreateBuffer(&cbd, nullptr, &m_depth_cb))) return false;
+    }
+    if (!m_depth_sampler) {
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        sd.MaxLOD = D3D11_FLOAT32_MAX;
+        if (FAILED(device->CreateSamplerState(&sd, &m_depth_sampler))) return false;
+    }
+    return true;
+}
+
 void DX11Backend::execute(const std::vector<RTDesc>&                rt_descs,
                           const std::vector<std::filesystem::path>& ext_tex_paths,
                           const std::vector<PassDesc>&              passes,
@@ -380,8 +493,17 @@ void DX11Backend::execute(const std::vector<RTDesc>&                rt_descs,
 
         ID3D11PixelShader* ps = nullptr;
         const auto pass_cs = detail::classify_scene_rt_colorspace(scene->fmt);
+        // [fork] Detect INPUT_DEPTH in this pass's input list; depth_slot is the
+        // s-register / t-register index the depth SRV+sampler will bind to.
+        int depth_slot = -1;
+        {
+            const size_t n_scan = std::min<size_t>(p.inputs.size(), 8u);
+            for (size_t i = 0; i < n_scan; ++i) {
+                if (p.inputs[i] == INPUT_DEPTH) { depth_slot = static_cast<int>(i); break; }
+            }
+        }
         if (!ensure_pass_ps(device, p.ps_hlsl, out_fmt, pass_cs,
-                             p.needs_scene_colorspace_decode, &ps) || ps == nullptr) {
+                             p.needs_scene_colorspace_decode, depth_slot, &ps) || ps == nullptr) {
             static int s_skip = -1; if (s_skip != (int)pi) { s_skip = (int)pi;
                 api->log_warn("[fx/dx11] pass %zu skipped: PS compile/create failed (out_fmt=%s)",
                               pi, detail::dxgi_format_name(out_fmt)); }
@@ -392,10 +514,22 @@ void DX11Backend::execute(const std::vector<RTDesc>&                rt_descs,
         constexpr UINT k_max_srvs = 8;
         ID3D11ShaderResourceView* srvs[k_max_srvs] = {};
         const size_t n_in = std::min<size_t>(p.inputs.size(), k_max_srvs);
+        // [fork] Resolve depth up front; skip whole pass if requested but unavailable.
+        ID3D11ShaderResourceView* depth_srv = nullptr;
+        if (depth_slot >= 0) {
+            depth_srv = ensure_depth_srv(device);
+            if (depth_srv == nullptr) {
+                static int s_skip = -1; if (s_skip != (int)pi) { s_skip = (int)pi;
+                    api->log_info("[fx/dx11] pass %zu skipped: INPUT_DEPTH requested but depth unavailable", pi); }
+                continue;
+            }
+        }
         for (size_t i = 0; i < n_in; ++i) {
             const int id = p.inputs[i];
             if (id == INPUT_SCENE) {
                 srvs[i] = scene->copy_srv.Get();
+            } else if (id == INPUT_DEPTH) {
+                srvs[i] = depth_srv;
             } else if (id >= EXTERNAL_TEX_BASE) {
                 const size_t ext_idx = static_cast<size_t>(id - EXTERNAL_TEX_BASE);
                 if (ext_idx < ext_tex_paths.size() && ensure_ext_tex(device, ext_idx, ext_tex_paths[ext_idx])) {
@@ -424,8 +558,25 @@ void DX11Backend::execute(const std::vector<RTDesc>&                rt_descs,
         ctx->OMSetRenderTargets(1, &out_rtv, nullptr);
         ctx->PSSetShader(ps, nullptr, 0);
         if (cb_to_bind) ctx->PSSetConstantBuffers(0, 1, &cb_to_bind);
+        // [fork] Upload + bind fx_depth_info at b1 when depth is in use.
+        if (depth_slot >= 0 && ensure_depth_cb(device)) {
+            detail::DepthInfoCB d{};
+            detail::extract_depth_info_cb(d);
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (SUCCEEDED(ctx->Map(m_depth_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                std::memcpy(mapped.pData, &d, sizeof(d));
+                ctx->Unmap(m_depth_cb.Get(), 0);
+                ID3D11Buffer* dcb = m_depth_cb.Get();
+                ctx->PSSetConstantBuffers(1, 1, &dcb);
+            }
+        }
         ctx->PSSetShaderResources(0, static_cast<UINT>(n_in), srvs);
         ctx->PSSetSamplers(0, 1, m_sampler_linear.GetAddressOf());
+        // [fork] Bind depth point/clamp sampler at the same slot index as the depth SRV.
+        if (depth_slot >= 0 && m_depth_sampler) {
+            ID3D11SamplerState* dsmp = m_depth_sampler.Get();
+            ctx->PSSetSamplers(static_cast<UINT>(depth_slot), 1, &dsmp);
+        }
         ctx->Draw(3, 0);
 
         // Unbind SRVs so a subsequent pass can write to one of these textures.

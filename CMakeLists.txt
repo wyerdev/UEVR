@@ -1441,6 +1441,48 @@ set_target_properties(blackcrush_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target depth_debug_plugin
+set(CMKR_TARGET depth_debug_plugin)
+set(depth_debug_plugin_SOURCES "")
+
+list(APPEND depth_debug_plugin_SOURCES
+	"examples/depth_debug_plugin/DepthDebugPlugin.cpp"
+)
+
+list(APPEND depth_debug_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${depth_debug_plugin_SOURCES})
+add_library(depth_debug_plugin SHARED)
+
+if(depth_debug_plugin_SOURCES)
+	target_sources(depth_debug_plugin PRIVATE ${depth_debug_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${depth_debug_plugin_SOURCES})
+
+target_compile_features(depth_debug_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(depth_debug_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(depth_debug_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(depth_debug_plugin PROPERTIES
+	OUTPUT_NAME
+		DepthDebugShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target cartoon_plugin
 set(CMKR_TARGET cartoon_plugin)
 set(cartoon_plugin_SOURCES "")

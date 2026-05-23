@@ -349,6 +349,14 @@ headers = ["examples/blackcrush_plugin/**.hpp", "examples/blackcrush_plugin/**.h
 [target.blackcrush_plugin.properties]
 OUTPUT_NAME = "BlackCrushShader"
 
+[target.depth_debug_plugin]
+type = "plugin"
+sources = ["examples/depth_debug_plugin/DepthDebugPlugin.cpp"]
+headers = ["examples/depth_debug_plugin/**.hpp", "examples/depth_debug_plugin/**.h"]
+
+[target.depth_debug_plugin.properties]
+OUTPUT_NAME = "DepthDebugShader"
+
 [target.cartoon_plugin]
 type = "plugin"
 sources = ["examples/cartoon_plugin/CartoonPlugin.cpp"]

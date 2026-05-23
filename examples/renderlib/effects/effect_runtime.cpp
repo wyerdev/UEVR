@@ -241,6 +241,16 @@ void EffectRuntime::replace_external_texture_png(int id, const std::filesystem::
 void EffectRuntime::set_passes(std::vector<PassDesc> passes) {
     m_passes = std::move(passes);
 
+    // [fork] INPUT_DEPTH note: we intentionally do NOT call
+    // `RenderTargetPoolHook::activate()` here. That call installs an inline
+    // hook on FRenderTargetPool::FindFreeElement which is known to crash /
+    // freeze certain UE4/UE5 titles (see praydog comment in
+    // src/mods/vr/RenderTargetPoolHook.cpp on_post_find_free_element). Upstream
+    // gates the hook behind the user-facing "Enable Depth" toggle so the user
+    // opts in per-game. Plugins must honor that contract; if depth is disabled,
+    // `get_render_target(L"SceneDepthZ")` will return nullptr and the depth
+    // backend will log a single warning instructing the user to enable depth.
+
     // Lazily register the per-frame dispatch counter reset hook here, NOT in
     // execute(). set_passes() is called from the plugin's on_initialize() (or
     // any other non-render-hook context), so cbs->on_present() can safely
