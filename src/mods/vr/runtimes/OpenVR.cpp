@@ -270,6 +270,11 @@ VRRuntime::Error OpenVR::update_matrices(float nearz, float farz) {
         this->hmd->GetProjectionRaw(vr::Eye_Right, &this->raw_projections[vr::Eye_Right][0], &this->raw_projections[vr::Eye_Right][1], &this->raw_projections[vr::Eye_Right][2], &this->raw_projections[vr::Eye_Right][3]);
         this->projections[vr::Eye_Left] = get_mat(vr::Eye_Left);
         this->projections[vr::Eye_Right] = get_mat(vr::Eye_Right);
+        auto world_to_meters = VR::get()->get_world_to_meters();
+        XrMatrix4x4f_CreateProjection((XrMatrix4x4f*)&this->afw_projections[0], GRAPHICS_D3D, raw_projections[0][0], raw_projections[0][1],
+            raw_projections[0][3], raw_projections[0][2], nearz / world_to_meters, -1.0f);
+        XrMatrix4x4f_CreateProjection((XrMatrix4x4f*)&this->afw_projections[1], GRAPHICS_D3D, raw_projections[1][0], raw_projections[1][1],
+            raw_projections[1][3], raw_projections[1][2], nearz / world_to_meters, -1.0f);
         this->should_recalculate_eye_projections = false;
         this->last_eye_matrix_nearz = nearz;
     }

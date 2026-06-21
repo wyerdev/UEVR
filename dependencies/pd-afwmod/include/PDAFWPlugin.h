@@ -156,14 +156,23 @@ namespace pd {
 		float fUpperLimit;
 		float fConvertToLimit;
 	};
+	
+
+	enum CorrectMVType
+	{
+		SwapCameraMotion,
+		ExtractObjectMotion,
+		ScaleObjectMotion  
+	};
 
 	struct CorrectMotionVectorsParams
 	{
-		TextureDesc*            inMotionVectors;
-		TextureDesc*            inDepth;
-		CameraDataMVCorrection* cameraData;
+		TextureDesc*            InMotionVectors;
+		TextureDesc*            InDepth;
+		CameraDataMVCorrection* CameraData;
 		float                   InMotionScale[2] = { 0.0f, 0.0f };
-		bool                    extractObjectOnlyMotion = false;
+		CorrectMVType           CorrectMVType = SwapCameraMotion;
+		float                   ObjectMotionScale = 1.0f;
 	};
 
 #define MAX_SHADING_RATES 9

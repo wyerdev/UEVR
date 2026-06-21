@@ -499,10 +499,6 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     }
 
     auto cmdList = vr->d3d12Renderer->BeginCommandList(backbuffer_index);
-    // if (is_using_afw && is_right_eye_frame) {
-    //     FLOAT red[4] = {1, 0, 0, 0};
-    //     vr->d3d12Renderer->Clear(cmdList, backbufferDesc[backbuffer_index], red);
-    // }
 
     if (is_using_afw && eyeFrameBuffer.color.pTexture && vr->depthDesc[nEye].pTexture) {
         static FrameBufferDesc s_CurrentEyeFrameBuffer{};
@@ -515,24 +511,16 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
             .back = 1};
 
         vr->d3d12Renderer->Crop(cmdList, eyeFrameBuffer.color, backbufferDesc[backbuffer_index], src_box);
-        FLOAT black[4] = {0, 0, 0, 0};
-        //if (vr->mDebug1) {
-        //    vr->d3d12Renderer->Clear(cmdList, vr->motionVectorsDesc[nEye], black);
-        //}
 
         s_CurrentEyeFrameBuffer.color = eyeFrameBuffer.color;
         s_CurrentEyeFrameBuffer.depth = vr->depthDesc[nEye];
         s_CurrentEyeFrameBuffer.motionVectors = vr->motionVectorsDesc[nEye];
-        //if (vr->mDebug2) {
-        //    vr->d3d12Renderer->Clear(cmdList, eyeFrameBuffer.depth, black);
-        //    s_CurrentEyeFrameBuffer.depth = eyeFrameBuffer.depth;
-        //}
 
         params.InCmdList = cmdList;
         params.InEyeFrameBuffer = &s_CurrentEyeFrameBuffer;
         params.InUIColorAlpha = NULL;
         params.IsHudlessColor = true;
-        params.MotionVectorsType = vr->is_fix_dlss() ? Normal : FromOtherEye;
+        params.MotionVectorsType = vr->is_ghosting_fix_enabled() ? Normal : FromOtherEye;
         params.InMotionScale[0] = vr->mvScale[0];
         params.InMotionScale[1] = vr->mvScale[1];
         params.Mode = (FrameWarpMode)vr->m_framewarp_mode->value();
@@ -553,8 +541,8 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         //}
         EvaluateFrameWarp(params);
 
-        D3D12_VIEWPORT vp{
-            .TopLeftX = 0, .TopLeftY = 0, .Width = (float)src_box.right, .Height = (float)src_box.bottom, .MinDepth = 0, .MaxDepth = 1};
+        //D3D12_VIEWPORT vp{
+        //    .TopLeftX = 0, .TopLeftY = 0, .Width = (float)src_box.right, .Height = (float)src_box.bottom, .MinDepth = 0, .MaxDepth = 1};
         // vr->d3d12Renderer->Blit(cmdList, backbufferDesc[backbuffer_index], otherEyeFrameBuffer.color, vp);
     }
 
@@ -590,19 +578,18 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
             }
 
             if (is_using_afw) {
-                m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_RIGHT_EYE, otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_RENDER_TARGET, &src_box);
-                //if (scene_depth_tex != nullptr) {
-                //    m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_DEPTH_RIGHT_EYE, otherEyeFrameBuffer.depth.pTexture,
-                //    ENGINE_SRC_DEPTH, nullptr);
-                //}
+                m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_RIGHT_EYE, otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, &src_box);
+                if (scene_depth_tex != nullptr) {
+                    m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_DEPTH_RIGHT_EYE, otherEyeFrameBuffer.depth.pTexture,
+                        D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, nullptr);
+                }
             }
         }
 
         // OpenVR texture
         // Copy the back buffer to the left eye texture
         if (runtime->is_openvr()) {
-            if (!is_using_afw)
-                m_openvr.copy_left(backbuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_openvr.copy_left(backbuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
 
             auto openvr = vr->get_runtime<runtimes::OpenVR>();
             const auto submit_pose = openvr->get_pose_for_submit();
@@ -626,12 +613,14 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                 return e;
             }
             if (is_using_afw) {
+                m_openvr.copy_left_to_right(otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+
                 vr::D3D12TextureData_t right{m_openvr.get_right().texture.Get(), command_queue, 0};
 
                 vr::VRTextureWithPose_t right_eye{(void*)&right, vr::TextureType_DirectX12, vr::ColorSpace_Auto, submit_pose};
                 const auto right_bounds = vr::VRTextureBounds_t{
                     runtime->view_bounds[1][0], runtime->view_bounds[1][2], runtime->view_bounds[1][1], runtime->view_bounds[1][3]};
-                e = vr::VRCompositor()->Submit(vr::Eye_Right, &right_eye, &right_bounds, vr::EVRSubmitFlags::Submit_TextureWithPose);
+                auto e = vr::VRCompositor()->Submit(vr::Eye_Right, &right_eye, &right_bounds, vr::EVRSubmitFlags::Submit_TextureWithPose);
                 runtime->frame_synced = false;
 
                 if (e != vr::VRCompositorError_None) {
@@ -640,6 +629,8 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                 } else {
                     vr->m_submitted = true;
                 }
+
+                ++m_openvr.texture_counter;
             }
         }
     } else {
@@ -711,7 +702,10 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                         .right = vr->is_extreme_compatibility_mode_enabled() ? m_backbuffer_size[0] : m_backbuffer_size[0] / 2,
                         .bottom = m_backbuffer_size[1],
                         .back = 1};
-                    m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_LEFT_EYE, otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_RENDER_TARGET, &src_box2);
+                    m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_LEFT_EYE, otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, &src_box2);
+                    if (scene_depth_tex != nullptr) {
+                        m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_DEPTH_LEFT_EYE, otherEyeFrameBuffer.depth.pTexture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, nullptr);
+                    }
                 }
             } else {
                 // Copy over the entire double wide instead
@@ -734,7 +728,9 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
             const auto submit_pose = openvr->get_pose_for_submit();
 
             if (!is_afr || is_using_afw) {
-                if (!is_using_afw)
+                if (is_using_afw)
+                    m_openvr.copy_left(otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+                else
                     m_openvr.copy_left(backbuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
 
                 vr::D3D12TextureData_t left {
@@ -756,17 +752,14 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                     //return e; // dont return because it will just completely stop us from even getting to the right eye which could be catastrophic
                 }
             }
-
-            if (!is_using_afw) {
-                if (!is_afr) {
-                    if (m_scene_capture_tex.texture.Get() == nullptr) {
-                        m_openvr.copy_right(backbuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-                    } else {
-                        m_openvr.copy_left_to_right(m_scene_capture_tex.texture.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-                    }
+            if (!is_afr) {
+                if (m_scene_capture_tex.texture.Get() == nullptr) {
+                    m_openvr.copy_right(backbuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
                 } else {
-                    m_openvr.copy_left_to_right(backbuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+                    m_openvr.copy_left_to_right(m_scene_capture_tex.texture.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
                 }
+            } else {
+                m_openvr.copy_left_to_right(backbuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
             }
 
             vr::D3D12TextureData_t right {
@@ -1385,14 +1378,10 @@ bool D3D12Component::setup() {
 
     if (vr->get_runtime()->is_openvr()) {
         for (auto& ctx : m_openvr.left_eye_tex) {
-            if (m_eyeFrameBuffers.eyeFrameBuffers[0].color.pTexture != NULL) {
-                ctx.texture = m_eyeFrameBuffers.eyeFrameBuffers[0].color.pTexture;
-            } else {
-                if (FAILED(device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &backbuffer_desc,
-                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&ctx.texture)))) {
-                    spdlog::error("[VR] Failed to create left eye texture.");
-                    return false;
-                }
+            if (FAILED(device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &backbuffer_desc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                    IID_PPV_ARGS(&ctx.texture)))) {
+                spdlog::error("[VR] Failed to create left eye texture.");
+                return false;
             }
 
             ctx.texture->SetName(L"OpenVR Left Eye Texture");
@@ -1403,14 +1392,10 @@ bool D3D12Component::setup() {
         }
 
         for (auto& ctx : m_openvr.right_eye_tex) {
-            if (m_eyeFrameBuffers.eyeFrameBuffers[1].color.pTexture != NULL) {
-                ctx.texture = m_eyeFrameBuffers.eyeFrameBuffers[1].color.pTexture;
-            } else {
-                if (FAILED(device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &backbuffer_desc,
-                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&ctx.texture)))) {
-                    spdlog::error("[VR] Failed to create right eye texture.");
-                    return false;
-                }
+            if (FAILED(device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &backbuffer_desc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                    IID_PPV_ARGS(&ctx.texture)))) {
+                spdlog::error("[VR] Failed to create right eye texture.");
+                return false;
             }
 
             ctx.texture->SetName(L"OpenVR Right Eye Texture");

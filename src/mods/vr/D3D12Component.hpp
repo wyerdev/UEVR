@@ -158,8 +158,8 @@ private:
             ctx.commands.execute();
         }
 
-        std::array<d3d12::TextureContext, 1> left_eye_tex{};
-        std::array<d3d12::TextureContext, 1> right_eye_tex{};
+        std::array<d3d12::TextureContext, 3> left_eye_tex{};
+        std::array<d3d12::TextureContext, 3> right_eye_tex{};
         d3d12::TextureContext ui_tex{};
         uint32_t texture_counter{0};
         D3D12Component* parent{};

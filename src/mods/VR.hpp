@@ -30,6 +30,7 @@
 class VR : public Mod {
 public:
     CameraData cameraData[2];
+    CameraDataMVCorrection cameraDataForMV[2];
     D3D12RendererAPI* d3d12Renderer = nullptr;
 
     ID3D12Resource* rawDepthTex = NULL;
@@ -65,7 +66,7 @@ public:
     int get_vr_frame_count() { return m_frame_count; };
     bool is_left_eye() { return m_frame_count % 2 == m_left_eye_interval; };
 
-    bool is_fix_dlss() { return m_fix_upscalers_wobbling->value(); };
+    bool is_fix_object_motion_vector() { return m_fix_object_motion_vector->value(); };
     bool is_enable_sharpening() { return m_enable_sharpening->value(); };
     float get_sharpness() { return m_sharpness->value(); };
 
@@ -959,10 +960,10 @@ private:
     const ModToggle::Ptr m_clear_before_framewarp{ModToggle::create(generate_name("ClearBeforeFramewarp"), false)};
     const ModToggle::Ptr m_enable_ui_fix{ModToggle::create(generate_name("EnableUIFix"), true)};
     const ModToggle::Ptr m_enable_sharpening{ModToggle::create(generate_name("EnableSharpening"), true)};
-    const ModToggle::Ptr m_fix_upscalers_wobbling{ModToggle::create(generate_name("UpscalersWobblingFix"), true)};
+    const ModToggle::Ptr m_fix_object_motion_vector{ModToggle::create(generate_name("FixObjectMotionVector"), true)};
     const ModSlider::Ptr m_sharpness{ModSlider::create(generate_name("Sharpness"), 0.0f, 1.0f, 0.6f)};
     const ModToggle::Ptr m_framewarp_debug{ModToggle::create(generate_name("FramewarpDebug"), false)};
-    const ModSlider::Ptr m_ignore_motion_threshold{ModSlider::create(generate_name("IgnoreMotionThreshold"), 1.0f, 100.0f, 2.5f)};
+    const ModSlider::Ptr m_ignore_motion_threshold{ModSlider::create(generate_name("IgnoreMotionThreshold"), 0.1f, 100.0f, 2.5f)};
     const ModCombo::Ptr m_framewarp_mode{ModCombo::create(generate_name("FramewarpMode"),
         {
             "None",
@@ -1170,7 +1171,7 @@ public:
             *m_framewarp_mode,
             *m_enable_sharpening,
             *m_sharpness,
-            *m_fix_upscalers_wobbling,
+            *m_fix_object_motion_vector,
         };
 
         add_components_vr();

@@ -67,11 +67,40 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &vr->mvScale[1]);
         vr->rawDepthTex = depth;
         vr->rawMotionVectorsTex = motionVectors;
-        EyeIndex nEye = (vr->get_render_frame_count() % 2 == 0) ? EyeLeft : EyeRight;
-        if (vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture) {
+        auto render_frame_count = vr->get_render_frame_count();
+        EyeIndex nEye = (render_frame_count % 2 == 0) ? EyeLeft : EyeRight;
+        static int lastPausedFrame = render_frame_count;
+        bool bufferValid = vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture;
+        if (!bufferValid)
+            lastPausedFrame = render_frame_count;
+        if ((render_frame_count - lastPausedFrame > 30) && bufferValid) {
             TextureDesc src;
             src.pTexture = depth;
             vr->d3d12Renderer->Copy(InCmdList, vr->depthDesc[nEye], src);
+            if (vr->is_ghosting_fix_enabled() && vr->is_fix_object_motion_vector()) {
+                static TextureDesc rawMVDesc[2];
+                if (vr->rawMotionVectorsTex) {
+                    auto desc = vr->rawMotionVectorsTex->GetDesc();
+                    if (rawMVDesc[nEye].pTexture != vr->rawMotionVectorsTex) {
+                        rawMVDesc[nEye].pTexture = vr->rawMotionVectorsTex;
+                        rawMVDesc[nEye].initialState = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+                        vr->d3d12Renderer->SetupTextureDesc(rawMVDesc[nEye]);
+                    }
+                }
+                if (rawMVDesc[nEye].pTexture) {
+                    vr->update_camera_data(render_frame_count);
+                    CorrectMotionVectorsParams mvParams;
+                    mvParams.InMotionVectors = &rawMVDesc[nEye];
+                    mvParams.InDepth = &vr->depthDesc[nEye];
+                    mvParams.CameraData = &vr->cameraDataForMV[nEye];
+                    mvParams.InMotionScale[0] = vr->mvScale[0];
+                    mvParams.InMotionScale[1] = vr->mvScale[1];
+                    mvParams.CorrectMVType = ScaleObjectMotion;
+                    mvParams.ObjectMotionScale = 2.0f;
+                    vr->d3d12Renderer->CorrectMotionVectors(InCmdList, vr->motionVectorsDesc[nEye], mvParams);
+                    vr->d3d12Renderer->Copy(InCmdList, rawMVDesc[nEye], vr->motionVectorsDesc[nEye]);
+                }
+            }
             src.pTexture = motionVectors;
             vr->d3d12Renderer->Copy(InCmdList, vr->motionVectorsDesc[nEye], src);
         }
@@ -418,8 +447,8 @@ std::optional<std::string> VR::initialize_openxr() {
                 }
 
                 const std::unordered_set<std::string> wanted_extensions {
-                    //XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME,
-                    //XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME
+                    XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME,
+                    XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME
                     // To be seen if we need more!
                 };
 
@@ -2232,7 +2261,6 @@ void VR::on_present() {
     if (GetAsyncKeyState(VK_NUMPAD2) == 0 && btn2 == true) {
         btn2 = false;
         mDebug2 = !mDebug2;
-        // m_disable_volumetric_fog->toggle();
     }
     static bool btn3 = false;
     if (GetAsyncKeyState(VK_NUMPAD3) < 0 && btn3 == false) {
@@ -2250,7 +2278,7 @@ void VR::on_present() {
     }
     if (GetAsyncKeyState(VK_NUMPAD4) == 0 && btn4 == true) {
         btn4 = false;
-        m_fix_upscalers_wobbling->toggle();
+        m_fix_object_motion_vector->toggle();
     }
 
     m_present_thread_id = GetCurrentThreadId();
@@ -2682,7 +2710,19 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
 
     if (selected_page == PAGE_UNREAL) {
         m_rendering_method->draw("Rendering Method");
-        m_synced_afr_method->draw("Synced Sequential Method");
+        if (is_using_synchronized_afr())
+            m_synced_afr_method->draw("Synced Sequential Method");
+
+        if (is_using_afw()) {
+            m_clear_before_framewarp->draw("Clear Before Framewarp");
+            m_framewarp_debug->draw("Debug Framewarp");
+            m_enable_ui_fix->draw("Enable Framewarp UI Fix");
+            m_fix_object_motion_vector->draw("Fix Object Motion Vector");
+            m_enable_sharpening->draw("Enable Sharpening");
+            m_sharpness->draw("Sharpness");
+            m_ignore_motion_threshold->draw("Ignore Motion Threshold");
+        }
+        ImGui::Separator();
 
         m_world_scale->draw("World Scale");
         m_depth_scale->draw("Depth Scale");
