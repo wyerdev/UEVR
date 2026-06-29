@@ -5,7 +5,8 @@
 #include <dxgi1_2.h>
 #include "../../submodules/glm/glm/glm.hpp"
 
-namespace pd {
+namespace pd
+{
 	struct DeviceParams
 	{
 		ID3D11Device*        d3d11Device = NULL;
@@ -17,8 +18,8 @@ namespace pd {
 
 	struct FrameWarpInitParams
 	{
-		int hmdWidth;
-		int hmdHeight;
+		int         hmdWidth;
+		int         hmdHeight;
 		DXGI_FORMAT eyeFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 		DXGI_FORMAT backbufferFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
 	};
@@ -53,15 +54,15 @@ namespace pd {
 	struct TextureDesc
 	{
 		TextureDesc() {};
-		ImageType                     type = Image;
-		ID3D12Resource*               pTexture = nullptr;
-		int                           srvPos = -1;
-		int                           uavPos = -1;
-		D3D12_GPU_DESCRIPTOR_HANDLE shaderResourceViewHandle {0};
-		D3D12_GPU_DESCRIPTOR_HANDLE unorderedAccessViewHandle {0};
+		ImageType                   type = Image;
+		ID3D12Resource*             pTexture = nullptr;
+		int                         srvPos = -1;
+		int                         uavPos = -1;
+		D3D12_GPU_DESCRIPTOR_HANDLE shaderResourceViewHandle{ 0 };
+		D3D12_GPU_DESCRIPTOR_HANDLE unorderedAccessViewHandle{ 0 };
 		union
 		{
-			D3D12_CPU_DESCRIPTOR_HANDLE renderTargetViewHandle {0};
+			D3D12_CPU_DESCRIPTOR_HANDLE renderTargetViewHandle{ 0 };
 			D3D12_CPU_DESCRIPTOR_HANDLE depthStencilViewHandle;
 		};
 		D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON;
@@ -102,15 +103,11 @@ namespace pd {
 		glm::mat4 camClipToViewMatrix;   // but it's usually harder to render UI to reprojected image yourself.
 	};
 
-	// dest -> current eye previous frame
 	// src -> current eye current frame (rendered)
 	// srcPrev -> other eye previous farme (rendered)
+	// dest -> current eye previous frame
 	struct CameraDataMVCorrection
 	{
-		glm::mat4 destWorldToViewMatrix;
-		glm::mat4 destViewToWorldMatrix;
-		glm::mat4 destViewToClipMatrix;
-		glm::mat4 destClipToViewMatrix;
 		glm::mat4 srcWorldToViewMatrix;
 		glm::mat4 srcViewToWorldMatrix;
 		glm::mat4 srcViewToClipMatrix;
@@ -119,6 +116,14 @@ namespace pd {
 		glm::mat4 srcViewToWorldMatrixPrev;
 		glm::mat4 srcViewToClipMatrixPrev;
 		glm::mat4 srcClipToViewMatrixPrev;
+		glm::mat4 destWorldToViewMatrix;
+		glm::mat4 destViewToWorldMatrix;
+		glm::mat4 destViewToClipMatrix;
+		glm::mat4 destClipToViewMatrix;
+		glm::mat4 destWorldToViewMatrixPrev;
+		glm::mat4 destViewToWorldMatrixPrev;
+		glm::mat4 destViewToClipMatrixPrev;
+		glm::mat4 destClipToViewMatrixPrev;
 	};
 
 	enum MVType
@@ -145,8 +150,9 @@ namespace pd {
 		bool             IsHudlessColor = true;          // specify whether InEyeColor is hudless or contaning UI, if the latter, will use UIColorAndAlpha to avoid reprojecting UI.
 		MVType           MotionVectorsType = Normal;
 		bool             Debug = false;
-		bool             isFoveated = false;
-		RECT             foveatedArea = {}; 
+		bool             IsFoveated = false;
+		RECT             FoveatedArea = {};
+		float            Reserved[12] = { 0, 0 };
 	};
 
 	struct TonemapParams
@@ -156,13 +162,13 @@ namespace pd {
 		float fUpperLimit;
 		float fConvertToLimit;
 	};
-	
 
 	enum CorrectMVType
 	{
 		SwapCameraMotion,
 		ExtractObjectMotion,
-		ScaleObjectMotion  
+		ScaleObjectMotion,
+		FixUEObjectMotion
 	};
 
 	struct CorrectMotionVectorsParams
@@ -173,6 +179,9 @@ namespace pd {
 		float                   InMotionScale[2] = { 0.0f, 0.0f };
 		CorrectMVType           CorrectMVType = SwapCameraMotion;
 		float                   ObjectMotionScale = 1.0f;
+		TextureDesc*            InUEVelocityPrev = nullptr;
+		TextureDesc*            InDepthPrev = nullptr;
+		float                   Reserved[8] = { 0, 0 };
 	};
 
 #define MAX_SHADING_RATES 9
@@ -256,6 +265,25 @@ namespace pd {
 		VRSFovRadius    foveationRadius;                  ///< The radius of the foveated regions, expected squared by the shader.
 	} VRSParams;
 
+	// Vector with 2 floats.
+	struct Float2
+	{
+		float x;
+		float y;
+
+		Float2() :
+			x(0.f), y(0.f)
+		{}
+
+		Float2(float scalar) :
+			x(scalar), y(scalar)
+		{}
+
+		Float2(float _x, float _y) :
+			x(_x), y(_y)
+		{}
+	};
+
 	struct FoveatedCompositeParams
 	{
 		float fFadeLeft = 0.05f;
@@ -267,9 +295,9 @@ namespace pd {
 
 	enum BlendType
 	{
-		NoBlend,        // No blend
+		NoBlend,           // No blend
 		OneMinusSrcAlpha,  // usual
-		PremulAlpha     // UI with premul-alpha
+		PremulAlpha        // UI with premul-alpha
 	};
 
 	struct __declspec(novtable) D3D12RendererAPI
@@ -292,7 +320,7 @@ namespace pd {
 		virtual bool                        CreateVertexBuffer(ID3D12GraphicsCommandList* cmdList, VextexBufferDesc& vextexDesc, uint32_t vertexCount, uint32_t vertexSize, float* pVertexData);
 		virtual bool                        CreateTexture(int nWidth, int nHeight, DXGI_FORMAT format, D3D12_RESOURCE_STATES initialState, TextureDesc& textureDesc, bool createUAV) = 0;
 		virtual bool                        CreateFrameBuffer(int nWidth, int nHeight, FrameBufferDesc& framebufferDesc, D3D12_RESOURCE_STATES initialState, bool createUAV) = 0;
-		virtual void                        Clear(ID3D12GraphicsCommandList* cmdList, TextureDesc& texDesc, const FLOAT ColorRGBA[4]) = 0;
+		virtual void                        Clear(ID3D12GraphicsCommandList* cmdList, TextureDesc& texDesc, const FLOAT ColorRGBA[4]) =0;
 		virtual void                        Blit(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc, D3D12_VIEWPORT viewPort = {}, BlendType enableBlend = NoBlend) = 0;
 		virtual void                        Copy(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc) = 0;
 		virtual void                        Sharpen(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc, float sharpness) = 0;

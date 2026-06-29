@@ -34,9 +34,9 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_CreateFeature(
     const auto& vr = VR::get();
     int flag;
     InParameters->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &flag);
-    spdlog::info("hk_NVSDK_NGX_D3D12_CreateFeature 0x{0:x}", (INT64)result);
-    if ((InFeatureID == NVSDK_NGX_Feature_SuperSampling || InFeatureID == NVSDK_NGX_Feature_RayReconstruction)) {
-        vr->vrDLSSHandleMap[*OutHandle] = InFeatureID;
+    spdlog::info("hk_NVSDK_NGX_D3D12_CreateFeature 0x{0:x} flag:0x{0:x}", (INT64)result, (INT64)flag);
+    if ((InFeatureID != NVSDK_NGX_Feature_SuperSampling && InFeatureID != NVSDK_NGX_Feature_RayReconstruction)) {
+        vr->vrNoneDLSSHandleMap[*OutHandle] = InFeatureID;
     }
     return result;
 }
@@ -46,29 +46,54 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX_Handle* InHandle) {
     auto result = NVSDK_NGX_D3D12_ReleaseFeature_Hook.call<NVSDK_NGX_Result>(InHandle);
     spdlog::info("hk_NVSDK_NGX_D3D12_ReleaseFeature 0x{0:x}", (INT64)result);
     const auto& vr = VR::get();
-    if (vr->vrDLSSHandleMap.contains(InHandle))
-        vr->vrDLSSHandleMap.erase(InHandle);
+    if (vr->vrNoneDLSSHandleMap.contains(InHandle))
+        vr->vrNoneDLSSHandleMap.erase(InHandle);
     return result;
 }
 
+static std::thread::id RHIThreadID = {};
 NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
     ID3D12GraphicsCommandList* InCmdList, const NVSDK_NGX_Handle* InFeatureHandle, NVSDK_NGX_Parameter* InParameters, void* InCallback) {
     const auto& vr = VR::get();
-    if (vr->vrDLSSHandleMap.contains((NVSDK_NGX_Handle*)InFeatureHandle)) {
+    if (vr->is_using_afw() && !vr->vrNoneDLSSHandleMap.contains((NVSDK_NGX_Handle*)InFeatureHandle)) {
         ID3D12Resource* color;
         ID3D12Resource* depth;
         ID3D12Resource* motionVectors;
         ID3D12Resource* output;
+        float mvScale[2] = {1.0, 1.0};
         InParameters->Get(NVSDK_NGX_Parameter_Color, &color);
         InParameters->Get(NVSDK_NGX_Parameter_Depth, &depth);
         InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, &motionVectors);
         InParameters->Get(NVSDK_NGX_Parameter_Output, &output);
-        InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_X, &vr->mvScale[0]);
-        InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &vr->mvScale[1]);
-        vr->rawDepthTex = depth;
-        vr->rawMotionVectorsTex = motionVectors;
+        InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mvScale[0]);
+        InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mvScale[1]);
+        InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &vr->jitterOffset[0]);
+        InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &vr->jitterOffset[1]);
+        if (vr->rawDepthTex != depth) {
+            SAFE_RELEASE(vr->rawDepthTex);
+            vr->rawDepthTex = depth;
+            vr->rawDepthTex->AddRef();
+        }
+        if (vr->rawMotionVectorsTex != motionVectors) {
+            SAFE_RELEASE(vr->rawMotionVectorsTex);
+            vr->rawMotionVectorsTex = motionVectors;
+            vr->rawMotionVectorsTex->AddRef();
+        }
+        if (output && motionVectors) {
+            auto mvDesc = motionVectors->GetDesc();
+            auto outputDesc = output->GetDesc();
+            vr->mvScale[0] = mvScale[0] * (outputDesc.Width / mvDesc.Width);
+            vr->mvScale[1] = mvScale[0] * (outputDesc.Height/ mvDesc.Height);
+        }
+        if (depth) {
+            auto depthDesc = depth->GetDesc();
+            vr->renderSize[0] = depthDesc.Width;
+            vr->renderSize[1] = depthDesc.Height;
+        }
+        RHIThreadID = std::this_thread::get_id();
         auto render_frame_count = vr->get_render_frame_count();
         EyeIndex nEye = (render_frame_count % 2 == 0) ? EyeLeft : EyeRight;
+        EyeIndex nEyeOther = (render_frame_count % 2 == 0) ? EyeRight : EyeLeft;
         static int lastPausedFrame = render_frame_count;
         bool bufferValid = vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture;
         if (!bufferValid)
@@ -76,37 +101,109 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         if ((render_frame_count - lastPausedFrame > 30) && bufferValid) {
             TextureDesc src;
             src.pTexture = depth;
+            src.initialState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             vr->d3d12Renderer->Copy(InCmdList, vr->depthDesc[nEye], src);
-            if (vr->is_ghosting_fix_enabled() && vr->is_fix_object_motion_vector()) {
-                static TextureDesc rawMVDesc[2];
-                if (vr->rawMotionVectorsTex) {
-                    auto desc = vr->rawMotionVectorsTex->GetDesc();
-                    if (rawMVDesc[nEye].pTexture != vr->rawMotionVectorsTex) {
-                        rawMVDesc[nEye].pTexture = vr->rawMotionVectorsTex;
-                        rawMVDesc[nEye].initialState = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
-                        vr->d3d12Renderer->SetupTextureDesc(rawMVDesc[nEye]);
-                    }
-                }
-                if (rawMVDesc[nEye].pTexture) {
+            if (motionVectors && vr->rawMVDesc[nEye].pTexture != motionVectors) {
+                vr->rawMVDesc[nEye].pTexture = motionVectors;
+                vr->rawMVDesc[nEye].initialState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                vr->d3d12Renderer->SetupTextureDesc(vr->rawMVDesc[nEye]);
+            }
+            if (vr->is_ghosting_fix_enabled() && vr->is_fix_object_motion_vector() && 
+                vr->rawVelocityDesc[nEye].pTexture && vr->rawVelocityDesc[nEyeOther].pTexture) {
+                if (vr->rawMVDesc[nEye].pTexture && vr->motionVectorsDesc[nEye].pTexture) {
                     vr->update_camera_data(render_frame_count);
+                    auto inMVDesc = vr->rawVelocityDesc[nEye].pTexture->GetDesc();
+                    auto outMVDesc = vr->rawMVDesc[nEye].pTexture->GetDesc();
                     CorrectMotionVectorsParams mvParams;
-                    mvParams.InMotionVectors = &rawMVDesc[nEye];
+                    mvParams.InMotionVectors = &vr->rawVelocityDesc[nEye];
                     mvParams.InDepth = &vr->depthDesc[nEye];
                     mvParams.CameraData = &vr->cameraDataForMV[nEye];
-                    mvParams.InMotionScale[0] = vr->mvScale[0];
-                    mvParams.InMotionScale[1] = vr->mvScale[1];
-                    mvParams.CorrectMVType = ScaleObjectMotion;
+                    mvParams.InMotionScale[0] = mvScale[0];
+                    mvParams.InMotionScale[1] = mvScale[1];
+                    mvParams.CorrectMVType = FixUEObjectMotion;
                     mvParams.ObjectMotionScale = 2.0f;
-                    vr->d3d12Renderer->CorrectMotionVectors(InCmdList, vr->motionVectorsDesc[nEye], mvParams);
-                    vr->d3d12Renderer->Copy(InCmdList, rawMVDesc[nEye], vr->motionVectorsDesc[nEye]);
+                    mvParams.InUEVelocityPrev = &vr->rawVelocityDesc[nEyeOther];
+                    mvParams.InDepthPrev = &vr->depthDesc[nEyeOther];
+                    vr->d3d12Renderer->CorrectMotionVectors(InCmdList, vr->rawMVDesc[nEye], mvParams);
+                    vr->d3d12Renderer->Copy(InCmdList, vr->motionVectorsDesc[nEye], vr->rawMVDesc[nEye]);
                 }
+            } else {
+                src.pTexture = motionVectors;
+                src.initialState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                vr->d3d12Renderer->Copy(InCmdList, vr->motionVectorsDesc[nEye], src);
             }
-            src.pTexture = motionVectors;
-            vr->d3d12Renderer->Copy(InCmdList, vr->motionVectorsDesc[nEye], src);
         }
     }
+    if (!InFeatureHandle)
+        return NVSDK_NGX_Result_Success;
     auto result = NVSDK_NGX_D3D12_EvaluateFeature_Hook.call<NVSDK_NGX_Result>(InCmdList, InFeatureHandle, InParameters, InCallback);
     return result;
+}
+
+decltype(&ID3D12GraphicsCommandList::ResourceBarrier) ptrResourceBarrier; // 26
+void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandList* This, UINT NumBarriers, const D3D12_RESOURCE_BARRIER* pBarriers) {
+    (This->*ptrResourceBarrier)(NumBarriers, pBarriers);
+    const auto& vr = VR::get();
+
+    // Only track barriers submitted in RHISubmissionThread
+    // Unless RHI.UseSubmissionThread is 0
+    auto threadID = std::this_thread::get_id();
+    bool isRHIThread = RHIThreadID == threadID;
+    static bool skip = false;
+    if (!vr->is_using_afw() || !vr->is_fix_object_motion_vector() || skip)
+        return;
+    static int lastRHIThreadFoundFrame = 0;
+    static int lastRHISubmissionThreadFoundFrame = 0;
+
+    ID3D12Resource* velocityCandidate = nullptr;
+    bool hasDLSSMV = false;
+    auto render_frame_count = vr->get_render_frame_count();
+    EyeIndex nEye = (render_frame_count % 2 == 0) ? EyeLeft : EyeRight;
+    for (int i = 0; i < NumBarriers; i++) {
+        auto& barrier = pBarriers[i];
+        if (barrier.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !barrier.Transition.pResource || 
+            vr->rawVelocityDesc[nEye].pTexture == barrier.Transition.pResource ||
+            barrier.Transition.StateBefore != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE ||
+            barrier.Transition.StateAfter != D3D12_RESOURCE_STATE_RENDER_TARGET)
+            continue;
+        auto desc = barrier.Transition.pResource->GetDesc();
+        if (desc.Format == DXGI_FORMAT_R16G16B16A16_UNORM &&
+            (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) {
+            if ((desc.Width == vr->renderSize[0] || vr->renderSize[0] == 0) &&
+                (desc.Height == vr->renderSize[1] || vr->renderSize[1] == 0)) {
+                velocityCandidate = barrier.Transition.pResource;
+            }
+        }
+    }
+    if (velocityCandidate) {
+        if (isRHIThread)
+            lastRHIThreadFoundFrame = render_frame_count;
+        else
+            lastRHISubmissionThreadFoundFrame = render_frame_count;
+
+        bool isRHIThreadFoundRecently = render_frame_count - lastRHIThreadFoundFrame <= 100;
+        bool isRHISubmissionThreadFoundRecently = render_frame_count - lastRHISubmissionThreadFoundFrame <= 100;
+        bool RHIThreadPass = isRHIThread && !isRHISubmissionThreadFoundRecently;
+        bool RHISubmissionThreadPass = !isRHIThread;
+        if (RHIThreadPass || RHISubmissionThreadPass) {
+            auto desc = velocityCandidate->GetDesc();
+            if (vr->rawVelocityDesc[nEye].pTexture == NULL || vr->rawVelocityDesc[nEye].pTexture->GetDesc().Width != desc.Width ||
+                vr->rawVelocityDesc[nEye].pTexture->GetDesc().Height != desc.Height) {
+                vr->d3d12Renderer->CreateTexture(
+                    desc.Width, desc.Height, desc.Format, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, vr->rawVelocityDesc[nEye], true);
+            }
+            static std::map<ID3D12Resource*, TextureDesc> rawVelocityDescMap;
+            if (!rawVelocityDescMap.contains(velocityCandidate)) {
+                rawVelocityDescMap[velocityCandidate].pTexture = velocityCandidate;
+                rawVelocityDescMap[velocityCandidate].initialState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                vr->d3d12Renderer->SetupTextureDesc(rawVelocityDescMap[velocityCandidate]);
+                // velocityCandidate->SetName(L"VelocityBuffer");
+            }
+            skip = true;
+            vr->d3d12Renderer->Copy(This, vr->rawVelocityDesc[nEye], rawVelocityDescMap[velocityCandidate]);
+            skip = false;
+        }
+    }
 }
 
 uintptr_t hookVtable(void* target, int index, void* detours) {
@@ -187,6 +284,10 @@ std::optional<std::string> VR::clean_initialize() try {
     params.d3d12Device = hook->get_device();
     params.d3d12Queue = hook->get_command_queue();
     d3d12Renderer = InitDevice(params);
+
+    auto cmdList = d3d12Renderer->BeginCommandList(0);
+    *(uintptr_t*)&ptrResourceBarrier = hookVtable(cmdList, 26, hk_ID3D12GraphicsCommandList_ResourceBarrier);
+    d3d12Renderer->EndCommandList(0);
 
     auto dllNGX = GetModuleHandle("_nvngx.dll");
     if (!dllNGX)
@@ -446,9 +547,9 @@ std::optional<std::string> VR::initialize_openxr() {
                     spdlog::info("[VR] Found OpenXR extension: {}", extension_property.extensionName);
                 }
 
-                const std::unordered_set<std::string> wanted_extensions {
-                    XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME,
-                    XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME
+                const std::unordered_set<std::string> wanted_extensions{
+                    // XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME,
+                    // XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME
                     // To be seen if we need more!
                 };
 
@@ -2206,12 +2307,7 @@ void VR::on_frame() {
 
 glm::mat4 to_reverseZ(const glm::mat4& proj) {
 
-	glm::mat4 transformMat = glm::mat4(
-		1, 0, 0, 0,
-		0, 1, 0, 0,
-		0, 0, -1,0,
-		0, 0, 1, 1
-	);
+    glm::mat4 transformMat = glm::mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 1, 1);
 
     return transformMat * proj;
 }
@@ -2225,6 +2321,22 @@ void VR::update_camera_data(int frame_count) {
 
         EyeIndex nEye = (m_render_frame_count % 2 == m_left_eye_interval) ? EyeLeft : EyeRight;
         EyeIndex nEyeOther = (m_render_frame_count % 2 == m_left_eye_interval) ? EyeRight : EyeLeft;
+
+        cameraDataForMV[nEye].srcWorldToViewMatrixPrev = cameraData[nEye].srcWorldToViewMatrix;
+        cameraDataForMV[nEye].srcViewToWorldMatrixPrev = cameraData[nEye].srcViewToWorldMatrix;
+        cameraDataForMV[nEye].srcViewToClipMatrixPrev = cameraData[nEye].srcViewToClipMatrix;
+        cameraDataForMV[nEye].srcClipToViewMatrixPrev = cameraData[nEye].srcClipToViewMatrix;
+
+        cameraDataForMV[nEye].destWorldToViewMatrix = cameraData[nEyeOther].srcWorldToViewMatrix;
+        cameraDataForMV[nEye].destViewToWorldMatrix = cameraData[nEyeOther].srcViewToWorldMatrix;
+        cameraDataForMV[nEye].destViewToClipMatrix = cameraData[nEyeOther].srcViewToClipMatrix;
+        cameraDataForMV[nEye].destClipToViewMatrix = cameraData[nEyeOther].srcClipToViewMatrix;
+
+        cameraDataForMV[nEyeOther].destWorldToViewMatrixPrev = cameraData[nEye].srcWorldToViewMatrix;
+        cameraDataForMV[nEyeOther].destViewToWorldMatrixPrev = cameraData[nEye].srcViewToWorldMatrix;
+        cameraDataForMV[nEyeOther].destViewToClipMatrixPrev = cameraData[nEye].srcViewToClipMatrix;
+        cameraDataForMV[nEyeOther].destClipToViewMatrixPrev = cameraData[nEye].srcClipToViewMatrix;
+
         auto offset = last_update_matrix_frame_count[nEye] - last_update_camera_data_frame_count;
         offset = std::clamp(offset, 0, 2) / 2;
         cameraData[nEye].camWorldToViewMatrix = glm::mat4(); // not used
@@ -2234,12 +2346,21 @@ void VR::update_camera_data(int frame_count) {
         cameraData[nEye].destViewToWorldMatrix = glm::inverse(cameraData[nEye].destWorldToViewMatrix);
         cameraData[nEye].srcViewToWorldMatrix = glm::inverse(cameraData[nEye].srcWorldToViewMatrix);
 
+        //float x = jitterOffset[0] / get_hmd_width();
+        //float y = jitterOffset[1] / get_hmd_height();
+        //render_projection_matrix[nEye].curr[2][0] += x;
+        //render_projection_matrix[nEye].curr[2][1] += y;
         cameraData[nEye].destViewToClipMatrix = to_reverseZ(render_projection_matrix[nEye].other);
         cameraData[nEye].srcViewToClipMatrix = to_reverseZ(render_projection_matrix[nEye].curr);
         cameraData[nEye].destClipToViewMatrix = glm::inverse(cameraData[nEye].destViewToClipMatrix);
         cameraData[nEye].srcClipToViewMatrix = glm::inverse(cameraData[nEye].srcViewToClipMatrix);
         cameraData[nEye].camViewToClipMatrix = glm::mat4(); // not used
         cameraData[nEye].camClipToViewMatrix = glm::mat4(); // not used
+
+        cameraDataForMV[nEye].srcWorldToViewMatrix = cameraData[nEye].srcWorldToViewMatrix;
+        cameraDataForMV[nEye].srcViewToWorldMatrix = cameraData[nEye].srcViewToWorldMatrix;
+        cameraDataForMV[nEye].srcViewToClipMatrix = cameraData[nEye].srcViewToClipMatrix;
+        cameraDataForMV[nEye].srcClipToViewMatrix = cameraData[nEye].srcClipToViewMatrix;
     }
 }
 

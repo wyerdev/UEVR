@@ -4658,8 +4658,6 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
     const auto has_double_precision = g_hook->m_has_double_precision;
     const auto rot_d = (Rotator<double>*)view_rotation;
 
-    auto view_location_other = has_double_precision ? Vector3f() : *view_location;
-
     if (vr->is_using_afr() && !is_full_pass) {
         true_index = g_frame_count % 2;
 
@@ -4723,7 +4721,6 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
     }
 
     const auto view_d = (Vector3d*)view_location;
-    auto view_d_other = has_double_precision ? *view_d : Vector3d();
 
     // world to view
     const auto view_mat = !has_double_precision ? 
@@ -4783,60 +4780,50 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         *view_d += camera_forward;
         *view_d += camera_right;
         *view_d += camera_up;
-        view_d_other += camera_forward;
-        view_d_other += camera_right;
-        view_d_other += camera_up;
     } else {
         *view_location += camera_forward;
         *view_location += camera_right;
         *view_location += camera_up;
-        view_location_other += camera_forward;
-        view_location_other += camera_right;
-        view_location_other += camera_up;
     }
+
+    const auto is_2d_screen = vr->is_using_2d_screen();
+
+    const auto rotation_offset = vr->get_rotation_offset();
+    const auto current_hmd_rotation = glm::normalize(rotation_offset * glm::quat{vr->get_rotation(0)});
+    const auto current_eye_rotation_offset = glm::normalize(glm::quat{vr->get_eye_transform(true_index)});
+
+    const auto new_rotation = glm::normalize(vqi_norm * current_hmd_rotation * current_eye_rotation_offset);
+    const auto eye_offset = glm::vec3{vr->get_eye_offset((VRRuntime::Eye)(true_index))};
+    const auto eye_offset_other = glm::vec3{vr->get_eye_offset((VRRuntime::Eye)((true_index + 1) % 2))};
+
+    const auto standing_delta = vr->get_position(0) - vr->get_standing_origin();
+    const auto standing_delta_flat = glm::vec3{standing_delta.x, 0, standing_delta.z};
+
+    const auto pos = glm::vec3{rotation_offset * standing_delta};
+    const auto pos_flat = glm::vec3{rotation_offset * standing_delta_flat};
+
+    const auto head_offset = quat_converter * (vqi_norm * (pos * world_scale));
+    const auto head_offset_flat = quat_converter * (vqi_norm * (pos_flat * world_scale));
+    const auto eye_separation = quat_converter * (glm::normalize(new_rotation) * (eye_offset * world_scale));
+    const auto eye_separation_other = quat_converter * (glm::normalize(new_rotation) * (eye_offset_other * world_scale));
 
     // Don't apply any headset transformations
     // if we have stereo emulation mode enabled
     // it is only for debugging purposes
     if (!vr->is_stereo_emulation_enabled()) {
-        const auto is_2d_screen = vr->is_using_2d_screen();
-
-        const auto rotation_offset = vr->get_rotation_offset();
-        const auto current_hmd_rotation = glm::normalize(rotation_offset * glm::quat{vr->get_rotation(0)});
-        const auto current_eye_rotation_offset = glm::normalize(glm::quat{vr->get_eye_transform(true_index)});
-
-        const auto new_rotation = glm::normalize(vqi_norm * current_hmd_rotation * current_eye_rotation_offset);
-        const auto eye_offset = glm::vec3{vr->get_eye_offset((VRRuntime::Eye)(true_index))};
-        const auto eye_offset_other = glm::vec3{vr->get_eye_offset((VRRuntime::Eye)((true_index + 1) % 2))};
-
-
-        const auto standing_delta = vr->get_position(0) - vr->get_standing_origin();
-        const auto standing_delta_flat = glm::vec3{standing_delta.x, 0, standing_delta.z};
-
-        const auto pos = glm::vec3{rotation_offset * standing_delta};
-        const auto pos_flat = glm::vec3{rotation_offset * standing_delta_flat};
-
-        const auto head_offset = quat_converter * (vqi_norm * (pos * world_scale));
-        const auto head_offset_flat = quat_converter * (vqi_norm * (pos_flat * world_scale));
-        const auto eye_separation = quat_converter * (glm::normalize(new_rotation) * (eye_offset * world_scale));
-        const auto eye_separation_other = quat_converter * (glm::normalize(new_rotation) * (eye_offset_other * world_scale));
 
         if (!has_double_precision) {
             if (!is_2d_screen) {
                 *view_location -= head_offset;
-                view_location_other -= head_offset;
             }
 
             *view_location -= eye_separation;
-            view_location_other -= eye_separation_other;
         } else {
             if (!is_2d_screen) {
                 *view_d -= head_offset;
-                view_d_other -= head_offset;
             }
 
             *view_d -= eye_separation;
-            view_d_other -= eye_separation_other;
         }
 
         if (!is_2d_screen) {
@@ -4909,7 +4896,39 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
 
         // Process snapturn    
         vr->process_snapturn();
-        
+    }
+
+    if (!is_full_pass) {
+        for (auto& mod : mods) {
+            mod->on_post_calculate_stereo_view_offset(stereo, view_index, view_rotation, world_to_meters, view_location, g_hook->m_has_double_precision);
+        }
+
+        if (true_index == 0 || vr->is_using_afw()) {
+            if (has_double_precision) {
+                g_hook->m_last_rotation_double = *rot_d;
+            } else {
+                g_hook->m_last_rotation = *view_rotation;
+            }
+        }
+
+        // Modify Player Control Rotation
+        if ((true_index == 1 || vr->is_using_afw()) && vr->is_aim_modify_player_control_rotation_enabled() && vr->is_any_aim_method_active()) {
+            if (g_hook->m_tracking_system_hook != nullptr) {
+                g_hook->m_tracking_system_hook->manual_update_control_rotation();
+            }
+        }
+
+        auto view_location_other = has_double_precision ? Vector3f() : *view_location;
+        auto view_d_other = has_double_precision ? *view_d : Vector3d();
+
+        if (has_double_precision) {
+            view_d_other += eye_separation;
+            view_d_other -= eye_separation_other;
+        } else {
+            view_location_other += eye_separation;
+            view_location_other -= eye_separation_other;
+        }
+
         const auto world_to_view = !has_double_precision ? 
             glm::yawPitchRoll(
                 glm::radians(view_rotation->yaw),
@@ -4928,7 +4947,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
                 glm::radians(-(float)rot_d->yaw),
                 glm::radians((float)rot_d->pitch),
                 glm::radians(-(float)rot_d->roll));
-        // Æ¬¶Î£ºÔÚ calculate_stereo_view_offset ·½·¨Ä©Î²µ÷ÓÃ»ò²åÈëÒÔ»ñÈ¡×îÖÕ view ¾ØÕó
+        // ç‰‡æ®µï¼šåœ¨ calculate_stereo_view_offset æ–¹æ³•æœ«å°¾è°ƒç”¨æˆ–æ’å…¥ä»¥èŽ·å–æœ€ç»ˆ view çŸ©é˜µ
         if (!has_double_precision) {
             glm::vec3 cam_pos = (*view_location) / vr->get_world_to_meters();
             glm::vec3 cam_pos_other = view_location_other / vr->get_world_to_meters();
@@ -4953,27 +4972,6 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
             vr->render_view_matrix[true_index][0].curr = glm::inverse(view_matrix);
             vr->render_view_matrix[true_index][0].other = glm::inverse(view_matrix_other);
             vr->last_update_matrix_frame_count[true_index] = g_frame_count;
-        }
-    }
-
-    if (!is_full_pass) {
-        for (auto& mod : mods) {
-            mod->on_post_calculate_stereo_view_offset(stereo, view_index, view_rotation, world_to_meters, view_location, g_hook->m_has_double_precision);
-        }
-
-        if (true_index == 0 || vr->is_using_afw()) {
-            if (has_double_precision) {
-                g_hook->m_last_rotation_double = *rot_d;
-            } else {
-                g_hook->m_last_rotation = *view_rotation;
-            }
-        }
-
-        // Modify Player Control Rotation
-        if ((true_index == 1|| vr->is_using_afw()) && vr->is_aim_modify_player_control_rotation_enabled() && vr->is_any_aim_method_active()) {
-            if (g_hook->m_tracking_system_hook != nullptr) {
-                g_hook->m_tracking_system_hook->manual_update_control_rotation();
-            }
         }
     }
 

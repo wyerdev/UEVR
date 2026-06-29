@@ -1,10 +1,14 @@
 #pragma once
 #include <safetyhook.hpp>
 
+// COM-like Release macro
+#ifndef SAFE_RELEASE
+	#define SAFE_RELEASE(a) if (a) { a->Release(); a = NULL; }
+#endif
+
 #define NVSDK_NGX_Result_Success 0x1
 typedef int NVSDK_NGX_Result;
 typedef enum NVSDK_NGX_Feature {
-    NVSDK_NGX_Feature_None = 0,
     NVSDK_NGX_Feature_SuperSampling = 1,
     NVSDK_NGX_Feature_RayReconstruction = 13,
 } NVSDK_NGX_Feature;
@@ -60,6 +64,10 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCommandList* I
 #define NVSDK_NGX_Parameter_Output "Output"
 #define NVSDK_NGX_Parameter_MV_Scale_X "MV.Scale.X"
 #define NVSDK_NGX_Parameter_MV_Scale_Y "MV.Scale.Y"
+#define NVSDK_NGX_Parameter_Jitter_Offset_X "Jitter.Offset.X"
+#define NVSDK_NGX_Parameter_Jitter_Offset_Y "Jitter.Offset.Y"
+#define NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width "DLSS.Render.Subrect.Dimensions.Width"
+#define NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height "DLSS.Render.Subrect.Dimensions.Height"
 
 
 
