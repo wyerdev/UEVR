@@ -5139,17 +5139,27 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
 
         if (!g_hook->m_has_double_precision) {
             *out = VR::get()->get_projection_matrix((VRRuntime::Eye)(true_index));
-            if (true_index >= 0 && true_index <= 1) {
-                vr->render_projection_matrix[true_index].curr = VR::get()->get_runtime()->afw_projections[true_index];
-                vr->render_projection_matrix[true_index].other = VR::get()->get_runtime()->afw_projections[(true_index + 1) % 2];
-            }
         } else {
             const auto fmat = VR::get()->get_projection_matrix((VRRuntime::Eye)(true_index));
             double_matrix = fmat;
-            if (true_index >= 0 && true_index <= 1) {
-                vr->render_projection_matrix[true_index].curr = VR::get()->get_runtime()->afw_projections[true_index];
-                vr->render_projection_matrix[true_index].other = VR::get()->get_runtime()->afw_projections[(true_index + 1) % 2];
-            }
+        }
+        if (true_index >= 0 && true_index <= 1) {
+            // vr->render_projection_matrix[true_index].curr = VR::get()->get_runtime()->afw_projections[true_index];
+            // vr->render_projection_matrix[true_index].other = VR::get()->get_runtime()->afw_projections[(true_index + 1) % 2];
+            auto other_index = (true_index + 1) % 2;
+            auto world_to_meters = vr->get_world_to_meters();
+            vr->render_projection_matrix[true_index].curr = vr->get_projection_matrix((VRRuntime::Eye)(true_index));
+            vr->render_projection_matrix[true_index].curr[2][0] *= -1.0f;
+            vr->render_projection_matrix[true_index].curr[2][1] *= -1.0f;
+            vr->render_projection_matrix[true_index].curr[2][2] = -1.0f;
+            vr->render_projection_matrix[true_index].curr[2][3] = -1.0f;
+            vr->render_projection_matrix[true_index].curr[3][2] *= -1.0f / world_to_meters;
+            vr->render_projection_matrix[true_index].other = vr->get_projection_matrix((VRRuntime::Eye)(other_index));
+            vr->render_projection_matrix[true_index].other[2][0] *= -1.0f;
+            vr->render_projection_matrix[true_index].other[2][1] *= -1.0f;
+            vr->render_projection_matrix[true_index].other[2][2] = -1.0f;
+            vr->render_projection_matrix[true_index].other[2][3] = -1.0f;
+            vr->render_projection_matrix[true_index].other[3][2] *= -1.0f / world_to_meters;
         }
     } else {
         SPDLOG_ERROR("CalculateStereoProjectionMatrix returned nullptr!");
