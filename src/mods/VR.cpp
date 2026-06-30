@@ -2855,6 +2855,7 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 m_clear_before_framewarp->draw("Clear Before Framewarp");
                 m_framewarp_debug->draw("Debug Framewarp");
                 m_fix_object_motion_vector->draw("Fix Object Motion Vector");
+                m_fix_object_motion_range->draw("Fix Object Motion Rnage");
                 //m_enable_sharpening->draw("Enable Sharpening");
                 //m_sharpness->draw("Sharpness");
                 m_ignore_motion_threshold->draw("Ignore Motion Threshold");
