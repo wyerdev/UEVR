@@ -81,8 +81,8 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         if (output && motionVectors) {
             auto mvDesc = motionVectors->GetDesc();
             auto outputDesc = output->GetDesc();
-            vr->mvScale[0] = mvScale[0] * (outputDesc.Width / mvDesc.Width);
-            vr->mvScale[1] = mvScale[0] * (outputDesc.Height/ mvDesc.Height);
+            vr->mvScale[0] = mvScale[0] * outputDesc.Width / mvDesc.Width;
+            vr->mvScale[1] = mvScale[0] * outputDesc.Height / mvDesc.Height;
         }
         if (depth) {
             auto depthDesc = depth->GetDesc();
@@ -166,15 +166,14 @@ void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandLi
         if (barrier.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !barrier.Transition.pResource || 
             vr->rawVelocityDesc[nEye].pTexture == barrier.Transition.pResource)
             continue;
+        auto desc = barrier.Transition.pResource->GetDesc();
+        if (desc.Format != DXGI_FORMAT_R16G16B16A16_UNORM)
+            continue;
         if ((barrier.Transition.StateBefore & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE ||
             barrier.Transition.StateAfter != D3D12_RESOURCE_STATE_RENDER_TARGET)
             continue;
-        auto desc = barrier.Transition.pResource->GetDesc();
-        if (desc.Format == DXGI_FORMAT_R16G16B16A16_UNORM) {
-            if ((desc.Width == vr->renderSize[0] || vr->renderSize[0] == 0) &&
-                (desc.Height == vr->renderSize[1] || vr->renderSize[1] == 0)) {
-                velocityCandidate = barrier.Transition.pResource;
-            }
+        if ((desc.Width == vr->renderSize[0] || vr->renderSize[0] == 0) && (desc.Height == vr->renderSize[1] || vr->renderSize[1] == 0)) {
+            velocityCandidate = barrier.Transition.pResource;
         }
     }
     if (velocityCandidate) {
@@ -2849,15 +2848,20 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 m_framewarp_mode->draw("Framewarp Mode");
                 m_clear_before_framewarp->draw("Clear Before Framewarp");
                 m_framewarp_debug->draw("Debug Framewarp");
+                ImGui::Spacing();
                 m_fix_object_motion_vector->draw("Fix Object Motion Vector");
                 m_fix_object_motion_range->draw("Fix Object Motion Rnage");
-                //m_enable_sharpening->draw("Enable Sharpening");
-                //m_sharpness->draw("Sharpness");
+                if (!rawVelocityDesc[0].pTexture) {
+                    ImGui::TextWrapped("No UE Velocity Buffer found, can't use the object motion vector fix.");
+                }
+                ImGui::Spacing();
                 m_ignore_motion_threshold->draw("Ignore Motion Threshold");
                 ImGui::TreePop();
             }
         }
+        ImGui::Spacing();
         ImGui::Separator();
+        ImGui::Spacing();
 
         m_world_scale->draw("World Scale");
         m_depth_scale->draw("Depth Scale");
