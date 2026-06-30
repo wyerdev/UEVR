@@ -2524,8 +2524,6 @@ void VR::on_present() {
     }
     if (GetAsyncKeyState(VK_ADD) == 0 && btnAdd == true) {
         btnAdd = false;
-        auto& sharpness = m_sharpness->value();
-        sharpness += 0.05f;
     }
     static bool btnSub = false;
     if (GetAsyncKeyState(VK_SUBTRACT) < 0 && btnSub == false) {
@@ -2533,8 +2531,6 @@ void VR::on_present() {
     }
     if (GetAsyncKeyState(VK_SUBTRACT) == 0 && btnSub == true) {
         btnSub = false;
-        auto& sharpness = m_sharpness->value();
-        sharpness -= 0.05f;
     }
     static bool btnMul = false;
     if (GetAsyncKeyState(VK_MULTIPLY) < 0 && btnMul == false) {
@@ -2542,7 +2538,6 @@ void VR::on_present() {
     }
     if (GetAsyncKeyState(VK_MULTIPLY) == 0 && btnMul == true) {
         btnMul = false;
-        m_enable_sharpening->toggle();
     }
 
     update_camera_data(m_render_frame_count);
