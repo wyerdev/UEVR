@@ -2355,8 +2355,13 @@ void VR::update_camera_data(int frame_count) {
         //float y = jitterOffset[1] / get_hmd_height();
         //render_projection_matrix[nEye].curr[2][0] += x;
         //render_projection_matrix[nEye].curr[2][1] += y;
-        cameraData[nEye].destViewToClipMatrix = to_reverseZ(render_projection_matrix[nEye].other);
-        cameraData[nEye].srcViewToClipMatrix = to_reverseZ(render_projection_matrix[nEye].curr);
+        if (mDebug1) {
+            cameraData[nEye].destViewToClipMatrix = (render_projection_matrix[nEye].other);
+            cameraData[nEye].srcViewToClipMatrix = (render_projection_matrix[nEye].curr);
+        } else {
+            cameraData[nEye].destViewToClipMatrix = to_reverseZ(render_projection_matrix[nEye].other);
+            cameraData[nEye].srcViewToClipMatrix = to_reverseZ(render_projection_matrix[nEye].curr);
+        }
         cameraData[nEye].destClipToViewMatrix = glm::inverse(cameraData[nEye].destViewToClipMatrix);
         cameraData[nEye].srcClipToViewMatrix = glm::inverse(cameraData[nEye].srcViewToClipMatrix);
         cameraData[nEye].camViewToClipMatrix = glm::mat4(); // not used

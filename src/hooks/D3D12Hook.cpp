@@ -10,6 +10,8 @@
 #include "WindowFilter.hpp"
 #include "Framework.hpp"
 
+#include "render/RenderDocCaptureService.hpp"
+
 #include "D3D12Hook.hpp"
 
 static D3D12Hook* g_d3d12_hook = nullptr;
@@ -534,13 +536,50 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
     return result;
 }
 
+namespace {
+// Publish the active {ID3D12Device*, HWND} pair to the shared RenderDoc capture
+// service so StartFrameCapture can target the exact device/window instead of a
+// wildcard. Capture-critical for embedded RenderDoc; cheap and harmless when
+// RenderDoc isn't loaded (the env gate + is_api_loaded short-circuit it).
+// Gated behind UEVR_RENDERDOC_BOOTSTRAP / UEVR_RENDERDOC_TRACK_ACTIVE_PAIR.
+bool renderdoc_active_pair_tracking_enabled() {
+    static const bool enabled =
+        uevr::renderdoc_capture::env_truthy_w(L"UEVR_RENDERDOC_BOOTSTRAP") ||
+        uevr::renderdoc_capture::env_truthy_w(L"UEVR_RENDERDOC_TRACK_ACTIVE_PAIR");
+    return enabled;
+}
+
+void renderdoc_update_active_pair_on_present(IDXGISwapChain3* swap_chain) {
+    if (!renderdoc_active_pair_tracking_enabled() || !uevr::renderdoc_capture::is_api_loaded()) {
+        return;
+    }
+
+    uevr::renderdoc_capture::CapturePair pair{};
+    pair.device = (g_d3d12_hook != nullptr) ? static_cast<void*>(g_d3d12_hook->get_device()) : nullptr;
+    if (swap_chain != nullptr) {
+        DXGI_SWAP_CHAIN_DESC sc_desc{};
+        if (SUCCEEDED(swap_chain->GetDesc(&sc_desc))) {
+            pair.window = static_cast<void*>(sc_desc.OutputWindow);
+        }
+    }
+
+    if (pair.device != nullptr || pair.window != nullptr) {
+        uevr::renderdoc_capture::set_active_window(pair);
+    }
+}
+} // namespace
+
 HRESULT WINAPI D3D12Hook::present(IDXGISwapChain3* swap_chain, UINT sync_interval, UINT flags) {
+    renderdoc_update_active_pair_on_present(swap_chain);
+
     std::scoped_lock _{g_framework->get_hook_monitor_mutex()};
-    
+
     return D3D12Hook::present_internal(swap_chain, sync_interval, flags, nullptr, false);
 }
 
 HRESULT WINAPI D3D12Hook::present1(IDXGISwapChain3* swap_chain, UINT sync_interval, UINT flags, DXGI_PRESENT_PARAMETERS* params) {
+    renderdoc_update_active_pair_on_present(swap_chain);
+
     std::scoped_lock _{g_framework->get_hook_monitor_mutex()};
 
     return D3D12Hook::present_internal(swap_chain, sync_interval, flags, params, true);

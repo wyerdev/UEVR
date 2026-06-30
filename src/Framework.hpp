@@ -336,6 +336,11 @@ private:
     // Game-specific stuff
     std::unique_ptr<Mods> m_mods;
 
+    // Dumper mode: flag that one-time mod/plugin init has completed (we run
+    // it manually from hook_monitor because no D3D Present fires to trigger
+    // it). See DumperMode.hpp.
+    bool m_dumper_mods_initialized{false};
+
     std::recursive_mutex m_hook_monitor_mutex{};
     std::recursive_mutex m_constructor_mutex{};
     std::unique_ptr<std::jthread> m_d3d_monitor_thread{};

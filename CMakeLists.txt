@@ -59,7 +59,18 @@ endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+# UESDK is a PRIVATE submodule (praydog's SDK) so it can't be forked publicly to
+# carry the embedded-RenderDoc crash fix. Apply it to the builder's own checkout
+# before UESDK is added/compiled. Idempotent; warns (never fails) on drift.
+include(cmake/ApplyUESDKPatch.cmake)
+
 add_subdirectory(dependencies/submodules/UESDK)
+
+# Embedded RenderDoc capture: defines uevr_attach_full_renderdoc(), which copies
+# (or, if UEVR_RENDERDOC_ALWAYS_BUILD=ON, rebuilds) renderdoc.dll beside the
+# backend and builds the suspended launcher + smoke validator. Non-fatal if the
+# RenderDoc source/runtime isn't present.
+include(cmake/RenderDocFull.cmake)
 
 include(FetchContent)
 
@@ -72,12 +83,12 @@ FetchContent_Declare(bddisasm
 )
 FetchContent_MakeAvailable(bddisasm)
 
-message(STATUS "Fetching kananlib (49fdf2d3b1db350e370beacb607d5721bc2911ad)...")
+message(STATUS "Fetching kananlib (7a99a94cea3dbcbd46b54885bd3d04f1d242e21a)...")
 FetchContent_Declare(kananlib
 	GIT_REPOSITORY
 		"https://github.com/cursey/kananlib"
 	GIT_TAG
-		49fdf2d3b1db350e370beacb607d5721bc2911ad
+		7a99a94cea3dbcbd46b54885bd3d04f1d242e21a
 )
 FetchContent_MakeAvailable(kananlib)
 
@@ -792,10 +803,14 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/d3d12/TextureContext.cpp"
 	"src/mods/vr/runtimes/OpenVR.cpp"
 	"src/mods/vr/runtimes/OpenXR.cpp"
+	"src/render/RenderDocCaptureControl.cpp"
+	"src/render/RenderDocCaptureService.cpp"
+	"src/render/RenderDocDxgiProofHooks.cpp"
 	"src/uevr-imgui/imgui_impl_dx11.cpp"
 	"src/uevr-imgui/imgui_impl_dx12.cpp"
 	"src/uevr-imgui/imgui_impl_win32.cpp"
 	"src/utility/ImGui.cpp"
+	"src/DumperMode.hpp"
 	"src/ExceptionHandler.hpp"
 	"src/Framework.hpp"
 	"src/LicenseStrings.hpp"
@@ -839,6 +854,9 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/runtimes/VRRuntime.hpp"
 	"src/mods/vr/shaders/ps.hpp"
 	"src/mods/vr/shaders/vs.hpp"
+	"src/render/RenderDocCaptureControl.hpp"
+	"src/render/RenderDocCaptureService.hpp"
+	"src/render/RenderDocDxgiProofHooks.hpp"
 	"src/uevr-imgui/font_robotomedium.hpp"
 	"src/uevr-imgui/uevr_imconfig.hpp"
 	"src/utility/ImGui.hpp"
@@ -876,6 +894,7 @@ target_include_directories(uevr PUBLIC
 	"src/"
 	"include/"
 	"${OPENXR_SOURCE_DIR}/src"
+	"dependencies/vendor/renderdoc"
 )
 
 target_link_libraries(uevr PUBLIC
@@ -936,6 +955,10 @@ add_custom_command(
 add_custom_command(
     TARGET uevr POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:openvr> $<TARGET_FILE_DIR:uevr>)
+
+# Build the RenderDoc launcher + smoke tools and stage renderdoc.dll beside
+# UEVRBackend.dll. No-op if RenderDoc isn't available on this machine.
+uevr_attach_full_renderdoc(uevr)
 
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)

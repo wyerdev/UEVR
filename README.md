@@ -1,4 +1,52 @@
-# UEVR ![build](https://github.com/praydog/UEVR/actions/workflows/dev-release.yml/badge.svg)
+# UEVR + 🎬 Embedded RenderDoc Capture
+
+> **This is a fork of [praydog's UEVR](https://github.com/praydog/UEVR) that adds an embedded
+> [RenderDoc](https://renderdoc.org/) capture system.** You can grab a real GPU frame
+> (flat *or* stereo VR) from almost any Unreal Engine game and open it in RenderDoc —
+> no game source, no headset required.
+>
+> ### 👉 **New here? Read the [RenderDoc Capture Guide](RENDERDOC_CAPTURE_GUIDE.md) — it walks you through everything step by step.**
+>
+> **Just want to capture?** Download the [latest release](../../releases/latest), unzip, and run:
+> ```powershell
+> .\UEVRRenderDocLauncher.exe --exe "C:\Path\To\YourGame-Win64-Shipping.exe" --wait
+> .\Capture-RenderDoc.ps1
+> ```
+>
+> Deeper design notes live in [docs/RENDERDOC_EMBEDDED_PORT.md](docs/RENDERDOC_EMBEDDED_PORT.md).
+> All UEVR credit goes to **praydog**; this fork only adds the capture plumbing + docs.
+
+---
+
+## 🔨 Building from source (two reproducibility notes)
+
+If you build `UEVRBackend.dll` yourself instead of using the release, two pieces
+are required so your build behaves like the shipped one:
+
+1. **The UESDK crash-fix is applied for you at configure time.** The `UESDK`
+   submodule stays on upstream **`praydog/UESDK`** (praydog's gated SDK — you
+   need access to build at all, same as upstream UEVR). Because that repo is
+   private and can't be forked publicly, the CMake configure step instead applies
+   [`patches/UESDK-StereoStuff-renderdoc.patch`](patches/UESDK-StereoStuff-renderdoc.patch)
+   to your own checkout (see
+   [`cmake/ApplyUESDKPatch.cmake`](cmake/ApplyUESDKPatch.cmake)) — idempotent,
+   warns-not-fails on drift — so a normal recursive clone + build just works.
+   Without this fix, injecting under embedded RenderDoc **crashes** during stereo
+   setup (the `GetNativeResource` vtable probe rejects the RenderDoc-wrapped
+   resource).
+
+2. **Use the bundled `renderdoc.dll` — not a stock RenderDoc install.** The
+   shipped DLL is a **custom RenderDoc fork**
+   ([`elliotttate/renderdoc`](https://github.com/elliotttate/renderdoc)) with a
+   D3D12 driver fix: at the tier-3 descriptor-heap max it reserves RenderDoc's
+   patch descriptors *from within* the heap instead of writing past its end.
+   Stock RenderDoc lacks this, so large UE5 titles can corrupt the heap and the
+   **swapchain backbuffer freezes**. The custom DLL is shipped prebuilt in every
+   release; rebuild it from the fork only if you want to.
+
+---
+
+![build](https://github.com/praydog/UEVR/actions/workflows/dev-release.yml/badge.svg)
 
 Universal Unreal Engine VR Mod (4/5)
 
@@ -33,9 +81,35 @@ Universal Unreal Engine VR Mod (4/5)
 
 ## Getting Started
 
-Before launching, ensure you have installed .NET 6.0 SDK. It should tell you where to install it upon first open, but if not, you can [download it from here](https://dotnet.microsoft.com/en-us/download/dotnet/6.0). Most people should click x64 in the top left table, under the Installers column, next to windows.
+There are two ways to use this build. Pick the one that matches what you want.
 
-Download the latest release from the [Releases page](https://github.com/praydog/UEVR/releases)
+### A) Capture a GPU frame (this fork's reason to exist)
+
+Use the bundled **`UEVRRenderDocLauncher.exe`** — it injects `renderdoc.dll` and
+`UEVRBackend.dll` for you, so there is **no `UEVRInjector.exe` and no .NET
+required**. Full walkthrough in the
+[RenderDoc Capture Guide](RENDERDOC_CAPTURE_GUIDE.md):
+
+**Easiest:** drag your game's real exe onto **`Launch-Capture.bat`** (or edit the
+`GAME_EXE` line in it and double-click), then run `Capture-RenderDoc.ps1`.
+
+Or from PowerShell:
+
+```powershell
+.\UEVRRenderDocLauncher.exe --exe "C:\Path\To\YourGame-Win64-Shipping.exe" --wait
+.\Capture-RenderDoc.ps1
+```
+
+> Download the [latest release of **this** fork](../../releases/latest) (not
+> praydog's) — it contains the launcher, backend, RenderDoc runtime, VR loaders,
+> and capture scripts. The release does **not** include `UEVRInjector.exe`.
+
+### B) Standard VR injection (upstream UEVR)
+
+For plain VR without capture, use praydog's upstream injector. Install the
+.NET 6.0 SDK ([download](https://dotnet.microsoft.com/en-us/download/dotnet/6.0) —
+x64 under Installers), grab the latest release from the
+[praydog/UEVR Releases page](https://github.com/praydog/UEVR/releases), then:
 
 1. Launch UEVRInjector.exe
 2. Launch the target game

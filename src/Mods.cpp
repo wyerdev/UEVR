@@ -1,6 +1,7 @@
 #include <spdlog/spdlog.h>
 
 #include "Framework.hpp"
+#include "DumperMode.hpp"
 
 #include "mods/FrameworkConfig.hpp"
 #include "mods/VR.hpp"
@@ -11,9 +12,19 @@
 
 Mods::Mods() {
     m_mods.emplace_back(FrameworkConfig::get());
-    m_mods.emplace_back(VR::get());
-    m_mods.emplace_back(UObjectHook::get());
 
+    // Dumper mode: skip the VR mod entirely. Its on_pre_engine_tick dispatches
+    // to CVarManager, RenderTargetPoolHook, overlay drawing, etc — none of
+    // which are needed for reflection dumping, and some of which touch
+    // graphics state we never set up. Keep UObjectHook (reflection) and
+    // PluginLoader (our plugin DLL) + FrameworkConfig (harmless I/O).
+    // LuaLoader stays too — it's safe and some plugin ecosystems rely on it.
+    // See DumperMode.hpp.
+    if (!uevr::is_dumper_mode()) {
+        m_mods.emplace_back(VR::get());
+    }
+
+    m_mods.emplace_back(UObjectHook::get());
     m_mods.emplace_back(PluginLoader::get());
     m_mods.emplace_back(LuaLoader::get());
 }

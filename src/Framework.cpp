@@ -30,7 +30,10 @@
 #include "ExceptionHandler.hpp"
 #include "LicenseStrings.hpp"
 #include "mods/FrameworkConfig.hpp"
+#include "DumperMode.hpp"
 #include "Framework.hpp"
+#include "render/RenderDocCaptureService.hpp"
+#include "render/RenderDocCaptureControl.hpp"
 
 namespace fs = std::filesystem;
 using namespace std::literals;
@@ -69,6 +72,64 @@ void Framework::hook_monitor() {
     std::scoped_lock _{ m_hook_monitor_mutex };
 
     if (g_framework == nullptr) {
+        return;
+    }
+
+    // Dumper mode: we never rely on D3D hooks for rendering, so skip the
+    // rehook-if-not-presenting monitor. On fragile games this loop was
+    // causing "Last chance encountered for hooking" death spirals during
+    // reflection dumps.
+    //
+    // Normal UEVR bootstraps plugins in two phases:
+    //   1. Framework ctor calls PluginLoader::early_init → LoadLibrary each DLL
+    //   2. On first D3D Present, Framework::on_frame_d3d11/12 calls
+    //      Mods::on_initialize_d3d_thread → PluginLoader queries device/
+    //      swapchain, calls uevr_plugin_required_version + uevr_plugin_initialize
+    //   3. Stereo hook's on_frame installs UGameEngine::Tick hook
+    //   4. Engine tick hook fans out on_pre_engine_tick to all mods + plugins
+    //
+    // In dumper mode there's no Present → phases 2-4 never fire without
+    // intervention. We drive them from here instead: first mods::on_initialize
+    // + on_initialize_d3d_thread (which now skips the D3D device queries),
+    // then the stereo-hook's on_frame to install the tick hook.
+    // See DumperMode.hpp.
+    if (uevr::is_dumper_mode()) {
+        m_last_present_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+
+        // One-shot phase-2: mods + plugin init. Equivalent of what the first
+        // D3D Present would trigger. Must also set m_game_data_initialized
+        // so the engine_tick_hook fans out on_pre_engine_tick to mods —
+        // otherwise the hook runs but returns before dispatching.
+        if (!m_dumper_mods_initialized) {
+            try {
+                if (m_mods == nullptr) m_mods = std::make_unique<Mods>();
+                (void)m_mods->on_initialize();
+                (void)m_mods->on_initialize_d3d_thread();
+                // m_game_data_initialized is the gate on engine_tick_hook
+                // fanning out to mods. Don't set m_initialized — that gates
+                // imgui rendering which requires D3D in dumper mode.
+                m_game_data_initialized = true;
+                m_mods_fully_initialized = true;
+                m_dumper_mods_initialized = true;
+                spdlog::info("[DumperMode] Mods + plugins initialized.");
+            } catch (...) {
+                spdlog::error("[DumperMode] Exception during mods init; will retry.");
+            }
+        }
+
+        // Recurring phase-3: keep calling stereo_hook->on_frame until the
+        // engine tick hook installs. Once installed, engine_tick_hook fans
+        // out on_pre_engine_tick to all mods including PluginLoader.
+        if (m_vr != nullptr) {
+            auto& stereo_hook = m_vr->get_fake_stereo_hook();
+            if (stereo_hook != nullptr) {
+                try {
+                    stereo_hook->on_frame();
+                } catch (...) {
+                    spdlog::warn("[DumperMode] stereo_hook->on_frame() threw (tick-hook install retry)");
+                }
+            }
+        }
         return;
     }
 
@@ -209,6 +270,46 @@ Framework::Framework(HMODULE framework_module)
     spdlog::info("Game Module Addr: {:x}", (uintptr_t)m_game_module);
     spdlog::info("Game Module Size: {:x}", module_size);
 
+    // RenderDoc integration. The startup thread (Main.cpp) already performs the
+    // earliest optional bootstrap before Framework construction when launched
+    // through the suspended RenderDoc launcher. This second pass runs after
+    // logging is configured: it reports status and starts the file-trigger
+    // capture watcher (%TEMP%/uevr_renderdoc_capture.req).
+    //
+    // Gated behind UEVR_RENDERDOC_BOOTSTRAP=1 (default OFF). An unconditional
+    // bootstrap would load renderdoc.dll into every injected process, which can
+    // perturb other graphics tooling and UEVR's own D3D12 hook install timing.
+    {
+        const bool rd_bootstrap_enabled = []() {
+            char v[8]{};
+            return GetEnvironmentVariableA("UEVR_RENDERDOC_BOOTSTRAP", v, sizeof(v)) > 0
+                   && v[0] != '\0' && v[0] != '0';
+        }();
+        if (rd_bootstrap_enabled) {
+            auto rd_result = uevr_renderdoc_bootstrap();
+            if (rd_result.api_loaded) {
+                spdlog::info("[RenderDoc] integration READY: v{}.{}.{} (preloaded={} loaded_by_uevr={} capture_safe={} d3d12_loaded_before={} dxgi_loaded_before={})",
+                             rd_result.api_version_major, rd_result.api_version_minor,
+                             rd_result.api_version_patch, rd_result.was_preloaded,
+                             rd_result.late_loaded, rd_result.capture_safe,
+                             rd_result.d3d12_was_loaded, rd_result.dxgi_was_loaded);
+                uevr::renderdoc_capture::refresh_hooks();
+                uevr_renderdoc_start_capture_watcher();
+                if (!rd_result.capture_safe) {
+                    spdlog::warn("[RenderDoc] capture_safe=DEGRADED: RenderDoc was initialized after "
+                                 "graphics modules were already present. Status/UI queries work, but "
+                                 "live captures may be incomplete. For full embedded capture, load "
+                                 "UEVR/RenderDoc before the game creates D3D12/DXGI objects (use "
+                                 "UEVRRenderDocLauncher.exe).");
+                }
+            } else {
+                spdlog::warn("[RenderDoc] UEVR_RENDERDOC_BOOTSTRAP=1 but the RenderDoc API failed to "
+                             "load. Set UEVR_LOAD_RENDERDOC_DLL=1 to late-load renderdoc.dll, or "
+                             "launch via UEVRRenderDocLauncher.exe.");
+            }
+        }
+    }
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
@@ -274,6 +375,33 @@ Framework::Framework(HMODULE framework_module)
     m_last_chance_time = std::chrono::steady_clock::time_point{}; // Instantly send the first message
     m_has_last_chance = false;
 
+    // Optional early D3D12 prehook for the suspended RenderDoc launcher path.
+    // The launcher injects renderdoc.dll first, then UEVRBackend.dll, and waits
+    // on a ready event before resuming the game's main thread. Installing the
+    // D3D12 hook stack here (before resume) closes the fast-start race where the
+    // game could reach D3D12CreateDevice before UEVR's hook monitor runs.
+    // Gated behind UEVR_RENDERDOC_PREHOOK_D3D12=1 (only set by the launcher);
+    // normal injection leaves UEVR's lazy hook_monitor behaviour unchanged.
+    {
+        char prehook[8]{};
+        const bool prehook_d3d12 =
+            GetEnvironmentVariableA("UEVR_RENDERDOC_PREHOOK_D3D12", prehook, sizeof(prehook)) > 0
+            && prehook[0] != '\0' && prehook[0] != '0';
+        if (prehook_d3d12) {
+            spdlog::info("[RenderDoc] prehooking D3D12 before launcher resumes the game main thread");
+            if (hook_d3d12()) {
+                m_last_present_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                m_last_message_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                m_last_chance_time = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                m_has_last_chance = true;
+                spdlog::info("[RenderDoc] early D3D12 prehook installed");
+            } else {
+                spdlog::warn("[RenderDoc] early D3D12 prehook failed; the launcher will still wait for "
+                             "UEVR startup, but first-device proof may fail");
+            }
+        }
+    }
+
     m_uevr_shared_memory = std::make_unique<UEVRSharedMemory>();
     m_command_thread = std::make_unique<std::jthread>([this](std::stop_token s) {
         spdlog::info("Command thread entry");
@@ -315,6 +443,11 @@ Framework::Framework(HMODULE framework_module)
 }
 
 bool Framework::hook_d3d11() {
+    // Dumper mode: never hook D3D. See DumperMode.hpp.
+    if (uevr::is_dumper_mode()) {
+        spdlog::info("[DumperMode] Skipping D3D11 hook installation.");
+        return false;
+    }
     //if (m_d3d11_hook == nullptr) {
         m_d3d11_hook.reset();
         m_d3d11_hook = std::make_unique<D3D11Hook>();
@@ -347,6 +480,12 @@ bool Framework::hook_d3d11() {
 }
 
 bool Framework::hook_d3d12() {
+    // Dumper mode: never hook D3D. See DumperMode.hpp.
+    if (uevr::is_dumper_mode()) {
+        spdlog::info("[DumperMode] Skipping D3D12 hook installation.");
+        return false;
+    }
+
     // windows 7?
     if (LoadLibraryA("d3d12.dll") == nullptr) {
         spdlog::info("d3d12.dll not found, user is probably running Windows 7.");
