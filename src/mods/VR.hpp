@@ -53,7 +53,7 @@ public:
     bool mDebug3 = false;
     int mDebug5 = 0;
 
-    std::map<NVSDK_NGX_Handle*, NVSDK_NGX_Feature> vrDLSSHandleMap;
+    std::map<NVSDK_NGX_Handle*, NVSDK_NGX_Feature> vrNoneDLSSHandleMap;
 
     struct MatrixPair {
         Matrix4x4f curr;
@@ -468,9 +468,8 @@ public:
                (m_extreme_compat_mode->value() && m_rendering_method->value() == RenderingMethod::NATIVE_STEREO);
     }
 
-    bool is_using_afw() const {
-        return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP;
-    }
+    bool is_using_afw() const { return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP; }
+
 
     SynchronizeStage get_synchronize_stage() {
         return (SynchronizeStage) m_sync_mode->value();
@@ -959,10 +958,8 @@ private:
     const ModCombo::Ptr m_vertical_projection_override{ModCombo::create(generate_name("VerticalProjectionOverride"), s_vertical_projection_override_names)};
     const ModToggle::Ptr m_grow_rectangle_for_projection_cropping{ModToggle::create(generate_name("GrowRectangleForProjectionCropping"), false)};
     const ModCombo::Ptr m_sync_mode{ ModCombo::create(generate_name("SynchronizationMode"), s_sync_mode_names, 2) };
-
-    
+        
     const ModToggle::Ptr m_clear_before_framewarp{ModToggle::create(generate_name("ClearBeforeFramewarp"), false)};
-    const ModToggle::Ptr m_enable_ui_fix{ModToggle::create(generate_name("EnableUIFix"), true)};
     const ModToggle::Ptr m_enable_sharpening{ModToggle::create(generate_name("EnableSharpening"), true)};
     const ModToggle::Ptr m_fix_object_motion_vector{ModToggle::create(generate_name("FixObjectMotionVector"), true)};
     const ModSlider::Ptr m_sharpness{ModSlider::create(generate_name("Sharpness"), 0.0f, 1.0f, 0.6f)};
@@ -1171,7 +1168,6 @@ public:
             *m_lerp_camera_roll,
             *m_lerp_camera_speed,
             *m_sync_mode,
-            *m_enable_ui_fix,
             *m_framewarp_mode,
             *m_enable_sharpening,
             *m_sharpness,

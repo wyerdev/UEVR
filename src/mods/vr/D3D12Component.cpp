@@ -527,21 +527,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         params.CameraData = &vr->cameraData[nEye];
         params.IgnoreMotionThreshold = vr->m_ignore_motion_threshold->value();
         params.Debug = vr->m_framewarp_debug->value();
-
-        if (vr->m_enable_ui_fix->value() && vr->uiBufferDesc.pTexture) {
-            params.InUIColorAlpha = &vr->uiBufferDesc;
-            params.IsHudlessColor = false;
-        }
-        // Sharpening
-        // if (vr->is_enable_sharpening() && vr->get_sharpness() > 0) {
-        //    vr->d3d12Renderer->Sharpen(cmdList, eyeFrameBuffer.color, s_CurrentEyeFrameBuffer.color, vr->get_sharpness());
-        //    s_CurrentEyeFrameBuffer.color = eyeFrameBuffer.color;
-        //}
         EvaluateFrameWarp(params);
-
-        //D3D12_VIEWPORT vp{
-        //    .TopLeftX = 0, .TopLeftY = 0, .Width = (float)src_box.right, .Height = (float)src_box.bottom, .MinDepth = 0, .MaxDepth = 1};
-        // vr->d3d12Renderer->Blit(cmdList, backbufferDesc[backbuffer_index], otherEyeFrameBuffer.color, vp);
     }
 
     if (vr->mDebug3 && vr->rawVelocityDesc[nEye].pTexture) {

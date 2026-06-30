@@ -24,7 +24,6 @@
 #include "utility/Logging.hpp"
 
 #include "VR.hpp"
-
 #include <safetyhook.hpp>
 
 NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_CreateFeature(
@@ -98,6 +97,8 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         bool bufferValid = vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture;
         if (!bufferValid)
             lastPausedFrame = render_frame_count;
+        if (lastPausedFrame > render_frame_count)
+            lastPausedFrame = render_frame_count;
         if ((render_frame_count - lastPausedFrame > 30) && bufferValid) {
             TextureDesc src;
             src.pTexture = depth;
@@ -162,13 +163,13 @@ void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandLi
     for (int i = 0; i < NumBarriers; i++) {
         auto& barrier = pBarriers[i];
         if (barrier.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !barrier.Transition.pResource || 
-            vr->rawVelocityDesc[nEye].pTexture == barrier.Transition.pResource ||
-            barrier.Transition.StateBefore != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE ||
+            vr->rawVelocityDesc[nEye].pTexture == barrier.Transition.pResource)
+            continue;
+        if ((barrier.Transition.StateBefore & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE ||
             barrier.Transition.StateAfter != D3D12_RESOURCE_STATE_RENDER_TARGET)
             continue;
         auto desc = barrier.Transition.pResource->GetDesc();
-        if (desc.Format == DXGI_FORMAT_R16G16B16A16_UNORM &&
-            (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) {
+        if (desc.Format == DXGI_FORMAT_R16G16B16A16_UNORM) {
             if ((desc.Width == vr->renderSize[0] || vr->renderSize[0] == 0) &&
                 (desc.Height == vr->renderSize[1] || vr->renderSize[1] == 0)) {
                 velocityCandidate = barrier.Transition.pResource;
@@ -2307,7 +2308,11 @@ void VR::on_frame() {
 
 glm::mat4 to_reverseZ(const glm::mat4& proj) {
 
-    glm::mat4 transformMat = glm::mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 1, 1);
+    glm::mat4 transformMat = glm::mat4(
+        1, 0, 0, 0, 
+        0, 1, 0, 0, 
+        0, 0, -1, 0, 
+        0, 0, 1, 1);
 
     return transformMat * proj;
 }
@@ -2511,7 +2516,6 @@ void VR::on_present() {
     }
     if (GetAsyncKeyState(VK_NUMPAD9) == 0 && btn9 == true) {
         btn9 = false;
-        m_enable_ui_fix->toggle();
     }
     static bool btnAdd = false;
     if (GetAsyncKeyState(VK_ADD) < 0 && btnAdd == false) {
@@ -2831,17 +2835,30 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
 
     if (selected_page == PAGE_UNREAL) {
         m_rendering_method->draw("Rendering Method");
-        if (is_using_synchronized_afr())
-            m_synced_afr_method->draw("Synced Sequential Method");
+
+        if (is_using_synchronized_afr()) {
+            ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);
+            if (ImGui::TreeNode("Synced Sequential")) {
+                m_synced_afr_method->draw("Synced Sequential Method");
+                ImGui::TreePop();
+            }
+        }
 
         if (is_using_afw()) {
-            m_clear_before_framewarp->draw("Clear Before Framewarp");
-            m_framewarp_debug->draw("Debug Framewarp");
-            m_enable_ui_fix->draw("Enable Framewarp UI Fix");
-            m_fix_object_motion_vector->draw("Fix Object Motion Vector");
-            m_enable_sharpening->draw("Enable Sharpening");
-            m_sharpness->draw("Sharpness");
-            m_ignore_motion_threshold->draw("Ignore Motion Threshold");
+            // Alternate Frame Warping controls. These were previously only reachable via the numpad
+            // (NUMPAD5 = mode, NUMPAD6 = debug, NUMPAD7 = clear), which is unusable on keyboards without a
+            // numpad. Surface them in the menu so the PDAFW debug overlay can actually be toggled.
+            ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);
+            if (ImGui::TreeNode("Alternate Frame Warping")) {
+                m_framewarp_mode->draw("Framewarp Mode");
+                m_clear_before_framewarp->draw("Clear Before Framewarp");
+                m_framewarp_debug->draw("Debug Framewarp");
+                m_fix_object_motion_vector->draw("Fix Object Motion Vector");
+                //m_enable_sharpening->draw("Enable Sharpening");
+                //m_sharpness->draw("Sharpness");
+                m_ignore_motion_threshold->draw("Ignore Motion Threshold");
+                ImGui::TreePop();
+            }
         }
         ImGui::Separator();
 
