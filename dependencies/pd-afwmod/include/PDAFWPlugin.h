@@ -181,6 +181,7 @@ namespace pd
 		float                   ObjectMotionScale = 1.0f;
 		TextureDesc*            InUEVelocityPrev = nullptr;
 		TextureDesc*            InDepthPrev = nullptr;
+		float                   FixUEObjMotionRange = 3.0f;  // applying the object motion fix for object within certain range, or it will break the far away trees and such, for first person view this is prefered to be set to 0.5f
 		float                   Reserved[8] = { 0, 0 };
 	};
 

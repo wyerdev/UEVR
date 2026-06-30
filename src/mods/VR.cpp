@@ -123,6 +123,7 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
                     mvParams.InMotionScale[1] = mvScale[1];
                     mvParams.CorrectMVType = FixUEObjectMotion;
                     mvParams.ObjectMotionScale = 2.0f;
+                    mvParams.FixUEObjMotionRange = vr->get_fix_object_motion_range();
                     mvParams.InUEVelocityPrev = &vr->rawVelocityDesc[nEyeOther];
                     mvParams.InDepthPrev = &vr->depthDesc[nEyeOther];
                     vr->d3d12Renderer->CorrectMotionVectors(InCmdList, vr->rawMVDesc[nEye], mvParams);

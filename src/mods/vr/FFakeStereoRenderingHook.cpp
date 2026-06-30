@@ -5144,8 +5144,6 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
             double_matrix = fmat;
         }
         if (true_index >= 0 && true_index <= 1) {
-            // vr->render_projection_matrix[true_index].curr = VR::get()->get_runtime()->afw_projections[true_index];
-            // vr->render_projection_matrix[true_index].other = VR::get()->get_runtime()->afw_projections[(true_index + 1) % 2];
             auto other_index = (true_index + 1) % 2;
             auto world_to_meters = vr->get_world_to_meters();
             vr->render_projection_matrix[true_index].curr = vr->get_projection_matrix((VRRuntime::Eye)(true_index));
