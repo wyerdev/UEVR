@@ -30,6 +30,7 @@
 #include "ExceptionHandler.hpp"
 #include "LicenseStrings.hpp"
 #include "mods/FrameworkConfig.hpp"
+#include "render/D3D12Diagnostics.hpp"
 #include "DumperMode.hpp"
 #include "Framework.hpp"
 #include "render/RenderDocCaptureService.hpp"
@@ -39,6 +40,140 @@ namespace fs = std::filesystem;
 using namespace std::literals;
 
 std::unique_ptr<Framework> g_framework{};
+
+namespace {
+constexpr auto D3D12_INIT_RETRY_INITIAL_BACKOFF = 50ms;
+constexpr auto D3D12_INIT_RETRY_MAX_BACKOFF = 250ms;
+
+bool is_imgui_mouse_message(UINT message) {
+    switch (message) {
+    case WM_MOUSEMOVE:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_LBUTTONDBLCLK:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+    case WM_RBUTTONDBLCLK:
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP:
+    case WM_MBUTTONDBLCLK:
+    case WM_XBUTTONDOWN:
+    case WM_XBUTTONUP:
+    case WM_XBUTTONDBLCLK:
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool should_suppress_openxr_rehook_guard() {
+    auto vr = VR::get();
+
+    if (vr == nullptr) {
+        return false;
+    }
+
+    const auto runtime = vr->get_runtime();
+
+    if (runtime == nullptr || !runtime->is_openxr()) {
+        return false;
+    }
+
+    const auto openxr = vr->get_openxr_runtime();
+
+    if (openxr == nullptr) {
+        return false;
+    }
+
+    const auto has_openxr_session = openxr->instance != XR_NULL_HANDLE && openxr->session != XR_NULL_HANDLE;
+    const auto ready_wedge = openxr->session_state == XR_SESSION_STATE_READY &&
+        has_openxr_session &&
+        (openxr->session_ready || openxr->frame_synced || openxr->frame_began || openxr->got_first_poses) &&
+        !openxr->got_first_valid_poses;
+
+    const auto active_session =
+        has_openxr_session &&
+        (openxr->session_state == XR_SESSION_STATE_VISIBLE || openxr->session_state == XR_SESSION_STATE_FOCUSED) &&
+        (openxr->ever_submitted || openxr->last_successful_end_frame.time_since_epoch().count() != 0 ||
+         openxr->last_successful_begin_frame.time_since_epoch().count() != 0);
+
+    if (active_session) {
+        // If D3D setup failed before the first valid poses, suppressing the rehook can
+        // leave injection permanently stuck with an active OpenXR session and no backbuffer.
+        if (!openxr->got_first_valid_poses) {
+            static auto last_startup_log = std::chrono::steady_clock::time_point{};
+            const auto now = std::chrono::steady_clock::now();
+
+            if (last_startup_log.time_since_epoch().count() == 0 || now - last_startup_log >= std::chrono::seconds(2)) {
+                last_startup_log = now;
+
+                spdlog::warn(
+                    "[Framework] Allowing D3D rehook while OpenXR session is active but startup poses are not valid. session_state={} ever_submitted={} frame_synced={} frame_began={} got_first_valid_poses={}",
+                    openxr->get_session_state_string(openxr->session_state),
+                    openxr->ever_submitted,
+                    openxr->frame_synced,
+                    openxr->frame_began,
+                    openxr->got_first_valid_poses
+                );
+            }
+
+            return false;
+        }
+
+        static auto last_active_log = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+
+        if (last_active_log.time_since_epoch().count() == 0 || now - last_active_log >= std::chrono::seconds(2)) {
+            last_active_log = now;
+
+            spdlog::warn(
+                "[Framework] Suppressing D3D rehook while OpenXR session is active. session_state={} ever_submitted={} frame_synced={} frame_began={} got_first_valid_poses={}",
+                openxr->get_session_state_string(openxr->session_state),
+                openxr->ever_submitted,
+                openxr->frame_synced,
+                openxr->frame_began,
+                openxr->got_first_valid_poses
+            );
+        }
+
+        return true;
+    }
+
+    if (!ready_wedge) {
+        return false;
+    }
+
+    static auto last_log = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+
+    if (last_log.time_since_epoch().count() == 0 || now - last_log >= std::chrono::seconds(2)) {
+        last_log = now;
+
+        spdlog::warn(
+            "[Framework] Suppressing D3D rehook while OpenXR is wedged in READY. session_ready={} frame_synced={} frame_began={} got_first_poses={} got_first_valid_poses={} recoveries={}",
+            openxr->session_ready,
+            openxr->frame_synced,
+            openxr->frame_began,
+            openxr->got_first_poses,
+            openxr->got_first_valid_poses,
+            openxr->forced_frame_recovery_count
+        );
+    }
+
+    return true;
+}
+}
+
+void Framework::notify_render_activity() {
+    const auto now = std::chrono::steady_clock::now();
+    std::scoped_lock _{ m_hook_monitor_mutex };
+    m_last_present_time = now;
+    m_last_message_time = now;
+    m_last_chance_time = now + std::chrono::seconds(1);
+    m_has_last_chance = true;
+}
 
 UEVRSharedMemory::UEVRSharedMemory() {
     spdlog::info("Shared memory constructor!");
@@ -81,14 +216,14 @@ void Framework::hook_monitor() {
     // reflection dumps.
     //
     // Normal UEVR bootstraps plugins in two phases:
-    //   1. Framework ctor calls PluginLoader::early_init â†’ LoadLibrary each DLL
+    //   1. Framework ctor calls PluginLoader::early_init ¡ú LoadLibrary each DLL
     //   2. On first D3D Present, Framework::on_frame_d3d11/12 calls
-    //      Mods::on_initialize_d3d_thread â†’ PluginLoader queries device/
+    //      Mods::on_initialize_d3d_thread ¡ú PluginLoader queries device/
     //      swapchain, calls uevr_plugin_required_version + uevr_plugin_initialize
     //   3. Stereo hook's on_frame installs UGameEngine::Tick hook
     //   4. Engine tick hook fans out on_pre_engine_tick to all mods + plugins
     //
-    // In dumper mode there's no Present â†’ phases 2-4 never fire without
+    // In dumper mode there's no Present ¡ú phases 2-4 never fire without
     // intervention. We drive them from here instead: first mods::on_initialize
     // + on_initialize_d3d_thread (which now skips the D3D device queries),
     // then the stereo-hook's on_frame to install the tick hook.
@@ -98,7 +233,7 @@ void Framework::hook_monitor() {
 
         // One-shot phase-2: mods + plugin init. Equivalent of what the first
         // D3D Present would trigger. Must also set m_game_data_initialized
-        // so the engine_tick_hook fans out on_pre_engine_tick to mods â€”
+        // so the engine_tick_hook fans out on_pre_engine_tick to mods ¡ª
         // otherwise the hook runs but returns before dispatching.
         if (!m_dumper_mods_initialized) {
             try {
@@ -106,7 +241,7 @@ void Framework::hook_monitor() {
                 (void)m_mods->on_initialize();
                 (void)m_mods->on_initialize_d3d_thread();
                 // m_game_data_initialized is the gate on engine_tick_hook
-                // fanning out to mods. Don't set m_initialized â€” that gates
+                // fanning out to mods. Don't set m_initialized ¡ª that gates
                 // imgui rendering which requires D3D in dumper mode.
                 m_game_data_initialized = true;
                 m_mods_fully_initialized = true;
@@ -168,6 +303,14 @@ void Framework::hook_monitor() {
             }
 
             if (!m_has_last_chance && now - m_last_chance_time > std::chrono::seconds(1)) {
+                if (should_suppress_openxr_rehook_guard()) {
+                    m_last_present_time = now + std::chrono::seconds(5);
+                    m_last_message_time = now + std::chrono::seconds(5);
+                    m_last_chance_time = now + std::chrono::seconds(1);
+                    m_has_last_chance = true;
+                    return;
+                }
+
                 spdlog::info("Sending rehook request for D3D");
 
                 // hook_d3d12 always gets called first.
@@ -255,7 +398,10 @@ Framework::Framework(HMODULE framework_module)
     std::scoped_lock __{m_constructor_mutex};
 
     spdlog::set_default_logger(m_logger);
-    spdlog::flush_on(spdlog::level::info);
+    // UE 5.7 startup can legitimately emit thousands of info-level discovery logs.
+    // Flushing every info line to disk turns that into visible hitching and input lag.
+    // Keep immediate flushing for actual errors only.
+    spdlog::flush_on(spdlog::level::err);
     spdlog::info("UnrealVR entry");
     spdlog::info("Commit hash: {}", UEVR_COMMIT_HASH);
     spdlog::info("Tag: {}", UEVR_TAG);
@@ -706,12 +852,32 @@ void Framework::on_frame_d3d12() {
     //spdlog::debug("on_frame (D3D12)");
     
     if (!m_initialized) {
+        const auto now = std::chrono::steady_clock::now();
+
+        if (m_next_d3d12_init_attempt.time_since_epoch().count() != 0 && now < m_next_d3d12_init_attempt) {
+            return;
+        }
+
         if (!initialize()) {
-            spdlog::error("Failed to initialize Framework on DirectX 12");
+            ++m_d3d12_init_failure_count;
+
+            const auto backoff_multiplier = 1u << std::min(m_d3d12_init_failure_count - 1, 2u);
+            const auto retry_backoff = std::min(
+                D3D12_INIT_RETRY_INITIAL_BACKOFF * backoff_multiplier,
+                D3D12_INIT_RETRY_MAX_BACKOFF
+            );
+
+            m_next_d3d12_init_attempt = now + retry_backoff;
+            spdlog::warn(
+                "Failed to initialize Framework on DirectX 12; retrying in {} ms",
+                std::chrono::duration_cast<std::chrono::milliseconds>(retry_backoff).count()
+            );
             return;
         }
 
         spdlog::info("Framework initialized");
+        m_next_d3d12_init_attempt = {};
+        m_d3d12_init_failure_count = 0;
         m_initialized = true;
         return;
     }
@@ -731,6 +897,8 @@ void Framework::on_frame_d3d12() {
 
     if (device == nullptr) {
         spdlog::error("D3D12 Device was null when it shouldn't be, returning...");
+        m_next_d3d12_init_attempt = {};
+        m_d3d12_init_failure_count = 0;
         m_initialized = false;
         return;
     }
@@ -789,13 +957,16 @@ void Framework::on_frame_d3d12() {
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        render::D3D12Diagnostics::get().record_resource_barriers("Framework::on_frame_d3d12/ImGuiToRT", 1, &barrier);
         cmd_ctx->cmd_list->ResourceBarrier(1, &barrier);
 
         float clear_color[]{0.0f, 0.0f, 0.0f, 0.0f};
         D3D12_CPU_DESCRIPTOR_HANDLE rts[1]{};
         cmd_ctx->cmd_list->ClearRenderTargetView(m_d3d12.get_cpu_rtv(device, D3D12::RTV::IMGUI), clear_color, 0, nullptr);
         rts[0] = m_d3d12.get_cpu_rtv(device, D3D12::RTV::IMGUI);
+        render::D3D12Diagnostics::get().record_rtv_bind("Framework::on_frame_d3d12/ImGuiRT", 1, rts, nullptr);
         cmd_ctx->cmd_list->OMSetRenderTargets(1, rts, FALSE, NULL);
+        render::D3D12Diagnostics::get().record_descriptor_heaps_set("Framework::on_frame_d3d12/ImGuiSRVHeap", 1, m_d3d12.srv_desc_heap.GetAddressOf());
         cmd_ctx->cmd_list->SetDescriptorHeaps(1, m_d3d12.srv_desc_heap.GetAddressOf());
 
         ImGui::GetIO().BackendRendererUserData = m_d3d12.imgui_backend_datas[1];
@@ -808,6 +979,7 @@ void Framework::on_frame_d3d12() {
         
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        render::D3D12Diagnostics::get().record_resource_barriers("Framework::on_frame_d3d12/ImGuiToSRV", 1, &barrier);
         cmd_ctx->cmd_list->ResourceBarrier(1, &barrier);
 
         // Draw to the back buffer.
@@ -816,9 +988,12 @@ void Framework::on_frame_d3d12() {
         barrier.Transition.pResource = m_d3d12.rts[bb_index].Get();
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        render::D3D12Diagnostics::get().record_resource_barriers("Framework::on_frame_d3d12/BackbufferToRT", 1, &barrier);
         cmd_ctx->cmd_list->ResourceBarrier(1, &barrier);
         rts[0] = m_d3d12.get_cpu_rtv(device, (D3D12::RTV)bb_index);
+        render::D3D12Diagnostics::get().record_rtv_bind("Framework::on_frame_d3d12/BackbufferRT", 1, rts, nullptr);
         cmd_ctx->cmd_list->OMSetRenderTargets(1, rts, FALSE, NULL);
+        render::D3D12Diagnostics::get().record_descriptor_heaps_set("Framework::on_frame_d3d12/BackbufferSRVHeap", 1, m_d3d12.srv_desc_heap.GetAddressOf());
         cmd_ctx->cmd_list->SetDescriptorHeaps(1, m_d3d12.srv_desc_heap.GetAddressOf());
 
         ImGui::GetIO().BackendRendererUserData = m_d3d12.imgui_backend_datas[0];
@@ -826,6 +1001,7 @@ void Framework::on_frame_d3d12() {
 
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        render::D3D12Diagnostics::get().record_resource_barriers("Framework::on_frame_d3d12/BackbufferToPresent", 1, &barrier);
         cmd_ctx->cmd_list->ResourceBarrier(1, &barrier);
 
         cmd_ctx->execute();
@@ -883,6 +1059,8 @@ void Framework::on_reset(uint32_t w, uint32_t h) {
 
     m_has_frame = false;
     m_first_initialize = false;
+    m_next_d3d12_init_attempt = {};
+    m_d3d12_init_failure_count = 0;
     m_initialized = false;
 }
 
@@ -1045,6 +1223,15 @@ bool Framework::on_message(HWND wnd, UINT message, WPARAM w_param, LPARAM l_para
             };
 
             if (!forcefully_allowed_messages.contains(message)) {      
+                // Only eat game mouse input while the cursor is actually over/using ImGui.
+                const auto imgui_has_mouse = io.WantCaptureMouse ||
+                    ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) ||
+                    ImGui::IsAnyItemActive();
+
+                if ((is_imgui_mouse_message(message) || message == WM_INPUT) && imgui_has_mouse) {
+                    return false;
+                }
+
                 if (m_is_ui_focused) {
                     if (io.WantCaptureMouse || io.WantCaptureKeyboard || io.WantTextInput)
                         return false;
@@ -1585,9 +1772,9 @@ void Framework::draw_ui() {
 }
 
 void Framework::draw_about() {
-    ImGui::Text("Author: praydog");
+    ImGui::Text("Author: joeyhodge");
     ImGui::Text("Unreal Engine VR");
-    ImGui::Text("https://github.com/praydog/UEVR");
+    ImGui::Text("https://github.com/joeyhodge/UEVR/altdpad");
     ImGui::Text("http://praydog.com");
     ImGui::Text("Branch: %s", UEVR_BRANCH);
     ImGui::Text("Commits: %i", UEVR_TOTAL_COMMITS);
@@ -1919,6 +2106,7 @@ bool Framework::first_frame_initialize() {
 }
 
 void Framework::call_on_frame() {
+    m_last_framework_on_frame = std::chrono::steady_clock::now();
     const bool is_init_ok = m_error.empty() && m_game_data_initialized && m_mods_fully_initialized;
 
     if (is_init_ok) {
@@ -1945,6 +2133,8 @@ bool Framework::init_d3d11() {
         spdlog::error("[D3D11] Failed to get back buffer!");
         return false;
     }
+
+    m_d3d11.bb_tex = backbuffer;
 
     // Create a render target view of the back buffer.
     if (FAILED(device->CreateRenderTargetView(backbuffer.Get(), nullptr, &m_d3d11.bb_rtv))) {
@@ -2060,6 +2250,7 @@ bool Framework::init_d3d12() {
         }
 
         m_d3d12.rtv_desc_heap->SetName(L"Framework::m_d3d12.rtv_desc_heap");
+        render::D3D12Diagnostics::get().register_descriptor_heap("Framework::init_d3d12", m_d3d12.rtv_desc_heap.Get(), desc.NumDescriptors, false, "Framework RTV Heap");
     }
 
     spdlog::info("[D3D12] Creating SRV descriptor heap...");
@@ -2077,6 +2268,7 @@ bool Framework::init_d3d12() {
         }
 
         m_d3d12.srv_desc_heap->SetName(L"Framework::m_d3d12.srv_desc_heap");
+        render::D3D12Diagnostics::get().register_descriptor_heap("Framework::init_d3d12", m_d3d12.srv_desc_heap.Get(), desc.NumDescriptors, false, "Framework SRV Heap");
     }
 
     spdlog::info("[D3D12] Creating render targets...");
@@ -2096,6 +2288,12 @@ bool Framework::init_d3d12() {
 
             if (SUCCEEDED(swapchain->GetBuffer(i, IID_PPV_ARGS(&m_d3d12.rts[i])))) {
                 device->CreateRenderTargetView(m_d3d12.rts[i].Get(), nullptr, m_d3d12.get_cpu_rtv(device, (D3D12::RTV)i));
+                render::D3D12Diagnostics::get().register_resource(
+                    "Framework::init_d3d12/Swapchain",
+                    m_d3d12.rts[i].Get(),
+                    false,
+                    ("Framework Backbuffer [" + std::to_string(i) + "]").c_str()
+                );
             } else {
                 spdlog::error("[D3D12] Failed to get back buffer for rtv.");
                 break; // assume max
@@ -2126,6 +2324,7 @@ bool Framework::init_d3d12() {
         }
 
         m_d3d12.get_rt(D3D12::RTV::IMGUI)->SetName(L"Framework::m_d3d12.rts[IMGUI]");
+        render::D3D12Diagnostics::get().register_resource("Framework::init_d3d12/UI", m_d3d12.get_rt(D3D12::RTV::IMGUI).Get(), false, "Framework ImGui Render Target");
 
         if (FAILED(device->CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &d3d12_rt_desc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear_value,
                 IID_PPV_ARGS(&m_d3d12.get_rt(D3D12::RTV::BLANK))))) {
@@ -2134,6 +2333,7 @@ bool Framework::init_d3d12() {
         }
 
         m_d3d12.get_rt(D3D12::RTV::BLANK)->SetName(L"Framework::m_d3d12.rts[BLANK]");
+        render::D3D12Diagnostics::get().register_resource("Framework::init_d3d12/UI", m_d3d12.get_rt(D3D12::RTV::BLANK).Get(), false, "Framework Blank Render Target");
 
         // Create imgui and blank rtvs and srvs.
         device->CreateRenderTargetView(m_d3d12.get_rt(D3D12::RTV::IMGUI).Get(), nullptr, m_d3d12.get_cpu_rtv(device, D3D12::RTV::IMGUI));

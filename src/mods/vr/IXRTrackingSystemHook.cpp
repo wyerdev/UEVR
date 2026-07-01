@@ -1,3 +1,5 @@
+#include <cmath>
+#include <cstring>
 #include <unordered_map>
 
 #include <bdshemu.h>
@@ -30,6 +32,85 @@
 
 #include "IXRTrackingSystemHook.hpp"
 
+namespace {
+bool is_deadzone_ue56_executable() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+
+        if (!exe_path || exe_path->find(L"DeadzoneSteam-Win64-Shipping") == std::wstring::npos) {
+            return false;
+        }
+
+        const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+        const auto file_version = sdk::get_file_version_info();
+
+        return str_version.starts_with("5.6") || file_version.dwFileVersionMS == 0x00050006;
+    }();
+
+    return result;
+}
+
+bool is_daysgone_executable() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+
+        return exe_path && exe_path->find(L"DaysGone.exe") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+bool is_daysgone_controller_aim_requested() {
+    return is_daysgone_executable() && VR::get()->is_controller_aim_enabled();
+}
+
+bool is_direct_aim_compatibility_requested() {
+    if (is_deadzone_ue56_executable()) {
+        return true;
+    }
+
+    if (is_daysgone_controller_aim_requested()) {
+        return true;
+    }
+
+    return VR::get()->is_direct_aim_compatibility_enabled();
+}
+
+bool is_direct_aim_compatibility_active() {
+    if (!is_direct_aim_compatibility_requested()) {
+        return false;
+    }
+
+    auto& vr = VR::get();
+
+    if (!vr->is_hmd_active()) {
+        return false;
+    }
+
+    if (vr->is_controller_camera_conflict_guard_active()) {
+        return false;
+    }
+
+    if (is_deadzone_ue56_executable()) {
+        // Deadzone's UE5.6 UObject/FName path is unsafe from the direct
+        // fallback tick path. Let the normal ProcessViewRotation hook drive
+        // HMD/controller aim instead of scanning or resolving UObject names.
+        return false;
+    }
+
+    if (is_daysgone_controller_aim_requested()) {
+        return vr->is_using_controllers();
+    }
+
+    if (vr->is_headlocked_aim_enabled()) {
+        return true;
+    }
+
+    return vr->is_controller_aim_enabled() && vr->is_using_controllers();
+}
+
+}
+
 detail::IXRTrackingSystemVT& get_tracking_system_vtable(std::optional<std::string> version_override = std::nullopt) {
     const auto str_version = version_override.has_value() ? version_override.value() : utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
     auto version = sdk::get_file_version_info();
@@ -41,9 +122,24 @@ detail::IXRTrackingSystemVT& get_tracking_system_vtable(std::optional<std::strin
         SPDLOG_INFO("Found version {}.{} from executable (disk version)", HIWORD(version.dwFileVersionMS), LOWORD(version.dwFileVersionMS));
     }
 
-    // TODO: actually dump 5.4
+    if (version.dwFileVersionMS == 0x50008 || str_version.starts_with("5.8")) {
+        return ue5_8::IXRTrackingSystemVT::get();
+    }
+
+    if (version.dwFileVersionMS == 0x50007 || str_version.starts_with("5.7")) {
+        return ue5_7::IXRTrackingSystemVT::get();
+    }
+
+    if (version.dwFileVersionMS == 0x50006 || str_version.starts_with("5.6")) {
+        return ue5_6::IXRTrackingSystemVT::get();
+    }
+
+    if (version.dwFileVersionMS == 0x50005 || str_version.starts_with("5.5")) {
+        return ue5_5::IXRTrackingSystemVT::get();
+    }
+
     if (version.dwFileVersionMS == 0x50004 || str_version.starts_with("5.4")) {
-        return ue5_3::IXRTrackingSystemVT::get();
+        return ue5_4::IXRTrackingSystemVT::get();
     }
 
     // >= 5.3
@@ -130,9 +226,24 @@ detail::IXRCameraVT& get_camera_vtable(std::optional<std::string> version_overri
         version.dwFileVersionMS = 0;
     }
 
-    // TODO: actually dump 5.4
+    if (version.dwFileVersionMS == 0x50008 || str_version.starts_with("5.8")) {
+        return ue5_8::IXRCameraVT::get();
+    }
+
+    if (version.dwFileVersionMS == 0x50007 || str_version.starts_with("5.7")) {
+        return ue5_7::IXRCameraVT::get();
+    }
+
+    if (version.dwFileVersionMS == 0x50006 || str_version.starts_with("5.6")) {
+        return ue5_6::IXRCameraVT::get();
+    }
+
+    if (version.dwFileVersionMS == 0x50005 || str_version.starts_with("5.5")) {
+        return ue5_5::IXRCameraVT::get();
+    }
+
     if (version.dwFileVersionMS == 0x50004 || str_version.starts_with("5.4")) {
-        return ue5_3::IXRCameraVT::get();
+        return ue5_4::IXRCameraVT::get();
     }
 
     // TODO: actually dump 5.2
@@ -217,10 +328,24 @@ detail::IHeadMountedDisplayVT& get_hmd_vtable(std::optional<std::string> version
         version.dwFileVersionMS = 0;
     }
 
-    // TODO: actually dump 5.4
-    // 5.4
+    if (version.dwFileVersionMS == 0x50008 || str_version.starts_with("5.8")) {
+        return ue5_8::IHeadMountedDisplayVT::get();
+    }
+
+    if (version.dwFileVersionMS == 0x50007 || str_version.starts_with("5.7")) {
+        return ue5_7::IHeadMountedDisplayVT::get();
+    }
+
+    if (version.dwFileVersionMS == 0x50006 || str_version.starts_with("5.6")) {
+        return ue5_6::IHeadMountedDisplayVT::get();
+    }
+
+    if (version.dwFileVersionMS == 0x50005 || str_version.starts_with("5.5")) {
+        return ue5_5::IHeadMountedDisplayVT::get();
+    }
+
     if (version.dwFileVersionMS == 0x50004 || str_version.starts_with("5.4")) {
-        return ue5_3::IHeadMountedDisplayVT::get();
+        return ue5_4::IHeadMountedDisplayVT::get();
     }
 
     // 5.3
@@ -352,6 +477,49 @@ std::mutex return_address_to_functions_mutex{};
 std::unordered_map<uintptr_t, uintptr_t> return_address_to_functions{};
 std::unordered_map<uintptr_t, FunctionInfo> functions{};
 std::atomic<uint32_t> total_times_funcs_called{0};
+
+bool is_writable_process_range(uintptr_t address, size_t size) {
+    if (address == 0 || size == 0 || address + size < address) {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) {
+        return false;
+    }
+
+    const auto base = (uintptr_t)mbi.BaseAddress;
+    if (address + size > base + mbi.RegionSize) {
+        return false;
+    }
+
+    if ((mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+
+    const auto protect = mbi.Protect & 0xff;
+    return protect == PAGE_READWRITE ||
+           protect == PAGE_WRITECOPY ||
+           protect == PAGE_EXECUTE_READWRITE ||
+           protect == PAGE_EXECUTE_WRITECOPY;
+}
+
+template <typename T>
+bool can_write(T* ptr) {
+    return ptr != nullptr && is_writable_process_range((uintptr_t)ptr, sizeof(T));
+}
+
+bool finite_vec3(const glm::vec3& v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+
+bool finite_quat(const glm::quat& q) {
+    return std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z) && std::isfinite(q.w);
+}
+
+bool finite_euler(const glm::vec3& v) {
+    return finite_vec3(v);
+}
 }
 
 IXRTrackingSystemHook::IXRTrackingSystemHook(FFakeStereoRenderingHook* stereo_hook, size_t offset_in_engine) 
@@ -444,15 +612,65 @@ void IXRTrackingSystemHook::on_draw_ui() {
 
 void IXRTrackingSystemHook::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     auto& vr = VR::get();
+    const auto direct_aim_compat_requested = is_direct_aim_compatibility_requested();
+    const auto direct_aim_compat_active = is_direct_aim_compatibility_active();
+    const auto deadzone_direct_aim = is_deadzone_ue56_executable();
+    const auto daysgone_controller_aim = is_daysgone_controller_aim_requested();
 
-    if (!m_initialized && (vr->is_any_aim_method_active() || vr->wants_blueprint_load())) {
+    if (direct_aim_compat_requested && vr->is_any_aim_method_active()) {
+        const auto aim_method = vr->get_aim_method();
+
+        if (daysgone_controller_aim && vr->is_controller_camera_conflict_guard_active()) {
+            SPDLOG_WARN_ONCE("[DaysGone][Aim] Falling back to game aim because Controller-Camera Conflict Guard blocks the safe direct controller-aim path");
+            vr->set_aim_method(VR::AimMethod::GAME);
+            return;
+        } else if (aim_method == VR::AimMethod::HEAD) {
+            if (deadzone_direct_aim) {
+                SPDLOG_WARN_ONCE("[Deadzone][Aim] Allowing HMD aim on UE5.6 through ProcessViewRotation; unsafe direct UObject/FName fallback is disabled");
+            } else {
+                SPDLOG_WARN_ONCE("[AimCompat] Allowing experimental HMD aim through direct control rotation updates");
+            }
+        } else if (!vr->is_controller_aim_enabled() || !vr->is_using_controllers()) {
+            if (daysgone_controller_aim) {
+                SPDLOG_WARN_ONCE("[DaysGone][Aim] Falling back to game aim because controller tracking is not actively available");
+            } else if (deadzone_direct_aim) {
+                SPDLOG_WARN_ONCE("[Deadzone][Aim] Falling back to game aim because controller aim is not actively available");
+            } else {
+                SPDLOG_WARN_ONCE("[AimCompat] Falling back to game aim because controller aim is not actively available");
+            }
+            vr->set_aim_method(VR::AimMethod::GAME);
+            return;
+        } else {
+            if (daysgone_controller_aim) {
+                SPDLOG_WARN_ONCE("[DaysGone][Aim] Using direct controller-aim fallback; skipping legacy UE4.11 HMD/ProcessViewRotation controller aim hooks");
+            } else if (deadzone_direct_aim) {
+                SPDLOG_WARN_ONCE("[Deadzone][Aim] Allowing experimental controller aim on UE5.6; XR camera path remains disabled");
+            } else {
+                SPDLOG_WARN_ONCE("[AimCompat] Allowing experimental controller aim; XR camera path remains disabled");
+            }
+        }
+    }
+
+    if (!m_initialized && (((vr->is_any_aim_method_active() && !direct_aim_compat_active) || vr->wants_blueprint_load()))) {
         if (!m_initialized) {
             initialize();
         }
     }
 
+    if (direct_aim_compat_active) {
+        if (daysgone_controller_aim) {
+            SPDLOG_INFO_ONCE("[DaysGone][Aim] Driving Days Gone controller aim through direct control rotation updates");
+        } else if (deadzone_direct_aim) {
+            SPDLOG_INFO_ONCE("[Deadzone][Aim] Driving Deadzone direct aim through control rotation updates");
+        } else {
+            SPDLOG_INFO_ONCE("[AimCompat] Driving direct aim fallback through control rotation updates");
+        }
+        manual_update_control_rotation(engine);
+    }
+
+    auto& data = m_process_view_rotation_data;
+
     if (vr->is_any_aim_method_active()) {
-        auto& data = m_process_view_rotation_data;
 
         // This can happen if player logic stops running (e.g. player has died or entered a loading screen)
         // so we dont want the UI off in nowhere land
@@ -463,7 +681,24 @@ void IXRTrackingSystemHook::on_pre_engine_tick(sdk::UGameEngine* engine, float d
 
             SPDLOG_INFO("IXRTrackingSystemHook: Recentering view because of timeout");
         }
+    } else if (data.auto_enabled_decoupled_pitch) {
+        data.auto_enabled_decoupled_pitch = false;
+        vr->set_decoupled_pitch(false);
+        vr->set_pre_flattened_rotation(glm::identity<glm::quat>());
+        SPDLOG_INFO("[IXRTrackingSystemHook] Restored decoupled pitch after aim method was disabled");
     }
+}
+
+void IXRTrackingSystemHook::on_post_engine_tick(sdk::UGameEngine* engine, float delta) {
+    if (VR::get()->is_controller_camera_conflict_guard_active()) {
+        return;
+    }
+
+    if (!is_direct_aim_compatibility_active()) {
+        return;
+    }
+
+    manual_update_control_rotation(engine);
 }
 
 void IXRTrackingSystemHook::initialize() {
@@ -506,8 +741,12 @@ void IXRTrackingSystemHook::initialize() {
 
         if (trackvt.GetMotionControllerData_index().has_value()) {
             m_xrtracking_vtable[trackvt.GetMotionControllerData_index().value()] = (uintptr_t)&get_motion_controller_data;
-        } else {
+        } else if (!trackvt.GetMotionControllerState_index().has_value()) {
             SPDLOG_ERROR("IXRTrackingSystemHook::IXRTrackingSystemHook: get_motion_controller_data_index not implemented");
+        }
+
+        if (trackvt.GetMotionControllerState_index().has_value()) {
+            m_xrtracking_vtable[trackvt.GetMotionControllerState_index().value()] = (uintptr_t)&get_motion_controller_state;
         }
 
         if (trackvt.GetHMDData_index().has_value()) {
@@ -601,17 +840,29 @@ void IXRTrackingSystemHook::initialize() {
                 SPDLOG_ERROR("IXRTrackingSystemHook::IXRTrackingSystemHook: is_hmd_connected_index not implemented");
             }
 
+            if (hmdvt.GetIdealRenderTargetSize_index().has_value()) {
+                m_hmd_vtable[hmdvt.GetIdealRenderTargetSize_index().value()] = (uintptr_t)&get_ideal_debug_canvas_render_target_size;
+            } else {
+                SPDLOG_ERROR("IXRTrackingSystemHook::IXRTrackingSystemHook: get_ideal_render_target_size_index not implemented");
+            }
+
             if (hmdvt.GetIdealDebugCanvasRenderTargetSize_index().has_value()) {
                 // This one is a bit tricky. In very rare cases this index can be off by one. We need to make the hook
                 // verify that the return address is within UGameViewportClient::Draw. We will not just hook this function, but one index ahead as well.
-                m_hmd_vtable[hmdvt.GetIdealDebugCanvasRenderTargetSize_index().value()] = (uintptr_t)&get_ideal_debug_canvas_render_target_size;
-                m_hmd_vtable[hmdvt.GetIdealDebugCanvasRenderTargetSize_index().value() + 1] = (uintptr_t)&get_ideal_debug_canvas_render_target_size;
+                const auto debug_size_index = hmdvt.GetIdealDebugCanvasRenderTargetSize_index().value();
+                m_hmd_vtable[debug_size_index] = (uintptr_t)&get_ideal_debug_canvas_render_target_size;
+
+                // UE 5.7's HMD vtable was confirmed from PDB and the next slot is
+                // GetDistortionScalingFactor, not an off-by-one debug-size call.
+                if (hmdvt.BeginRendering_RenderThread_index().has_value()) {
+                    m_hmd_vtable[debug_size_index + 1] = (uintptr_t)&get_ideal_debug_canvas_render_target_size;
+                }
             } else {
                 SPDLOG_ERROR("IXRTrackingSystemHook::IXRTrackingSystemHook: get_ideal_debug_canvas_render_target_size_index not implemented");
             }
 
             if (hmdvt.ResetOrientation_index().has_value()) {
-                m_hmd_vtable[hmdvt.ResetPosition_index().value()] = (uintptr_t)&reset_orientation;
+                m_hmd_vtable[hmdvt.ResetOrientation_index().value()] = (uintptr_t)&reset_orientation;
             } else {
                 SPDLOG_ERROR("IXRTrackingSystemHook::IXRTrackingSystemHook: reset_orientation_index not implemented");
             }
@@ -833,16 +1084,37 @@ IXRTrackingSystemHook::SharedPtr* IXRTrackingSystemHook::get_stereo_rendering_de
     return nullptr;
 }
 
-void IXRTrackingSystemHook::manual_update_control_rotation() {
-    const auto world = sdk::UEngine::get()->get_world();
+void IXRTrackingSystemHook::manual_update_control_rotation(sdk::UGameEngine* engine_override) {
+    if (VR::get()->is_controller_camera_conflict_guard_active()) {
+        return;
+    }
+
+    if (is_deadzone_ue56_executable()) {
+        SPDLOG_WARN_ONCE("[Deadzone][Aim] Direct PlayerController aim fallback is disabled because UObject/FName lookup is unsafe; using ProcessViewRotation instead");
+        return;
+    }
+
+    sdk::APlayerController* controller = nullptr;
+
+    auto engine = (sdk::UEngine*)engine_override;
+    if (engine == nullptr) {
+        engine = sdk::UEngine::get();
+    }
+
+    if (engine == nullptr) {
+        return;
+    }
+
+    const auto world = engine->get_world();
 
     if (world == nullptr) {
         return;
     }
 
-    const auto controller = sdk::UGameplayStatics::get()->get_player_controller(world, 0);
+    controller = sdk::UGameplayStatics::get()->get_player_controller(world, 0);
 
     if (controller == nullptr) {
+        SPDLOG_WARN_ONCE("[AimCompat] Skipping direct aim until a PlayerController is available");
         return;
     }
 
@@ -984,6 +1256,10 @@ bool IXRTrackingSystemHook::is_head_tracking_allowed(sdk::IXRTrackingSystem*) {
 
     auto& vr = VR::get();
 
+    if (is_direct_aim_compatibility_active()) {
+        return false;
+    }
+
     if (!vr->is_hmd_active()) {
         return false;
     }
@@ -1073,6 +1349,10 @@ bool IXRTrackingSystemHook::is_head_tracking_allowed_for_world(sdk::IXRTrackingS
     SPDLOG_INFO_ONCE("is_head_tracking_allowed_for_world {:x}", (uintptr_t)_ReturnAddress());
 
     auto& vr = VR::get();
+
+    if (is_direct_aim_compatibility_active()) {
+        return false;
+    }
 
     if (!vr->is_hmd_active() || !vr->is_any_aim_method_active()) {
         return false;
@@ -1213,8 +1493,92 @@ void IXRTrackingSystemHook::get_motion_controller_data(sdk::IXRTrackingSystem*, 
     }
 }
 
+void IXRTrackingSystemHook::get_motion_controller_state(
+    sdk::IXRTrackingSystem*, void* world, uint8_t space_type, uint8_t hand, uint8_t pose_type, void* motion_controller_state) {
+    SPDLOG_INFO_ONCE("get_motion_controller_state {:x}", (uintptr_t)_ReturnAddress());
+
+    auto* data = (ue5_7::FXRMotionControllerState*)motion_controller_state;
+    if (!detail::can_write(data)) {
+        SPDLOG_WARN_ONCE("get_motion_controller_state received an invalid output pointer");
+        return;
+    }
+
+    std::memset(data, 0, sizeof(*data));
+
+    const auto e_hand = (ue::EControllerHand)hand;
+    if (e_hand != ue::EControllerHand::Left && e_hand != ue::EControllerHand::Right) {
+        data->Hand = e_hand;
+        data->XRSpaceType = (ue::EXRSpaceType)space_type;
+        data->XRControllerPoseType = (ue::EXRControllerPoseType)pose_type;
+        data->TrackingStatus = ue::ETrackingStatus::NotTracked;
+        return;
+    }
+
+    const auto vr = VR::get();
+    if (vr == nullptr) {
+        data->Hand = e_hand;
+        data->XRSpaceType = (ue::EXRSpaceType)space_type;
+        data->XRControllerPoseType = (ue::EXRControllerPoseType)pose_type;
+        data->TrackingStatus = ue::ETrackingStatus::NotTracked;
+        return;
+    }
+
+    const auto world_scale = vr->get_world_to_meters();
+
+    auto rotation_offset = vr->get_rotation_offset();
+
+    if (vr->is_decoupled_pitch_enabled()) {
+        const auto pre_flat_rotation = vr->get_pre_flattened_rotation();
+        const auto pre_flat_pitch = utility::math::pitch_only(pre_flat_rotation);
+        rotation_offset = glm::normalize(pre_flat_pitch * vr->get_rotation_offset());
+    }
+
+    const auto controller_index = e_hand == ue::EControllerHand::Left ? vr->get_left_controller_index() : vr->get_right_controller_index();
+    const auto aim_transform = vr->get_aim_transform(controller_index);
+    const auto grip_transform = vr->get_grip_transform(controller_index);
+
+    const auto aim_position = rotation_offset * glm::vec3{aim_transform[3] - vr->get_standing_origin()};
+    const auto aim_rotation = glm::normalize(rotation_offset * glm::quat{aim_transform});
+    const auto grip_position = rotation_offset * glm::vec3{grip_transform[3] - vr->get_standing_origin()};
+    const auto grip_rotation = glm::normalize(rotation_offset * glm::quat{grip_transform});
+
+    if (!detail::finite_vec3(aim_position) || !detail::finite_quat(aim_rotation) ||
+        !detail::finite_vec3(grip_position) || !detail::finite_quat(grip_rotation)) {
+        data->Hand = e_hand;
+        data->XRSpaceType = (ue::EXRSpaceType)space_type;
+        data->XRControllerPoseType = (ue::EXRControllerPoseType)pose_type;
+        data->TrackingStatus = ue::ETrackingStatus::NotTracked;
+        return;
+    }
+
+    const auto final_aim_position = utility::math::glm_to_ue4(aim_position * world_scale);
+    const auto final_aim_rotation = utility::math::glm_to_ue4(aim_rotation);
+    const auto final_grip_position = utility::math::glm_to_ue4(grip_position * world_scale);
+    const auto final_grip_rotation = utility::math::glm_to_ue4(grip_rotation);
+
+    const auto e_pose_type = (ue::EXRControllerPoseType)pose_type;
+    const bool use_grip_pose = e_pose_type == ue::EXRControllerPoseType::Grip || e_pose_type == ue::EXRControllerPoseType::Palm;
+    const auto& controller_position = use_grip_pose ? final_grip_position : final_aim_position;
+    const auto& controller_rotation = use_grip_pose ? final_grip_rotation : final_aim_rotation;
+
+    data->bValid = true;
+    data->XRSpaceType = (ue::EXRSpaceType)space_type;
+    data->Hand = e_hand;
+    data->TrackingStatus = ue::ETrackingStatus::Tracked;
+    data->XRControllerPoseType = e_pose_type;
+    data->ControllerLocation = { controller_position.x, controller_position.y, controller_position.z };
+    data->ControllerRotation = { controller_rotation.x, controller_rotation.y, controller_rotation.z, controller_rotation.w };
+    data->GripUnrealSpaceLocation = { final_grip_position.x, final_grip_position.y, final_grip_position.z };
+    data->GripUnrealSpaceRotation = { final_grip_rotation.x, final_grip_rotation.y, final_grip_rotation.z, final_grip_rotation.w };
+}
+
 void IXRTrackingSystemHook::get_hmd_data(sdk::IXRTrackingSystem*, void* world, void* hmd_data) {
     SPDLOG_INFO_ONCE("get_hmd_data {:x}", (uintptr_t)_ReturnAddress());
+
+    if (hmd_data == nullptr || !detail::is_writable_process_range((uintptr_t)hmd_data, 1)) {
+        SPDLOG_WARN_ONCE("get_hmd_data received an invalid output pointer");
+        return;
+    }
 
     const auto& vr = VR::get();
     const auto world_scale = vr->get_world_to_meters();
@@ -1234,14 +1598,26 @@ void IXRTrackingSystemHook::get_hmd_data(sdk::IXRTrackingSystem*, void* world, v
 
     if (hmd_data_struct == nullptr) {
         const auto data = (ue4_27::FXRHMDData*)hmd_data;
+        data->bValid = true;
+        data->TrackingStatus = ue::ETrackingStatus::Tracked;
         data->Position = utility::math::glm_to_ue4(position * world_scale);
 
         const auto q = utility::math::glm_to_ue4(rotation);
         data->Rotation = { q.x, q.y, q.z, q.w };
     } else {
+        const auto bValid_prop = hmd_data_struct->find_property(L"bValid");
+        const auto TrackingStatus_prop = hmd_data_struct->find_property(L"TrackingStatus");
         const auto Position_prop = hmd_data_struct->find_property(L"Position");
         const auto Rotation_prop = hmd_data_struct->find_property(L"Rotation");
         const auto is_ue5 = g_hook->m_stereo_hook->has_double_precision();
+
+        if (bValid_prop != nullptr) {
+            *bValid_prop->get_data<bool>(hmd_data) = true;
+        }
+
+        if (TrackingStatus_prop != nullptr) {
+            *TrackingStatus_prop->get_data<ue::ETrackingStatus>(hmd_data) = ue::ETrackingStatus::Tracked;
+        }
 
         if (Position_prop != nullptr) {
             if (is_ue5) {
@@ -1266,6 +1642,16 @@ void IXRTrackingSystemHook::get_hmd_data(sdk::IXRTrackingSystem*, void* world, v
 void IXRTrackingSystemHook::get_current_pose(sdk::IXRTrackingSystem*, int32_t device_id, Quat<float>* out_rot, glm::vec3* out_pos) {
     SPDLOG_INFO_ONCE("get_current_pose {:x}", (uintptr_t)_ReturnAddress());
 
+    const auto is_ue5 = g_hook->m_stereo_hook->has_double_precision();
+    const auto out_pos_size = is_ue5 ? sizeof(glm::vec<3, double>) : sizeof(glm::vec3);
+    const auto out_rot_size = is_ue5 ? sizeof(glm::vec<4, double>) : sizeof(Quat<float>);
+    if (out_pos == nullptr || out_rot == nullptr ||
+        !detail::is_writable_process_range((uintptr_t)out_pos, out_pos_size) ||
+        !detail::is_writable_process_range((uintptr_t)out_rot, out_rot_size)) {
+        SPDLOG_WARN_ONCE("get_current_pose received invalid output pointers");
+        return;
+    }
+
     const auto& vr = VR::get();
     const auto world_scale = vr->get_world_to_meters();
 
@@ -1283,8 +1669,6 @@ void IXRTrackingSystemHook::get_current_pose(sdk::IXRTrackingSystem*, int32_t de
     default: {
         const auto position = rotation_offset * glm::vec3{vr->get_position(vr->get_hmd_index()) - vr->get_standing_origin()};
         const auto rotation = glm::normalize(rotation_offset * glm::quat{vr->get_rotation(vr->get_hmd_index())});
-
-        const auto is_ue5 = g_hook->m_stereo_hook->has_double_precision();
 
         if (!is_ue5) {
             *out_pos = utility::math::glm_to_ue4(position * world_scale);
@@ -1814,6 +2198,20 @@ void IXRTrackingSystemHook::process_view_rotation(
         return;
     }
 
+    if (vr->is_controller_camera_conflict_guard_active()) {
+        SPDLOG_INFO_ONCE("[ControllerCameraGuard] Bypassing ProcessViewRotation mutation");
+        call_orig();
+        return;
+    }
+
+    if (is_direct_aim_compatibility_active()) {
+        // Some games crash or misbehave in camera-manager XR paths when we mutate the
+        // PCM rotation directly. Keep the game path intact and drive control
+        // rotation through the safer manual direct-aim fallback instead.
+        call_orig();
+        return;
+    }
+
     //g_hook->pre_update_view_rotation(rot);
 
     call_orig();
@@ -1838,7 +2236,7 @@ void IXRTrackingSystemHook::update_view_rotation(sdk::UObject* reference_obj, Ro
 
     // Double check that the player controller passed through here is the local player controller
     static bool had_detection_error = false;
-    if (!had_detection_error && vr->is_aim_multiplayer_support_enabled()) try {
+    if (!is_deadzone_ue56_executable() && !had_detection_error && vr->is_aim_multiplayer_support_enabled()) try {
         if (reference_obj != nullptr && sdk::FUObjectArray::get() != nullptr) {
             const auto reference_obj_c = reference_obj->get_class();
 
@@ -1873,10 +2271,31 @@ void IXRTrackingSystemHook::update_view_rotation(sdk::UObject* reference_obj, Ro
         return;
     }
 
-    vr->set_decoupled_pitch(true);
+    if (vr->is_controller_camera_conflict_guard_active()) {
+        return;
+    }
 
     const auto has_double = g_hook->m_stereo_hook->has_double_precision();
+    const auto rot_size = has_double ? sizeof(Rotator<double>) : sizeof(Rotator<float>);
+    if (!detail::is_writable_process_range((uintptr_t)rot, rot_size)) {
+        SPDLOG_WARN_ONCE("[IXRTrackingSystemHook] update_view_rotation received an invalid rotation pointer");
+        return;
+    }
+
+    if (!vr->is_decoupled_pitch_enabled()) {
+        m_process_view_rotation_data.auto_enabled_decoupled_pitch = true;
+        vr->set_decoupled_pitch(true);
+    }
+
     auto rot_d = (Rotator<double>*)rot;
+    const glm::vec3 input_euler = has_double
+        ? glm::vec3{(float)rot_d->pitch, (float)rot_d->yaw, (float)rot_d->roll}
+        : glm::vec3{rot->pitch, rot->yaw, rot->roll};
+
+    if (!detail::finite_euler(input_euler)) {
+        SPDLOG_WARN_ONCE("[IXRTrackingSystemHook] update_view_rotation skipped non-finite input rotation");
+        return;
+    }
     
     const auto view_mat_inverse =
     has_double ?
@@ -1917,20 +2336,34 @@ void IXRTrackingSystemHook::update_view_rotation(sdk::UObject* reference_obj, Ro
 
         if (aim_type == VR::AimMethod::RIGHT_CONTROLLER || aim_type == VR::AimMethod::LEFT_CONTROLLER) {
             const auto controller_index = aim_type == VR::AimMethod::RIGHT_CONTROLLER ? vr->get_right_controller_index() : vr->get_left_controller_index();
-            og_controller_rot = glm::quat{vr->get_aim_rotation(controller_index)};
+            og_controller_rot = aim_type == VR::AimMethod::RIGHT_CONTROLLER
+                ? glm::quat{vr->get_controller_rotation_with_offset(VRRuntime::Hand::RIGHT)}
+                : glm::quat{vr->get_controller_rotation_with_offset(VRRuntime::Hand::LEFT)};
             og_controller_pos = glm::vec3{vr->get_aim_position(controller_index)};
             right_controller_forward = og_controller_rot * glm::vec3{0.0f, 0.0f, 1.0f};
         } else if (aim_type == VR::AimMethod::TWO_HANDED_RIGHT) { // two handed modes are for imitating rifle aiming
             const auto right_controller_index = vr->get_right_controller_index();
             const auto left_controller_index = vr->get_left_controller_index();
-            const auto pos_delta = glm::normalize(glm::vec3{vr->get_aim_position(left_controller_index) - vr->get_aim_position(right_controller_index)});
+            const auto raw_delta = glm::vec3{vr->get_aim_position(left_controller_index) - vr->get_aim_position(right_controller_index)};
+            const auto delta_len_sq = glm::dot(raw_delta, raw_delta);
+            if (!detail::finite_vec3(raw_delta) || delta_len_sq <= 0.000001f) {
+                return;
+            }
+
+            const auto pos_delta = glm::normalize(raw_delta);
             og_controller_rot = utility::math::to_quat(pos_delta);
             og_controller_pos = glm::vec3{vr->get_aim_position(right_controller_index)};
             right_controller_forward = og_controller_rot * glm::vec3{0.0f, 0.0f, -1.0f};
         } else if (aim_type == VR::AimMethod::TWO_HANDED_LEFT) {
             const auto right_controller_index = vr->get_right_controller_index();
             const auto left_controller_index = vr->get_left_controller_index();
-            const auto pos_delta = glm::normalize(glm::vec3{vr->get_aim_position(right_controller_index) - vr->get_aim_position(left_controller_index)});
+            const auto raw_delta = glm::vec3{vr->get_aim_position(right_controller_index) - vr->get_aim_position(left_controller_index)};
+            const auto delta_len_sq = glm::dot(raw_delta, raw_delta);
+            if (!detail::finite_vec3(raw_delta) || delta_len_sq <= 0.000001f) {
+                return;
+            }
+
+            const auto pos_delta = glm::normalize(raw_delta);
             og_controller_rot = utility::math::to_quat(pos_delta);
             og_controller_pos = glm::vec3{vr->get_aim_position(left_controller_index)};
             right_controller_forward = og_controller_rot * glm::vec3{0.0f, 0.0f, -1.0f};
@@ -1939,7 +2372,13 @@ void IXRTrackingSystemHook::update_view_rotation(sdk::UObject* reference_obj, Ro
         // This is so the camera will be facing a more correct direction
         // rather than the raw controller rotation
         const auto right_controller_end = og_controller_pos + (right_controller_forward * 1000.0f);
-        const auto adjusted_forward = glm::normalize(right_controller_end - glm::vec3{vr->get_standing_origin()});
+        const auto adjusted_forward_delta = right_controller_end - glm::vec3{vr->get_standing_origin()};
+        const auto adjusted_forward_len_sq = glm::dot(adjusted_forward_delta, adjusted_forward_delta);
+        if (!detail::finite_vec3(adjusted_forward_delta) || adjusted_forward_len_sq <= 0.000001f) {
+            return;
+        }
+
+        const auto adjusted_forward = glm::normalize(adjusted_forward_delta);
         const auto target_forward = utility::math::to_quat(adjusted_forward);
 
         glm::quat right_controller_forward_rot{};
@@ -1984,6 +2423,11 @@ void IXRTrackingSystemHook::update_view_rotation(sdk::UObject* reference_obj, Ro
         euler = glm::degrees(utility::math::euler_angles_from_steamvr(new_rotation));
 
         vr->recenter_view();
+    }
+
+    if (!detail::finite_euler(euler)) {
+        SPDLOG_WARN_ONCE("[IXRTrackingSystemHook] update_view_rotation skipped non-finite output rotation");
+        return;
     }
 
     if (has_double) {

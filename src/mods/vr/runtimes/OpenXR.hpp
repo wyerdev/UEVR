@@ -1,7 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <unordered_set>
 #include <deque>
+#include <chrono>
+#include <mutex>
 
 #include <d3d11.h>
 #include <d3d12.h>
@@ -34,6 +37,16 @@ struct OpenXR final : public VRRuntime {
         int32_t height;
     };
 
+    struct SwapchainDimensionSnapshot {
+        uint32_t count{};
+        uint32_t ui_width{};
+        uint32_t ui_height{};
+        uint32_t eye_width{};
+        uint32_t eye_height{};
+        uint32_t depth_width{};
+        uint32_t depth_height{};
+    };
+
     VRRuntime::Type type() const override { 
         return VRRuntime::Type::OPENXR;
     }
@@ -44,6 +57,14 @@ struct OpenXR final : public VRRuntime {
 
     bool ready() const override {
         return VRRuntime::ready() && this->session_ready;
+    }
+
+    bool can_run_frame_loop() const {
+        return ready() &&
+            (this->session_state == XR_SESSION_STATE_READY ||
+             this->session_state == XR_SESSION_STATE_SYNCHRONIZED ||
+             this->session_state == XR_SESSION_STATE_VISIBLE ||
+             this->session_state == XR_SESSION_STATE_FOCUSED);
     }
 
     bool is_depth_allowed() const override {
@@ -71,13 +92,15 @@ struct OpenXR final : public VRRuntime {
     void on_pre_render_render_thread(uint32_t frame_count) override {};
     void on_pre_render_rhi_thread(uint32_t frame_count) override {};
 
-    VRRuntime::Error synchronize_frame(std::optional<uint32_t> frame_count = std::nullopt) override;
+    VRRuntime::Error synchronize_frame(
+        std::optional<uint32_t> frame_count = std::nullopt,
+        SyncFrameCallsite callsite = SyncFrameCallsite::Unknown) override;
     VRRuntime::Error fix_frame() override {
         // sync if necessary.
         VRRuntime::fix_frame();
 
         if (!this->frame_began) {
-            this->begin_frame();
+            this->begin_frame("runtime_fix_frame");
         }
 
         return VRRuntime::Error::SUCCESS;
@@ -86,6 +109,8 @@ struct OpenXR final : public VRRuntime {
     VRRuntime::Error update_render_target_size() override;
     uint32_t get_width() const override;
     uint32_t get_height() const override;
+    uint32_t get_width_for_scale(float scale) const;
+    uint32_t get_height_for_scale(float scale) const;
 
     VRRuntime::Error consume_events(std::function<void(void*)> callback) override;
 
@@ -126,14 +151,28 @@ public:
     std::string get_result_string(XrResult result) const;
     std::string get_structure_string(XrStructureType type) const;
     std::string get_path_string(XrPath path) const;
+    std::string get_session_state_string(XrSessionState state) const;
     XrPath get_path(const std::string& path) const;
     std::string get_current_interaction_profile() const;
     XrPath get_current_interaction_profile_path() const;
 
     std::optional<std::string> initialize_actions(const std::string& json_string);
 
-    XrResult begin_frame();
+    XrResult begin_frame(const char* caller = "unknown");
     XrResult end_frame(const std::vector<XrCompositionLayerBaseHeader*>& quad_layers, bool has_depth = false);
+    XrResult recover_wedged_frame(const char* reason);
+    bool close_synced_frame_without_layers(const char* reason);
+    void prepare_resolution_scale_reconfigure(const char* reason);
+    bool recover_focused_stale_frame_loop(const char* caller);
+    void log_frame_lifecycle_state(const char* prefix) const;
+    void trace_wait_frame_success(std::optional<uint32_t> frame_count, SyncFrameCallsite callsite);
+    void trace_begin_frame_request(const char* caller);
+    void clear_frame_synced(const char* reason);
+    bool should_trace_frame_flow() const;
+    int64_t get_pose_update_age_ms(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) const;
+    VRRuntime::Error refresh_stale_pose_before_submit(uint32_t frame_count, const char* caller);
+    bool is_everspace2_coherent_submit_active() const;
+    void set_everspace2_d3d12_submit_active(bool active);
 
     void begin_profile() {
         if (!this->profile_calls) {
@@ -206,6 +245,13 @@ public:
 
     std::vector<XrViewConfigurationView> view_configs{};
     std::unordered_map<uint32_t, Swapchain> swapchains{}; // SwapchainIndex -> Swapchain
+    std::atomic_uint32_t cached_swapchain_count{};
+    std::atomic_uint32_t cached_ui_swapchain_width{};
+    std::atomic_uint32_t cached_ui_swapchain_height{};
+    std::atomic_uint32_t cached_eye_swapchain_width{};
+    std::atomic_uint32_t cached_eye_swapchain_height{};
+    std::atomic_uint32_t cached_depth_swapchain_width{};
+    std::atomic_uint32_t cached_depth_swapchain_height{};
     std::vector<XrView> views{};
     std::vector<XrView> stage_views{};
 
@@ -216,6 +262,12 @@ public:
         std::vector<XrView> stage_views{};
         uint32_t frame_count{0}; // Updated on game thread prior to rendering
         uint32_t prev_frame_count{0}; // Updated right after xrWaitFrame is called
+        uint32_t coherent_source_frame_count{};
+        uint64_t coherent_sequence{};
+        XrTime coherent_display_time{};
+        std::chrono::steady_clock::time_point coherent_capture_time{};
+        bool coherent_complete{};
+        bool coherent_matches_render{};
     };
     /*std::array<std::vector<XrView>, 3> stage_view_queue{};
     std::array<XrSpaceLocation, 3> view_space_location_queue{};
@@ -295,15 +347,129 @@ public:
 
     PipelineState last_submit_state{};
     PipelineState get_submit_state();
+    bool capture_everspace2_submit_snapshot(uint32_t frame_count, PipelineState& snapshot);
+    bool is_everspace2_snapshot_fresh(
+        const PipelineState& snapshot,
+        std::chrono::steady_clock::time_point now,
+        int64_t* age_ms = nullptr) const;
+    void log_everspace2_coherent_submit_summary_if_needed();
+
+    struct FrameTimingStats {
+        uint64_t count{};
+        double total_ms{};
+        double max_ms{};
+
+        void add(std::chrono::steady_clock::duration duration) {
+            const auto ms = std::chrono::duration<double, std::milli>{duration}.count();
+            ++count;
+            total_ms += ms;
+            if (ms > max_ms) {
+                max_ms = ms;
+            }
+        }
+
+        double avg() const {
+            return count == 0 ? 0.0 : total_ms / (double)count;
+        }
+
+        void reset() {
+            count = 0;
+            total_ms = 0.0;
+            max_ms = 0.0;
+        }
+    };
+
+    void log_frame_timing_stats_if_needed();
     
     const ModSlider::Ptr resolution_scale{ ModSlider::create("OpenXR_ResolutionScale", 0.1f, 3.0f, 1.0f) };
     const ModToggle::Ptr ignore_vd_checks{ ModToggle::create("OpenXR_IgnoreVirtualDesktopChecks", false) };
+    const ModToggle::Ptr debug_frame_trace{ ModToggle::create("OpenXR_DebugFrameTrace", false) };
+    const ModToggle::Ptr debug_submit_empty_frame{ ModToggle::create("OpenXR_DebugSubmitEmptyFrame", false) };
+    const ModToggle::Ptr debug_skip_scene_copy{ ModToggle::create("OpenXR_DebugSkipSceneCopy", false) };
+    const ModToggle::Ptr debug_skip_ui_copy{ ModToggle::create("OpenXR_DebugSkipUICopy", false) };
+    const ModToggle::Ptr debug_disable_depth_submit{ ModToggle::create("OpenXR_DebugDisableDepthSubmit", false) };
+    const ModToggle::Ptr refresh_stale_pose_before_submit_enabled{ ModToggle::create("OpenXR_RefreshStalePoseBeforeSubmit", true) };
+    bool resolution_scale_reconfigure_pending{false};
+    bool resolution_scale_live_apply_deferred{false};
+    float last_applied_resolution_scale{1.0f};
+    uint32_t last_applied_resolution_width{};
+    uint32_t last_applied_resolution_height{};
     bool push_dummy_projection{ false };
     bool ever_submitted{false};
+    bool has_valid_projection_data{false};
+    std::mutex everspace2_pose_capture_mtx{};
+    std::atomic_bool everspace2_d3d12_submit_active{false};
+    std::atomic_bool everspace2_has_real_projection_submit{false};
+    uint64_t everspace2_snapshot_sequence{};
+    uint64_t everspace2_exact_submit_count{};
+    uint64_t everspace2_nearby_submit_count{};
+    uint64_t everspace2_fresh_capture_submit_count{};
+    uint64_t everspace2_single_frame_hold_submit_count{};
+    uint64_t everspace2_rejected_submit_count{};
+    int64_t everspace2_max_submit_pose_age_ms{};
+    bool everspace2_single_frame_hold_used{};
+    std::chrono::steady_clock::time_point everspace2_last_submit_log{};
+    std::chrono::steady_clock::time_point everspace2_last_summary_log{};
+    uint64_t last_wait_trace_sequence{};
+    uint32_t last_wait_trace_frame_count{};
+    SyncFrameCallsite last_wait_trace_callsite{SyncFrameCallsite::Unknown};
+    const char* last_begin_frame_caller{"none"};
+    const char* last_frame_synced_clear_reason{"none"};
+    std::chrono::steady_clock::time_point last_frame_synced_clear_time{};
+    uint32_t frame_synced_skip_streak{0};
+    std::chrono::steady_clock::time_point last_frame_synced_skip_log{};
+
+    uint32_t frame_began_skip_streak{0};
+    uint64_t frame_began_skip_suppressed_count{0};
+    uint32_t forced_frame_recovery_count{0};
+    uint32_t focused_frame_loop_recovery_count{0};
+    bool accepted_relaxed_startup_poses{false};
+    std::chrono::steady_clock::time_point last_frame_began_log{};
+    std::chrono::steady_clock::time_point last_focused_frame_loop_recovery{};
+    std::chrono::steady_clock::time_point last_successful_wait_frame{};
+    std::chrono::steady_clock::time_point last_successful_begin_frame{};
+    std::chrono::steady_clock::time_point last_successful_end_frame{};
+    std::chrono::steady_clock::time_point last_successful_pose_update{};
+    std::chrono::steady_clock::time_point session_ready_since{};
+    std::chrono::steady_clock::time_point last_ready_state_probe_log{};
+    std::chrono::steady_clock::time_point last_valid_pose_probe_log{};
+    std::chrono::steady_clock::time_point last_pose_validation_failure_log{};
+    std::chrono::steady_clock::time_point last_frame_timing_log{};
+    std::chrono::steady_clock::time_point last_long_wait_log{};
+    std::chrono::steady_clock::time_point last_slow_pose_update_log{};
+    std::chrono::steady_clock::time_point last_stale_pose_skip_log{};
+    std::chrono::steady_clock::time_point last_stale_pose_submit_log{};
+    FrameTimingStats wait_frame_timing{};
+    FrameTimingStats begin_frame_timing{};
+    FrameTimingStats end_frame_timing{};
+    FrameTimingStats pose_update_timing{};
+    std::array<FrameTimingStats, (size_t)SyncFrameCallsite::Count> wait_frame_callsite_timing{};
+    uint64_t pose_update_call_count{};
+    uint64_t pose_update_view_extension_count{};
+    uint64_t pose_update_non_view_extension_count{};
+    uint64_t stale_pose_skip_suppressed_count{};
+    uint64_t stale_pose_refresh_attempt_count{};
+    uint64_t stale_pose_refresh_success_count{};
+    uint64_t stale_pose_refresh_failed_count{};
+    uint64_t long_wait_suppressed_count{};
+    double long_wait_max_suppressed_ms{};
+    uint32_t last_pose_update_frame_count{};
+    bool last_pose_update_from_view_extensions{};
+    int64_t last_pose_update_result{};
+    double last_pose_update_ms{};
+    double last_pose_view_locate_ms{};
+    double last_pose_stage_locate_ms{};
+    double last_pose_space_locate_ms{};
     
     Mod::ValueList options{
         *resolution_scale,
         *ignore_vd_checks,
+        *debug_frame_trace,
+        *debug_submit_empty_frame,
+        *debug_skip_scene_copy,
+        *debug_skip_ui_copy,
+        *debug_disable_depth_submit,
+        *refresh_stale_pose_before_submit_enabled,
     };
 
     enum class SwapchainIndex {
@@ -313,6 +479,7 @@ public:
         DOUBLE_WIDE = STANDARD_START,
         DEPTH,
         DUMMY_VIRTUAL_DESKTOP,
+        NATIVE_STEREO_ARRAY,
 
         STANDARD_END,
 
@@ -339,6 +506,71 @@ public:
         STANDARD_COUNT = STANDARD_END - STANDARD_START,
         EXTRA_COUNT = EXTRA_END - EXTRA_START,
     };
+
+    void clear_cached_swapchain_dimensions() {
+        cached_swapchain_count.store(0, std::memory_order_relaxed);
+        cached_ui_swapchain_width.store(0, std::memory_order_relaxed);
+        cached_ui_swapchain_height.store(0, std::memory_order_relaxed);
+        cached_eye_swapchain_width.store(0, std::memory_order_relaxed);
+        cached_eye_swapchain_height.store(0, std::memory_order_relaxed);
+        cached_depth_swapchain_width.store(0, std::memory_order_relaxed);
+        cached_depth_swapchain_height.store(0, std::memory_order_relaxed);
+    }
+
+    void cache_swapchain_dimensions(uint32_t index, int32_t width, int32_t height) {
+        const auto w = width > 0 ? (uint32_t)width : 0;
+        const auto h = height > 0 ? (uint32_t)height : 0;
+        cached_swapchain_count.fetch_add(1, std::memory_order_relaxed);
+
+        switch ((SwapchainIndex)index) {
+        case SwapchainIndex::UI:
+            cached_ui_swapchain_width.store(w, std::memory_order_relaxed);
+            cached_ui_swapchain_height.store(h, std::memory_order_relaxed);
+            break;
+        case SwapchainIndex::DOUBLE_WIDE:
+            cached_eye_swapchain_width.store(w, std::memory_order_relaxed);
+            cached_eye_swapchain_height.store(h, std::memory_order_relaxed);
+            break;
+        case SwapchainIndex::NATIVE_STEREO_ARRAY:
+            cached_eye_swapchain_width.store(w, std::memory_order_relaxed);
+            cached_eye_swapchain_height.store(h, std::memory_order_relaxed);
+            break;
+        case SwapchainIndex::AFR_LEFT_EYE:
+            if (cached_eye_swapchain_width.load(std::memory_order_relaxed) == 0 ||
+                cached_eye_swapchain_height.load(std::memory_order_relaxed) == 0)
+            {
+                cached_eye_swapchain_width.store(w, std::memory_order_relaxed);
+                cached_eye_swapchain_height.store(h, std::memory_order_relaxed);
+            }
+            break;
+        case SwapchainIndex::DEPTH:
+            cached_depth_swapchain_width.store(w, std::memory_order_relaxed);
+            cached_depth_swapchain_height.store(h, std::memory_order_relaxed);
+            break;
+        case SwapchainIndex::AFR_DEPTH_LEFT_EYE:
+            if (cached_depth_swapchain_width.load(std::memory_order_relaxed) == 0 ||
+                cached_depth_swapchain_height.load(std::memory_order_relaxed) == 0)
+            {
+                cached_depth_swapchain_width.store(w, std::memory_order_relaxed);
+                cached_depth_swapchain_height.store(h, std::memory_order_relaxed);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
+    SwapchainDimensionSnapshot get_cached_swapchain_dimensions() const {
+        return {
+            .count = cached_swapchain_count.load(std::memory_order_relaxed),
+            .ui_width = cached_ui_swapchain_width.load(std::memory_order_relaxed),
+            .ui_height = cached_ui_swapchain_height.load(std::memory_order_relaxed),
+            .eye_width = cached_eye_swapchain_width.load(std::memory_order_relaxed),
+            .eye_height = cached_eye_swapchain_height.load(std::memory_order_relaxed),
+            .depth_width = cached_depth_swapchain_width.load(std::memory_order_relaxed),
+            .depth_height = cached_depth_swapchain_height.load(std::memory_order_relaxed),
+        };
+    }
 
     struct Action {
         std::vector<XrAction> action_collection{};

@@ -1,16 +1,21 @@
 #define NOMINMAX
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
 #include <utility/Config.hpp>
+#include <utility/Module.hpp>
 #include <utility/String.hpp>
 
 #include <sdk/CVar.hpp>
 #include <sdk/threading/GameThreadWorker.hpp>
 #include <sdk/ConsoleManager.hpp>
 #include <sdk/UGameplayStatics.hpp>
+#include <sdk/Utility.hpp>
 
 #include "Framework.hpp"
 
@@ -21,6 +26,353 @@
 constexpr std::string_view cvars_standard_txt_name = "cvars_standard.txt";
 constexpr std::string_view cvars_data_txt_name = "cvars_data.txt";
 constexpr std::string_view user_script_txt_name = "user_script.txt";
+
+namespace {
+bool is_ue_5_1_dx12_backend_for_cvars() {
+    if (g_framework == nullptr || !g_framework->is_dx12()) {
+        return false;
+    }
+
+    static const bool is_ue_5_1 = []() {
+        const auto found_version = sdk::search_for_version(utility::get_executable());
+
+        if (found_version) {
+            const auto version = utility::narrow(*found_version);
+            return version == "5.1" || version.starts_with("5.1.");
+        }
+
+        const auto disk_version = sdk::get_file_version_info();
+        return disk_version.dwFileVersionMS == 0x00050001;
+    }();
+
+    return is_ue_5_1;
+}
+
+bool is_stalker2_current_game_for_cvars() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && exe_path->find(L"Stalker2-Win64-Shipping") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+bool is_aphelion_current_game_for_cvars() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path &&
+            (exe_path->find(L"PIO-WinGDK-Shipping") != std::wstring::npos ||
+             exe_path->find(L"PIO-Win64-Shipping") != std::wstring::npos ||
+             exe_path->find(L"Aphelion") != std::wstring::npos);
+    }();
+
+    return result;
+}
+
+bool is_windrose_ue56_dx12_current_game_for_cvars() {
+    if (g_framework == nullptr || !g_framework->is_dx12()) {
+        return false;
+    }
+
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+
+        if (!exe_path || exe_path->find(L"Windrose-Win64-Shipping") == std::wstring::npos) {
+            return false;
+        }
+
+        if (const auto found_version = sdk::search_for_version(utility::get_executable())) {
+            const auto version = utility::narrow(*found_version);
+            return version == "5.6" || version.starts_with("5.6.");
+        }
+
+        const auto disk_version = sdk::get_file_version_info();
+        return disk_version.dwFileVersionMS == 0x00050006;
+    }();
+
+    return result;
+}
+
+bool propagate_alpha_allows_tonemapper_value() {
+    static const bool result = []() {
+        int major{};
+        int minor{};
+
+        if (const auto found_version = sdk::search_for_version(utility::get_executable())) {
+            if (swscanf_s(found_version->c_str(), L"%d.%d", &major, &minor) == 2) {
+                return major < 5 || (major == 5 && minor <= 4);
+            }
+        }
+
+        const auto disk_version = sdk::get_file_version_info();
+        major = (int)((disk_version.dwFileVersionMS >> 16) & 0xffff);
+        minor = (int)(disk_version.dwFileVersionMS & 0xffff);
+
+        return major < 5 || (major == 5 && minor <= 4);
+    }();
+
+    return result;
+}
+
+bool force_ue51_fsr3_runtime_cvars_once(int attempt) {
+    if (!is_ue_5_1_dx12_backend_for_cvars() || !is_stalker2_current_game_for_cvars()) {
+        return true;
+    }
+
+    const auto console_manager = sdk::FConsoleManager::get();
+
+    if (console_manager == nullptr) {
+        return false;
+    }
+
+    const auto has_fsr3_plugin_cvars =
+        console_manager->find(L"r.FidelityFX.FSR3.Enabled") != nullptr ||
+        console_manager->find(L"r.FidelityFX.FI.OverrideSwapChainDX12") != nullptr;
+
+    if (!has_fsr3_plugin_cvars) {
+        return false;
+    }
+
+    struct ForcedCVar {
+        const wchar_t* name;
+        const wchar_t* value;
+    };
+
+    // Stalker2's current UE 5.1 build can crash on level load when D3D12
+    // closes a copy command list containing occlusion query work.
+    static constexpr std::array forced_cvars{
+        ForcedCVar{L"r.AllowOcclusionQueries", L"0"},
+    };
+
+    int found{};
+    int set_ok{};
+    int set_failed{};
+    int missing{};
+
+    for (const auto& forced : forced_cvars) {
+        auto object = console_manager->find(forced.name);
+
+        if (object == nullptr) {
+            ++missing;
+            SPDLOG_INFO("[UE5.1][DX12] cvar missing: {}", utility::narrow(forced.name));
+            continue;
+        }
+
+        ++found;
+        auto variable = (sdk::IConsoleVariable*)object;
+
+        int before{};
+        int after{};
+        bool ok{};
+
+        try {
+            before = variable->GetInt();
+            ok = variable->Set(forced.value);
+            after = variable->GetInt();
+        } catch (...) {
+            ok = false;
+        }
+
+        if (ok) {
+            ++set_ok;
+        } else {
+            ++set_failed;
+        }
+
+        SPDLOG_INFO(
+            "[UE5.1][DX12] forced {}: before={} requested={} after={} ok={}",
+            utility::narrow(forced.name),
+            before,
+            utility::narrow(forced.value),
+            after,
+            ok);
+    }
+
+    SPDLOG_INFO(
+        "[UE5.1][DX12] runtime cvar pass complete attempt={} found={} missing={} set_ok={} set_failed={}",
+        attempt,
+        found,
+        missing,
+        set_ok,
+        set_failed);
+
+    return true;
+}
+
+bool force_aphelion_framegen_runtime_cvars_once(int attempt) {
+    if (g_framework == nullptr || !g_framework->is_dx12() || !is_aphelion_current_game_for_cvars()) {
+        return true;
+    }
+
+    const auto console_manager = sdk::FConsoleManager::get();
+
+    if (console_manager == nullptr) {
+        return false;
+    }
+
+    struct ForcedCVar {
+        const wchar_t* name;
+        const wchar_t* value;
+    };
+
+    // Aphelion ships both Streamline/DLSSG and FSR3 frame-interpolation paths.
+    // In VR these custom-present/frame-generation layers can fight UEVR's OpenXR
+    // submission and produce gameplay-only stalls or one-frame camera-cut ghosting.
+    static constexpr std::array forced_cvars{
+        ForcedCVar{L"r.FidelityFX.FI.Enabled", L"0"},
+        ForcedCVar{L"r.FidelityFX.FI.OverrideSwapChainDX12", L"0"},
+        ForcedCVar{L"r.FidelityFX.FI.RHIPacingMode", L"0"},
+        ForcedCVar{L"r.Streamline.DLSSG.Enable", L"0"},
+        ForcedCVar{L"r.Streamline.Latewarp.Enable", L"0"},
+        ForcedCVar{L"t.Streamline.Reflex.Enable", L"0"},
+        ForcedCVar{L"t.Streamline.Reflex.Auto", L"0"},
+        ForcedCVar{L"t.Streamline.Reflex.Mode", L"0"},
+        ForcedCVar{L"r.Streamline.Reflex.PredictiveRendering", L"0"},
+    };
+
+    int found{};
+    int set_ok{};
+    int set_failed{};
+    int missing{};
+
+    for (const auto& forced : forced_cvars) {
+        auto object = console_manager->find(forced.name);
+
+        if (object == nullptr) {
+            ++missing;
+            continue;
+        }
+
+        ++found;
+        auto variable = (sdk::IConsoleVariable*)object;
+
+        int before{};
+        int after{};
+        bool ok{};
+
+        try {
+            before = variable->GetInt();
+            ok = variable->Set(forced.value);
+            after = variable->GetInt();
+        } catch (...) {
+            ok = false;
+        }
+
+        if (ok) {
+            ++set_ok;
+        } else {
+            ++set_failed;
+        }
+
+        SPDLOG_INFO(
+            "[Aphelion][DX12] forced {}: before={} requested={} after={} ok={}",
+            utility::narrow(forced.name),
+            before,
+            utility::narrow(forced.value),
+            after,
+            ok);
+    }
+
+    if (found == 0) {
+        return false;
+    }
+
+    SPDLOG_INFO(
+        "[Aphelion][DX12] frame-generation cvar pass complete attempt={} found={} missing={} set_ok={} set_failed={}",
+        attempt,
+        found,
+        missing,
+        set_ok,
+        set_failed);
+
+    return true;
+}
+
+bool force_windrose_shadow_runtime_cvars_once(int attempt) {
+    if (!is_windrose_ue56_dx12_current_game_for_cvars()) {
+        return true;
+    }
+
+    const auto console_manager = sdk::FConsoleManager::get();
+
+    if (console_manager == nullptr) {
+        return false;
+    }
+
+    struct ForcedCVar {
+        const wchar_t* name;
+        const wchar_t* value;
+    };
+
+    // Windrose/R5 crashes in UE5.6 distance-field/heightfield shadow RDG work
+    // when UEVR is active. This is deliberately scoped to crash avoidance only;
+    // it does not try to fix the separate HUD-only black-scene renderer issue.
+    static constexpr std::array forced_cvars{
+        ForcedCVar{L"r.DistanceFieldShadowing", L"0"},
+        ForcedCVar{L"r.HeightFieldShadowing", L"0"},
+        ForcedCVar{L"r.DFShadowQuality", L"0"},
+        ForcedCVar{L"r.HFShadowQuality", L"0"},
+        ForcedCVar{L"r.DFShadowAsyncCompute", L"0"},
+    };
+
+    int found{};
+    int set_ok{};
+    int set_failed{};
+    int missing{};
+
+    for (const auto& forced : forced_cvars) {
+        auto object = console_manager->find(forced.name);
+
+        if (object == nullptr) {
+            ++missing;
+            continue;
+        }
+
+        ++found;
+        auto variable = (sdk::IConsoleVariable*)object;
+
+        int before{};
+        int after{};
+        bool ok{};
+
+        try {
+            before = variable->GetInt();
+            ok = variable->Set(forced.value);
+            after = variable->GetInt();
+        } catch (...) {
+            ok = false;
+        }
+
+        if (ok) {
+            ++set_ok;
+        } else {
+            ++set_failed;
+        }
+
+        SPDLOG_INFO(
+            "[Windrose][UE5.6][ShadowCrash] forced {}: before={} requested={} after={} ok={}",
+            utility::narrow(forced.name),
+            before,
+            utility::narrow(forced.value),
+            after,
+            ok);
+    }
+
+    if (found == 0) {
+        return false;
+    }
+
+    SPDLOG_INFO(
+        "[Windrose][UE5.6][ShadowCrash] cvar pass complete attempt={} found={} missing={} set_ok={} set_failed={}",
+        attempt,
+        found,
+        missing,
+        set_ok,
+        set_failed);
+
+    return true;
+}
+}
 
 CVarManager::CVarManager() {
     ZoneScopedN(__FUNCTION__);
@@ -56,6 +408,39 @@ CVarManager::~CVarManager() {
     }*/
 }
 
+CVarManager::ChangeSnapshot CVarManager::get_change_snapshot() const {
+    std::scoped_lock _{s_change_mutex};
+    return s_change_snapshot;
+}
+
+uint64_t CVarManager::get_change_counter() const {
+    return s_change_counter.load(std::memory_order_relaxed);
+}
+
+void CVarManager::record_global_change(std::wstring_view name, std::wstring_view value, std::string_view source) {
+    const auto counter = s_change_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::scoped_lock _{s_change_mutex};
+    s_change_snapshot.counter = counter;
+    s_change_snapshot.name = utility::narrow(std::wstring{name});
+    s_change_snapshot.value = utility::narrow(std::wstring{value});
+    s_change_snapshot.source = std::string{source};
+}
+
+void CVarManager::record_global_command(std::string_view command, std::string_view source) {
+    const auto counter = s_change_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::scoped_lock _{s_change_mutex};
+    s_change_snapshot.counter = counter;
+    s_change_snapshot.name = "<console_command>";
+    s_change_snapshot.value = std::string{command};
+    s_change_snapshot.source = std::string{source};
+}
+
+void CVarManager::refresh_frozen_cvar_state() {
+    m_has_frozen_cvars = std::any_of(m_all_cvars.begin(), m_all_cvars.end(), [](const auto& cvar) {
+        return cvar->is_frozen();
+    });
+}
+
 void CVarManager::spawn_console() {
     if (m_native_console_spawned) {
         return;
@@ -82,22 +467,83 @@ void CVarManager::spawn_console() {
 void CVarManager::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     ZoneScopedN(__FUNCTION__);
 
-    for (auto& cvar : m_all_cvars) {
-        cvar->update();
-        cvar->freeze();
+    const bool process_all_cvars = m_needs_full_refresh || m_cvar_ui_open_this_frame;
+
+    if (process_all_cvars) {
+        for (auto& cvar : m_all_cvars) {
+            cvar->update();
+        }
+    } else if (m_has_frozen_cvars) {
+        for (auto& cvar : m_all_cvars) {
+            if (cvar->is_frozen()) {
+                cvar->update();
+            }
+        }
     }
+
+    if (m_has_frozen_cvars) {
+        for (auto& cvar : m_all_cvars) {
+            if (process_all_cvars || cvar->is_frozen()) {
+                cvar->freeze();
+            }
+        }
+    }
+
+    m_needs_full_refresh = false;
 
     if (m_should_execute_console_script) {
         execute_console_script(engine, user_script_txt_name.data());
         m_should_execute_console_script = false;
+        m_ue51_fsr3_runtime_cvars_done = false;
+        m_ue51_fsr3_runtime_cvar_attempts = 0;
+        m_aphelion_framegen_runtime_cvars_done = false;
+        m_aphelion_framegen_runtime_cvar_attempts = 0;
+        m_windrose_shadow_runtime_cvars_done = false;
+        m_windrose_shadow_runtime_cvar_attempts = 0;
+    }
+
+    if (!m_ue51_fsr3_runtime_cvars_done) {
+        ++m_ue51_fsr3_runtime_cvar_attempts;
+
+        if (force_ue51_fsr3_runtime_cvars_once(m_ue51_fsr3_runtime_cvar_attempts)) {
+            m_ue51_fsr3_runtime_cvars_done = true;
+        } else if (m_ue51_fsr3_runtime_cvar_attempts >= 600) {
+            SPDLOG_WARN("[UE5.1][DX12] runtime cvars were not found after {} attempts; giving up", m_ue51_fsr3_runtime_cvar_attempts);
+            m_ue51_fsr3_runtime_cvars_done = true;
+        }
+    }
+
+    if (!m_aphelion_framegen_runtime_cvars_done) {
+        ++m_aphelion_framegen_runtime_cvar_attempts;
+
+        if (force_aphelion_framegen_runtime_cvars_once(m_aphelion_framegen_runtime_cvar_attempts)) {
+            m_aphelion_framegen_runtime_cvars_done = true;
+        } else if (m_aphelion_framegen_runtime_cvar_attempts >= 600) {
+            SPDLOG_WARN("[Aphelion][DX12] frame-generation cvars were not found after {} attempts; giving up", m_aphelion_framegen_runtime_cvar_attempts);
+            m_aphelion_framegen_runtime_cvars_done = true;
+        }
+    }
+
+    if (!m_windrose_shadow_runtime_cvars_done) {
+        ++m_windrose_shadow_runtime_cvar_attempts;
+
+        if (force_windrose_shadow_runtime_cvars_once(m_windrose_shadow_runtime_cvar_attempts)) {
+            m_windrose_shadow_runtime_cvars_done = true;
+        } else if (m_windrose_shadow_runtime_cvar_attempts >= 600) {
+            SPDLOG_WARN("[Windrose][UE5.6][ShadowCrash] cvars were not found after {} attempts; giving up", m_windrose_shadow_runtime_cvar_attempts);
+            m_windrose_shadow_runtime_cvars_done = true;
+        }
     }
 }
 
 void CVarManager::on_draw_ui() {
     ZoneScopedN(__FUNCTION__);
 
+    m_cvar_ui_open_this_frame = false;
+
     ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);
     if (ImGui::TreeNode("CVars")) {
+        m_cvar_ui_open_this_frame = true;
         ImGui::TextWrapped("Note: Any changes here will be frozen.");
 
         uint32_t frozen_cvars = 0;
@@ -131,6 +577,8 @@ void CVarManager::on_draw_ui() {
                 cvar->unfreeze();
             }
 
+            refresh_frozen_cvar_state();
+
             const auto cvars_txt = Framework::get_persistent_dir(cvars_standard_txt_name.data());
 
             try {
@@ -156,11 +604,17 @@ void CVarManager::on_draw_ui() {
             cvar->draw_ui();
         }
 
+        refresh_frozen_cvar_state();
+
         ImGui::TreePop();
     }
 }
 
 void CVarManager::on_frame() {
+    if (!g_framework->is_drawing_ui()) {
+        m_cvar_ui_open_this_frame = false;
+    }
+
     if (m_wants_display_console) {
         display_console();
     }
@@ -169,9 +623,32 @@ void CVarManager::on_frame() {
 void CVarManager::on_config_load(const utility::Config& cfg, bool set_defaults) {
     ZoneScopedN(__FUNCTION__);
 
-    for (auto& cvar : m_all_cvars) {
-        cvar->load(set_defaults);
+    const auto cvars_standard_txt = Framework::get_persistent_dir(cvars_standard_txt_name.data());
+    utility::Config standard_cfg{};
+
+    if (std::filesystem::exists(cvars_standard_txt)) {
+        spdlog::info("[CVarManager] Loading {}...", cvars_standard_txt_name.data());
+        standard_cfg.load(cvars_standard_txt.string());
     }
+
+    const auto cvars_data_txt = Framework::get_persistent_dir(cvars_data_txt_name.data());
+    utility::Config data_cfg{};
+
+    if (std::filesystem::exists(cvars_data_txt)) {
+        spdlog::info("[CVarManager] Loading {}...", cvars_data_txt_name.data());
+        data_cfg.load(cvars_data_txt.string());
+    }
+
+    for (auto& cvar : m_all_cvars) {
+        if (dynamic_cast<CVarStandard*>(cvar.get()) != nullptr) {
+            cvar->load_from_config(standard_cfg, set_defaults);
+        } else {
+            cvar->load_from_config(data_cfg, set_defaults);
+        }
+    }
+
+    refresh_frozen_cvar_state();
+    m_needs_full_refresh = true;
 
     // TODO: Add arbitrary cvars from the other configs the user can add.
 
@@ -429,6 +906,26 @@ std::string CVarManager::CVar::get_key_name() {
     return std::format("{}_{}", utility::narrow(m_module), utility::narrow(m_name));
 }
 
+int CVarManager::CVar::clamp_int_value(int value) const {
+    return std::clamp(value, m_min_int_value, effective_max_int_value());
+}
+
+float CVarManager::CVar::clamp_float_value(float value) const {
+    if (!std::isfinite(value)) {
+        return m_min_float_value;
+    }
+
+    return std::clamp(value, m_min_float_value, m_max_float_value);
+}
+
+int CVarManager::CVar::effective_max_int_value() const {
+    if (m_name == L"r.PostProcessing.PropagateAlpha" && !propagate_alpha_allows_tonemapper_value()) {
+        return std::min(m_max_int_value, 1);
+    }
+
+    return m_max_int_value;
+}
+
 void CVarManager::CVar::load_internal(const std::string& filename, bool set_defaults) try {
     ZoneScopedN(__FUNCTION__);
 
@@ -452,16 +949,16 @@ void CVarManager::CVar::load_internal(const std::string& filename, bool set_defa
     case Type::BOOL:
     case Type::INT:
         try {
-            m_frozen_int_value = *cfg.get<int>(get_key_name());
+            m_frozen_int_value = clamp_int_value(*cfg.get<int>(get_key_name()));
         } catch(...) {
-            m_frozen_int_value = (int)*cfg.get<float>(get_key_name());
+            m_frozen_int_value = clamp_int_value((int)*cfg.get<float>(get_key_name()));
         }
         break;
     case Type::FLOAT:
         try {
-            m_frozen_float_value = *cfg.get<float>(get_key_name());
+            m_frozen_float_value = clamp_float_value(*cfg.get<float>(get_key_name()));
         } catch(...) {
-            m_frozen_float_value = (float)*cfg.get<int>(get_key_name());
+            m_frozen_float_value = clamp_float_value((float)*cfg.get<int>(get_key_name()));
         }
         break;
     }
@@ -469,6 +966,36 @@ void CVarManager::CVar::load_internal(const std::string& filename, bool set_defa
     m_frozen = true;
 } catch(const std::exception& e) {
     spdlog::error("Failed to load {}: {}", filename, e.what());
+}
+
+void CVarManager::CVar::load_from_config_internal(const utility::Config& cfg, bool set_defaults) {
+    ZoneScopedN(__FUNCTION__);
+
+    const auto value = cfg.get(get_key_name());
+
+    if (!value) {
+        return;
+    }
+
+    switch (m_type) {
+    case Type::BOOL:
+    case Type::INT:
+        try {
+            m_frozen_int_value = clamp_int_value(*cfg.get<int>(get_key_name()));
+        } catch (...) {
+            m_frozen_int_value = clamp_int_value((int)*cfg.get<float>(get_key_name()));
+        }
+        break;
+    case Type::FLOAT:
+        try {
+            m_frozen_float_value = clamp_float_value(*cfg.get<float>(get_key_name()));
+        } catch (...) {
+            m_frozen_float_value = clamp_float_value((float)*cfg.get<int>(get_key_name()));
+        }
+        break;
+    }
+
+    m_frozen = true;
 }
 
 void CVarManager::CVar::save_internal(const std::string& filename) try {
@@ -483,9 +1010,11 @@ void CVarManager::CVar::save_internal(const std::string& filename) try {
     switch (m_type) {
     case Type::BOOL:
     case Type::INT:
+        m_frozen_int_value = clamp_int_value(m_frozen_int_value);
         cfg.set<int>(get_key_name(), m_frozen_int_value);
         break;
     case Type::FLOAT:
+        m_frozen_float_value = clamp_float_value(m_frozen_float_value);
         cfg.set<float>(get_key_name(), m_frozen_float_value);
         break;
     };
@@ -500,6 +1029,12 @@ void CVarManager::CVarStandard::load(bool set_defaults) {
     ZoneScopedN(__FUNCTION__);
 
     load_internal(cvars_standard_txt_name.data(), set_defaults);
+}
+
+void CVarManager::CVarStandard::load_from_config(const utility::Config& cfg, bool set_defaults) {
+    ZoneScopedN(__FUNCTION__);
+
+    load_from_config_internal(cfg, set_defaults);
 }
 
 void CVarManager::CVarStandard::save() {
@@ -532,7 +1067,7 @@ void CVarManager::CVarStandard::save() {
 void CVarManager::CVarStandard::freeze() {
     ZoneScopedN(__FUNCTION__);
 
-    if (!m_frozen) {
+    if (!m_frozen || m_setter_unavailable) {
         return;
     }
 
@@ -549,17 +1084,26 @@ void CVarManager::CVarStandard::freeze() {
     case Type::BOOL:
         // Limiting the amount of times Set gets called with string conversions.
         if ((*m_cvar)->GetInt() != m_frozen_int_value) {
-            (*m_cvar)->Set(std::to_wstring(m_frozen_int_value).c_str());
+            if (!(*m_cvar)->Set(std::to_wstring(m_frozen_int_value).c_str())) {
+                m_setter_unavailable = true;
+                SPDLOG_WARN("[CVarManager] (Standard) Disabling freeze enforcement for \"{}\" because its setter is unavailable", utility::narrow(m_name));
+            }
         }
         break;
     case Type::INT:
         if ((*m_cvar)->GetInt() != m_frozen_int_value) {
-            (*m_cvar)->Set(std::to_wstring(m_frozen_int_value).c_str());
+            if (!(*m_cvar)->Set(std::to_wstring(m_frozen_int_value).c_str())) {
+                m_setter_unavailable = true;
+                SPDLOG_WARN("[CVarManager] (Standard) Disabling freeze enforcement for \"{}\" because its setter is unavailable", utility::narrow(m_name));
+            }
         }
         break;
     case Type::FLOAT:
         if ((*m_cvar)->GetFloat() != m_frozen_float_value) {
-            (*m_cvar)->Set(std::to_wstring(m_frozen_float_value).c_str());
+            if (!(*m_cvar)->Set(std::to_wstring(m_frozen_float_value).c_str())) {
+                m_setter_unavailable = true;
+                SPDLOG_WARN("[CVarManager] (Standard) Disabling freeze enforcement for \"{}\" because its setter is unavailable", utility::narrow(m_name));
+            }
         }
         break;
     default:
@@ -588,13 +1132,22 @@ void CVarManager::CVarStandard::draw_ui() try {
     
     switch (m_type) {
     case Type::BOOL: {
-        auto value = (bool)cvar->GetInt();
+        auto value = (bool)(m_frozen ? m_frozen_int_value : cvar->GetInt());
 
         if (ImGui::Checkbox(narrow_name.c_str(), &value)) {
-            GameThreadWorker::get().enqueue([sft = shared_from_this(), cvar, value]() {
+            m_frozen_int_value = clamp_int_value((int)value);
+            m_setter_unavailable = false;
+            CVarManager::record_global_change(m_name, std::to_wstring(m_frozen_int_value), "standard_ui");
+            save_internal(cvars_standard_txt_name.data());
+
+            GameThreadWorker::get().enqueue([sft = std::static_pointer_cast<CVarStandard>(shared_from_this()), cvar, value]() {
                 try {
-                    cvar->Set(std::to_wstring(value).c_str());
-                    sft->save();
+                    if (cvar->Set(std::to_wstring((int)value).c_str())) {
+                        sft->m_setter_unavailable = false;
+                    } else {
+                        sft->m_setter_unavailable = true;
+                        spdlog::warn("Setter unavailable for cvar: {}", utility::narrow(sft->get_name()));
+                    }
                 } catch (...) {
                     spdlog::error("Failed to set cvar: {}", utility::narrow(sft->get_name()));
                 }
@@ -603,13 +1156,23 @@ void CVarManager::CVarStandard::draw_ui() try {
         break;
     }
     case Type::INT: {
-        auto value = cvar->GetInt();
+        auto value = m_frozen ? m_frozen_int_value : cvar->GetInt();
 
-        if (ImGui::SliderInt(narrow_name.c_str(), &value, m_min_int_value, m_max_int_value)) {
-            GameThreadWorker::get().enqueue([sft = shared_from_this(), cvar, value]() {
+        if (ImGui::SliderInt(narrow_name.c_str(), &value, m_min_int_value, effective_max_int_value())) {
+            value = clamp_int_value(value);
+            m_frozen_int_value = value;
+            m_setter_unavailable = false;
+            CVarManager::record_global_change(m_name, std::to_wstring(value), "standard_ui");
+            save_internal(cvars_standard_txt_name.data());
+
+            GameThreadWorker::get().enqueue([sft = std::static_pointer_cast<CVarStandard>(shared_from_this()), cvar, value]() {
                 try {
-                    cvar->Set(std::to_wstring(value).c_str());
-                    sft->save();
+                    if (cvar->Set(std::to_wstring(value).c_str())) {
+                        sft->m_setter_unavailable = false;
+                    } else {
+                        sft->m_setter_unavailable = true;
+                        spdlog::warn("Setter unavailable for cvar: {}", utility::narrow(sft->get_name()));
+                    }
                 } catch(...) {
                     spdlog::error("Failed to set cvar: {}", utility::narrow(sft->get_name()));
                 }
@@ -618,13 +1181,23 @@ void CVarManager::CVarStandard::draw_ui() try {
         break;
     }
     case Type::FLOAT: {
-        auto value = cvar->GetFloat();
+        auto value = m_frozen ? m_frozen_float_value : cvar->GetFloat();
 
         if (ImGui::SliderFloat(narrow_name.c_str(), &value, m_min_float_value, m_max_float_value)) {
-            GameThreadWorker::get().enqueue([sft = shared_from_this(), cvar, value]() {
+            value = clamp_float_value(value);
+            m_frozen_float_value = value;
+            m_setter_unavailable = false;
+            CVarManager::record_global_change(m_name, std::to_wstring(value), "standard_ui");
+            save_internal(cvars_standard_txt_name.data());
+
+            GameThreadWorker::get().enqueue([sft = std::static_pointer_cast<CVarStandard>(shared_from_this()), cvar, value]() {
                 try {
-                    cvar->Set(std::to_wstring(value).c_str());
-                    sft->save();
+                    if (cvar->Set(std::to_wstring(value).c_str())) {
+                        sft->m_setter_unavailable = false;
+                    } else {
+                        sft->m_setter_unavailable = true;
+                        spdlog::warn("Setter unavailable for cvar: {}", utility::narrow(sft->get_name()));
+                    }
                 } catch(...) {
                     spdlog::error("Failed to set cvar: {}", utility::narrow(sft->get_name()));
                 }
@@ -644,6 +1217,12 @@ void CVarManager::CVarData::load(bool set_defaults) {
     ZoneScopedN(__FUNCTION__);
 
     load_internal(cvars_data_txt_name.data(), set_defaults);
+}
+
+void CVarManager::CVarData::load_from_config(const utility::Config& cfg, bool set_defaults) {
+    ZoneScopedN(__FUNCTION__);
+
+    load_from_config_internal(cfg, set_defaults);
 }
 
 void CVarManager::CVarData::save() {
@@ -750,6 +1329,7 @@ void CVarManager::CVarData::draw_ui() try {
 
         if (ImGui::Checkbox(narrow_name.c_str(), &value)) {
             cvar_int->set((int)value); // no need to run on game thread, direct access
+            CVarManager::record_global_change(m_name, std::to_wstring((int)value), "data_ui");
             this->save();
         }
         break;
@@ -759,6 +1339,7 @@ void CVarManager::CVarData::draw_ui() try {
 
         if (ImGui::SliderInt(narrow_name.c_str(), &value, m_min_int_value, m_max_int_value)) {
             cvar_int->set(value); // no need to run on game thread, direct access
+            CVarManager::record_global_change(m_name, std::to_wstring(value), "data_ui");
             this->save();
         }
         break;
@@ -768,6 +1349,7 @@ void CVarManager::CVarData::draw_ui() try {
 
         if (ImGui::SliderFloat(narrow_name.c_str(), &value, m_min_float_value, m_max_float_value)) {
             cvar_float->set(value); // no need to run on game thread, direct access
+            CVarManager::record_global_change(m_name, std::to_wstring(value), "data_ui");
             this->save();
         }
         break;
@@ -836,6 +1418,7 @@ void CVarManager::execute_console_script(sdk::UGameEngine* engine, const std::st
         }
 
         spdlog::debug("[execute_console_script] Attempting to execute \"{}\"", line);
+        CVarManager::record_global_command(line, "console_script");
         engine->exec(utility::widen(line));
     }
 

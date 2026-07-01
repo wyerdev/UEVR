@@ -21,6 +21,9 @@ struct CommandContext {
     void copy_region(ID3D12Resource* src, ID3D12Resource* dst, D3D12_BOX* src_box, 
         D3D12_RESOURCE_STATES src_state = D3D12_RESOURCE_STATE_PRESENT,
         D3D12_RESOURCE_STATES dst_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    void copy_region_to_subresource(ID3D12Resource* src, ID3D12Resource* dst, D3D12_BOX* src_box, UINT dst_subresource,
+        D3D12_RESOURCE_STATES src_state = D3D12_RESOURCE_STATE_PRESENT,
+        D3D12_RESOURCE_STATES dst_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     void copy_region(ID3D12Resource* src, ID3D12Resource* dst, 
         D3D12_BOX* src_box, UINT dst_x, UINT dst_y, UINT dst_z,
         D3D12_RESOURCE_STATES src_state, 
@@ -35,7 +38,7 @@ struct CommandContext {
     void clear_rtv(TextureContext& tex, const float* color, D3D12_RESOURCE_STATES dst_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     void execute();
 
-    bool ready() const {
+	bool ready() const {
         return this->cmd_list != nullptr && this->cmd_allocator != nullptr && this->fence != nullptr;
     }
 

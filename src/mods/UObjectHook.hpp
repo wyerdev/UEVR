@@ -1,11 +1,15 @@
 #pragma once
 
 #include <filesystem>
+#include <chrono>
 #include <shared_mutex>
 #include <unordered_set>
+#include <unordered_map>
 #include <memory>
 #include <deque>
 #include <future>
+#include <optional>
+#include <atomic>
 
 #include <nlohmann/json.hpp>
 
@@ -59,6 +63,12 @@ public:
     bool is_fully_hooked() const {
         return m_fully_hooked;
     }
+
+    bool try_track_object(
+        sdk::UObjectBase* object,
+        std::string_view context,
+        bool require_array_member = true,
+        bool run_creation_jobs = true);
 
 protected:
     std::string_view get_name() const override { return "UObjectHook"; };
@@ -178,7 +188,9 @@ private:
     }
 
     void hook();
-    void add_new_object(sdk::UObjectBase* object);
+    void add_new_object(sdk::UObjectBase* object, bool run_creation_jobs = true);
+    bool try_track_reachable_ui_object(sdk::UObjectBase* parent, sdk::UObjectBase* child, std::string_view context);
+    void ui_handle_reachable_object(sdk::UObject* parent, sdk::UObject* child, std::string_view context);
 
     void tick_attachments(
         Rotator<float>* view_rotation, const float world_to_meters, Vector3f* view_location, bool is_double
@@ -218,6 +230,15 @@ private:
     std::shared_ptr<PersistentCameraState> deserialize_camera(const nlohmann::json& data);
     std::shared_ptr<PersistentCameraState> deserialize_camera_state();
     void update_persistent_states();
+    void refresh_new_objects_from_uobject_array(uint32_t max_objects = 4096);
+    uint32_t get_uobject_array_scan_budget(sdk::UGameEngine* engine);
+    void mark_persistent_tracking_miss();
+    void prune_destroyed_object_tombstones(std::chrono::steady_clock::time_point now);
+    bool is_stalker2_bulk_scene_path(const StatePath& path) const;
+    void request_stalker2_uobject_full_scan();
+    size_t get_stalker2_bulk_scene_attachment_count() const;
+    size_t detach_non_persistent_motion_controller_states();
+    size_t detach_stalker2_bulk_scene_component_states();
     void update_motion_controller_components(
         const glm::vec3& hmd_location, const glm::vec3& hmd_euler,
         const glm::vec3& left_hand_location, const glm::vec3& left_hand_euler,
@@ -229,6 +250,10 @@ private:
     bool m_hooked{false};
     bool m_fully_hooked{false};
     bool m_wants_activate{false};
+    bool m_add_object_hooked{false};
+    std::atomic_bool m_force_uobject_array_creation_scan{false};
+    std::atomic_bool m_add_object_guard_unreliable{false};
+    std::atomic_bool m_stalker2_uobject_full_scan_requested{false};
     float m_last_delta_time{1000.0f / 60.0f};
 
     struct DebugInfo {
@@ -266,6 +291,60 @@ private:
 
     std::deque<sdk::UObject*> m_most_recent_objects{};
     std::unordered_set<sdk::UObject*> m_motion_controller_attached_objects{};
+    int32_t m_uobject_array_scan_cursor{0};
+
+    struct DestroyedObjectTombstone {
+        int32_t index{-1};
+        int32_t serial{-1};
+        std::chrono::steady_clock::time_point time{};
+    };
+
+    struct UObjectArrayScanStats {
+        uint64_t ticks{};
+        uint64_t scanned{};
+        uint64_t added{};
+        uint64_t rejected{};
+        uint64_t tombstone_skips{};
+        uint64_t full_sweeps{};
+        uint64_t persistent_tracking_misses{};
+        uint32_t last_budget{};
+    } m_uobject_array_scan_stats{};
+
+    struct AddObjectGuardStats {
+        std::atomic<uint64_t> valid_candidate_calls{};
+        std::atomic<uint64_t> no_candidate_calls{};
+        std::atomic<uint64_t> unreliable_transitions{};
+    } m_add_object_guard_stats{};
+
+    struct UiNestedResolveStats {
+        uint64_t attempts{};
+        uint64_t adopted{};
+        uint64_t refused{};
+        uint64_t cached_refusals{};
+    } m_ui_nested_resolve_stats{};
+
+    struct Stalker2LazyStats {
+        std::atomic<uint64_t> addobject_skips{};
+        std::atomic<uint64_t> persistent_bulk_skips{};
+        std::atomic<uint64_t> tick_bulk_skips{};
+        std::atomic<uint64_t> persistent_path_skips{};
+        std::atomic<uint64_t> persistent_budget_skips{};
+        std::atomic<uint64_t> class_browser_suppressed{};
+    } m_stalker2_lazy_stats{};
+
+    std::unordered_map<sdk::UObjectBase*, DestroyedObjectTombstone> m_destroyed_object_tombstones{};
+    std::unordered_map<sdk::UObjectBase*, std::chrono::steady_clock::time_point> m_ui_nested_resolve_refusals{};
+    int32_t m_uobject_array_last_object_count{0};
+    bool m_uobject_array_full_sweep_active{false};
+    bool m_stalker2_class_browser_enabled{false};
+    size_t m_stalker2_persistent_state_cursor{};
+    size_t m_stalker2_persistent_property_cursor{};
+    std::chrono::steady_clock::time_point m_uobject_array_startup_scan_until{};
+    std::chrono::steady_clock::time_point m_last_uobject_array_full_sweep{};
+    std::chrono::steady_clock::time_point m_last_persistent_tracking_miss{};
+    std::chrono::steady_clock::time_point m_last_untracked_pawn_seen{};
+    std::chrono::steady_clock::time_point m_last_tombstone_prune{};
+    std::chrono::steady_clock::time_point m_last_ui_nested_resolve_refusal_prune{};
 
     std::unordered_map<sdk::USceneComponent*, std::shared_ptr<MotionControllerState>> m_motion_controller_attached_components{};
     sdk::AActor* m_overlap_detection_actor{nullptr};
@@ -398,7 +477,7 @@ private:
         }
 
         sdk::UObject* resolve_base_object() const;
-        ResolvedObject resolve()  const;
+        ResolvedObject resolve(bool require_tracked_objects = false) const;
 
     private:
         void clear() {

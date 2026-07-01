@@ -126,7 +126,7 @@ public:
         return m_value;
     }
 
-    T& default_value() {
+    const T& default_value() const {
         return m_default_value;
     }
 
@@ -261,6 +261,19 @@ public:
 
         ImGui::PushID(this);
         auto ret = ImGui::SliderFloat(name.data(), &m_value, m_range.x, m_range.y);
+        context_menu_logic();
+        ImGui::PopID();
+
+        return ret;
+    }
+
+    bool draw_drag(std::string_view name, float speed, const char* format = "%.3f", ImGuiSliderFlags flags = 0) {
+        if (!should_draw_option()) {
+            return false;
+        }
+
+        ImGui::PushID(this);
+        auto ret = ImGui::DragFloat(name.data(), &m_value, speed, m_range.x, m_range.y, format, flags);
         context_menu_logic();
         ImGui::PopID();
 

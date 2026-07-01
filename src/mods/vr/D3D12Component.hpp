@@ -1,6 +1,7 @@
 #pragma once
 
 #include <span>
+#include <chrono>
 
 #include <d3d12.h>
 #include <dxgi.h>
@@ -24,6 +25,9 @@
 #include "PDAFWPlugin.h"
 
 class VR;
+namespace render {
+class FrameResourceInspector;
+}
 
 namespace vrmod {
 class D3D12Component {
@@ -46,11 +50,54 @@ public:
     const auto& get_backbuffer_size() const { return m_backbuffer_size; }
 
     auto is_initialized() const { return m_openvr.left_eye_tex[0].texture != nullptr; }
+    const auto& get_last_on_frame_time() const { return m_last_on_frame; }
 
     auto& openxr() { return m_openxr; }
     auto& get_openvr_ui_tex() { return m_openvr.ui_tex; }
 
+    struct HitchFrameSnapshot {
+        bool initialized{};
+        bool force_reset{};
+        bool last_afr_state{};
+        bool has_prev_backbuffer{};
+        bool has_game_tex{};
+        bool has_ui_tex{};
+        bool has_scene_capture_tex{};
+        uint32_t backbuffer_width{};
+        uint32_t backbuffer_height{};
+        uint32_t ui_extent_width{};
+        uint32_t ui_extent_height{};
+        uint32_t hmd_width{};
+        uint32_t hmd_height{};
+        uint32_t openxr_swapchain_count{};
+        uint32_t ui_swapchain_width{};
+        uint32_t ui_swapchain_height{};
+        uint32_t eye_swapchain_width{};
+        uint32_t eye_swapchain_height{};
+        uint32_t depth_swapchain_width{};
+        uint32_t depth_swapchain_height{};
+        uint64_t swapchain_recreate_count{};
+        uint32_t last_swapchain_recreate_reasons{};
+        uint64_t perf_on_frame_count{};
+        double perf_on_frame_avg_ms{};
+        double perf_on_frame_max_ms{};
+        uint64_t perf_ui_copy_count{};
+        double perf_ui_copy_avg_ms{};
+        double perf_ui_copy_max_ms{};
+        uint64_t perf_swapchain_copy_count{};
+        double perf_swapchain_copy_avg_ms{};
+        double perf_swapchain_copy_max_ms{};
+        uint64_t perf_openxr_submit_count{};
+        double perf_openxr_submit_avg_ms{};
+        double perf_openxr_submit_max_ms{};
+    };
+
+    HitchFrameSnapshot get_hitch_frame_snapshot(VR* vr) const;
+    bool has_game_and_ui_textures() const;
+
 private:
+    friend class render::FrameResourceInspector;
+
     bool setup();
     std::unique_ptr<DirectX::DX12::SpriteBatch> setup_sprite_batch_pso(
         DXGI_FORMAT output_format, 
@@ -58,22 +105,92 @@ private:
         std::optional<DirectX::SpriteBatchPipelineStateDescription> pd = std::nullopt
     );
 
-    void draw_spectator_view(ID3D12GraphicsCommandList* command_list, bool is_right_eye_frame);
+    void draw_spectator_view(ID3D12GraphicsCommandList* command_list, bool is_right_eye_frame, d3d12::TextureContext* game_tex_override = nullptr);
     void clear_backbuffer();
+    bool ensure_2d_screen_textures(ID3D12Device* device, const D3D12_RESOURCE_DESC& base_desc);
+
+    enum class ShfSceneMode {
+        Unknown,
+        Stereo3D,
+        Mono2D,
+    };
+
+    static const char* shf_scene_mode_name(ShfSceneMode mode);
+    ShfSceneMode classify_shf_scene_mode(const D3D12_RESOURCE_DESC& source_desc, const D3D12_RESOURCE_DESC& real_desc) const;
+    void log_shf_scene_mode_if_needed(
+        ShfSceneMode mode,
+        const D3D12_RESOURCE_DESC& source_desc,
+        const D3D12_RESOURCE_DESC& real_desc,
+        uint64_t frame_count,
+        bool using_mono_expansion);
+    bool ensure_shf_mono_scene_texture(ID3D12Device* device, const D3D12_RESOURCE_DESC& source_desc);
+    d3d12::TextureContext* render_shf_mono_scene_texture(ID3D12Device* device);
+    bool ensure_dune_hmd_mono_scene_texture(ID3D12Device* device, const D3D12_RESOURCE_DESC& source_desc);
+    d3d12::TextureContext* render_dune_hmd_mono_scene_texture(
+        ID3D12Device* device,
+        D3D12_RESOURCE_STATES source_state);
 
     template <typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
+    struct FrameTimingStats {
+        uint64_t count{};
+        double total_ms{};
+        double max_ms{};
+
+        void add(std::chrono::steady_clock::duration duration) {
+            const auto ms = std::chrono::duration<double, std::milli>{duration}.count();
+            ++count;
+            total_ms += ms;
+            if (ms > max_ms) {
+                max_ms = ms;
+            }
+        }
+
+        double avg() const {
+            return count == 0 ? 0.0 : total_ms / (double)count;
+        }
+
+        void reset() {
+            count = 0;
+            total_ms = 0.0;
+            max_ms = 0.0;
+        }
+    };
+
+    void log_frame_timing_stats_if_needed(VR* vr);
+    void log_openxr_swapchain_recreate(VR* vr, uint32_t reasons, uint32_t new_depth_width = 0, uint32_t new_depth_height = 0);
+
     ComPtr<ID3D12Resource> m_prev_backbuffer{};
     std::array<d3d12::CommandContext, 3> m_generic_commands{};
+    std::chrono::steady_clock::time_point m_last_on_frame{};
+    std::chrono::steady_clock::time_point m_last_frame_timing_log{};
+    FrameTimingStats m_perf_on_frame{};
+    FrameTimingStats m_perf_ui_copy{};
+    FrameTimingStats m_perf_swapchain_copy{};
+    FrameTimingStats m_perf_openxr_submit{};
+    FrameTimingStats m_perf_spectator_mirror{};
+    FrameTimingStats m_perf_post_present{};
 
     d3d12::TextureContext m_backbuffer_copy{};
 
     d3d12::TextureContext m_game_ui_tex{};
     d3d12::TextureContext m_game_tex{};
     d3d12::TextureContext m_scene_capture_tex{};
+    d3d12::TextureContext m_shf_mono_scene_tex{};
+    d3d12::TextureContext m_dune_hmd_mono_scene_tex{};
     std::array<d3d12::CommandContext, 3> m_game_tex_commands{};
+    d3d12::CommandContext m_shf_mono_scene_commands{};
+    d3d12::CommandContext m_dune_hmd_mono_scene_commands{};
+    uint64_t m_shf_mono_scene_width{};
+    uint32_t m_shf_mono_scene_height{};
+    DXGI_FORMAT m_shf_mono_scene_format{DXGI_FORMAT_UNKNOWN};
+    uint64_t m_dune_hmd_mono_scene_width{};
+    uint32_t m_dune_hmd_mono_scene_height{};
+    DXGI_FORMAT m_dune_hmd_mono_scene_format{DXGI_FORMAT_UNKNOWN};
     std::array<d3d12::TextureContext, 2> m_2d_screen_tex{};
     std::vector<std::unique_ptr<d3d12::TextureContext>> m_backbuffer_textures{};
+    bool m_skip_spectator_view_for_volatile_external_rt{};
+    ShfSceneMode m_shf_scene_mode{ShfSceneMode::Unknown};
 
     std::unique_ptr<DirectX::DX12::GraphicsMemory> m_graphics_memory{};
     std::unique_ptr<DirectX::DX12::SpriteBatch> m_backbuffer_batch{};
@@ -171,6 +288,8 @@ private:
         void initialize(XrSessionCreateInfo& session_info);
         std::optional<std::string> create_swapchains();
         void destroy_swapchains();
+        bool pre_acquire(uint32_t swapchain_idx);
+        void release_acquired(uint32_t swapchain_idx);
         void copy(uint32_t swapchain_idx, ID3D12Resource* src,
             std::optional<std::function<void(d3d12::CommandContext&, ID3D12Resource*)>> pre_commands = std::nullopt,
             std::optional<std::function<void(d3d12::CommandContext&)>> additional_commands = std::nullopt,
@@ -185,6 +304,10 @@ private:
             std::scoped_lock _{this->mtx};
 
             for (auto& it : this->contexts) {
+                if (it.second.num_textures_acquired > 0) {
+                    release_acquired(it.first);
+                }
+
                 for (auto& texture_ctx : it.second.texture_contexts) {
                     texture_ctx->commands.wait(INFINITE);
                 }
@@ -202,6 +325,17 @@ private:
             return it->second.ever_acquired;
         }
 
+        uint32_t get_last_acquired_frame(uint32_t swapchain_idx) {
+            std::scoped_lock _{this->mtx};
+
+            auto it = this->contexts.find(swapchain_idx);
+            if (it == this->contexts.end()) {
+                return 0;
+            }
+
+            return it->second.last_acquired_frame;
+        }
+
         XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
 
         struct SwapchainContext {
@@ -209,7 +343,9 @@ private:
             std::vector<std::unique_ptr<d3d12::TextureContext>> texture_contexts{};
             uint32_t num_textures_acquired{0};
             uint32_t last_acquired_texture{0};
+            uint32_t last_acquired_frame{0};
             bool ever_acquired{false};
+            bool pre_acquired{false};
         };
 
         std::unordered_map<uint32_t, SwapchainContext> contexts{};
@@ -226,5 +362,7 @@ private:
     bool m_force_reset{true};
     bool m_last_afr_state{false};
     bool m_submitted_left_eye{false};
+    uint64_t m_swapchain_recreate_count{};
+    uint32_t m_last_swapchain_recreate_reasons{};
 };
 } // namespace vrmod

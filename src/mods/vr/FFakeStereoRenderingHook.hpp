@@ -2,6 +2,15 @@
 
 #include <memory>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <d3d12.h>
+#include <wrl.h>
 
 #include <SafetyHook.hpp>
 
@@ -16,12 +25,16 @@
 #include <sdk/AActor.hpp>
 #include <sdk/USceneCaptureComponent2D.hpp>
 #include <sdk/UTexture.hpp>
+#include <sdk/DynamicRHI.hpp>
 
 #include "IXRTrackingSystemHook.hpp"
+#include "UE57SlateSymbols.hpp"
 
 #include "Mod.hpp"
 
 struct FRHICommandListImmediate;
+struct FRDGBuilder;
+struct FRDGTexture;
 struct VRRenderTargetManager_418;
 struct UCanvas;
 struct IStereoLayers;
@@ -44,11 +57,19 @@ class FSceneView;
 // so we need a unified way of storing data that can be used for all versions
 struct VRRenderTargetManager_Base {
 public:
+    struct Everspace2D3D12SceneTargetSnapshot {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource{};
+        D3D12_RESOURCE_DESC desc{};
+        uintptr_t source_texture{};
+        uint64_t generation{};
+        const char* source{};
+    };
+
     bool allocate_render_target_texture(uintptr_t return_address, FTexture2DRHIRef* tex, FTexture2DRHIRef* shader_resource);
 
     uint32_t get_number_of_buffered_frames() const { return 1; }
 
-    bool should_use_separate_render_target() const { return true; }
+    bool should_use_separate_render_target() const;
 
     void update_viewport(bool use_separate_rt, const sdk::FViewport& vp, class SViewport* vp_widget = nullptr);
 
@@ -57,13 +78,78 @@ public:
     bool need_reallocate_depth_texture(const void* DepthTarget);
 
 public:
-    FRHITexture2D*& get_ui_target() { return ui_target; }
+    FRHITexture2D* get_ui_target() {
+        auto& dedicated = static_cast<FRHITexture2D*&>(dedicated_ui_target);
+
+        if (dedicated != nullptr) {
+            return dedicated;
+        }
+
+        return static_cast<FRHITexture2D*&>(ui_target);
+    }
+
+    FRHITexture2D*& get_effective_ui_target_ref() {
+        auto& dedicated = static_cast<FRHITexture2D*&>(dedicated_ui_target);
+
+        if (dedicated != nullptr) {
+            return dedicated;
+        }
+
+        return static_cast<FRHITexture2D*&>(ui_target);
+    }
+
+    FRHITexture2D*& get_fallback_ui_target_ref() {
+        return static_cast<FRHITexture2D*&>(ui_target);
+    }
+
+    FRHITexture2D* get_dedicated_ui_target() {
+        return static_cast<FRHITexture2D*&>(dedicated_ui_target);
+    }
+
+    bool has_dedicated_ui_target() {
+        return get_dedicated_ui_target() != nullptr;
+    }
+
+    uint32_t get_dedicated_ui_width() const {
+        return dedicated_ui_width;
+    }
+
+    uint32_t get_dedicated_ui_height() const {
+        return dedicated_ui_height;
+    }
+
     FRHITexture2D* get_render_target() {
         return render_target; 
     }
 
+    std::shared_ptr<const Everspace2D3D12SceneTargetSnapshot> get_everspace2_scene_target_snapshot() const {
+        return everspace2_scene_target_snapshot.load(std::memory_order_acquire);
+    }
+
+    bool publish_everspace2_scene_target_snapshot(
+        FRHITexture2D* source_texture,
+        ID3D12Resource* resource,
+        const D3D12_RESOURCE_DESC& desc,
+        const char* source);
+
     FRHITexture2D* get_scene_capture_render_target();
     void set_render_target(FRHITexture2D* rt) { render_target = rt; }
+    void set_dedicated_ui_target(FRHITexture2D* rt, uint32_t width = 0, uint32_t height = 0);
+    void request_dedicated_ui_target(uint32_t width, uint32_t height);
+    void destroy_dedicated_ui_target();
+    void cancel_dedicated_ui_creation_preserving_target(const char* reason = nullptr);
+    void invalidate_resolution_dependent_targets();
+    void ensure_dedicated_ui_target(uintptr_t command_list);
+    bool create_dedicated_ui_texture();
+    bool try_schedule_dedicated_ui_creation();
+    bool can_attempt_dedicated_ui_creation() const;
+    void reset_dedicated_ui_creation_state();
+    bool is_dedicated_ui_generation_current(uint64_t generation) const {
+        return in_flight_dedicated_ui_generation == generation;
+    }
+    bool is_dedicated_ui_target_pending() const {
+        return dedicated_ui_creation_pending || in_flight_dedicated_ui_texture != nullptr || in_flight_dedicated_ui_generation != 0;
+    }
 
     bool is_ue_5_0_3() const { return is_version_5_0_3; }
 
@@ -85,6 +171,8 @@ public:
     }
 
 protected:
+    void retain_everspace2_dedicated_ui_target(FRHITexture2D* rt);
+
     struct VerifiedFTexture2D {
         VerifiedFTexture2D() = default;
         VerifiedFTexture2D(FRHITexture2D* tex) 
@@ -132,6 +220,7 @@ protected:
     };
 
     VerifiedFTexture2D ui_target{};
+    VerifiedFTexture2D dedicated_ui_target{};
     VerifiedFTexture2D render_target{};
     static void pre_texture_hook_callback(safetyhook::Context& ctx, bool from_second = false); // only used if pixel format cvar is missing
     static void texture_hook_callback(safetyhook::Context& ctx, bool from_second = false);
@@ -155,6 +244,14 @@ protected:
     uint32_t last_width{0};
     uint32_t last_height{0};
 
+    uintptr_t texture_desc_prepare_func{0};
+    uintptr_t texture_create_wrapper_func{0};
+    uintptr_t texture_release_func{0};
+    uintptr_t texture_finalize_func{0};
+    uintptr_t texture_extract_func{0};
+    uintptr_t texture_finalize_callsite{0};
+    uintptr_t texture_extract_callsite{0};
+
     std::vector<uint8_t> texture_create_insn_bytes{};
     std::vector<uint8_t> texture_create_insn_bytes2{};
 
@@ -166,7 +263,23 @@ protected:
     sdk::UObjectReference<sdk::UTexture> scene_capture_target{nullptr}; // For custom compatibility rendering
     sdk::UObjectReference<sdk::UTexture> scene_capture_target_rhi_thread{nullptr}; // For custom compatibility rendering
     sdk::UTexture* in_flight_target{nullptr}; // Not a reference because this is basically a barrier against creating a new scene capture target
+    sdk::UObjectReference<sdk::UTexture> dedicated_ui_texture{nullptr};
+    sdk::UTexture* in_flight_dedicated_ui_texture{nullptr};
+    std::unique_ptr<FTexture2DRHIRef> owned_dedicated_ui_target{};
+    std::mutex everspace2_dedicated_ui_lifetime_mutex{};
+    std::vector<FRHITexture2D*> everspace2_retained_dedicated_ui_targets{};
+    uint32_t dedicated_ui_width{0};
+    uint32_t dedicated_ui_height{0};
+    std::chrono::steady_clock::time_point dedicated_ui_last_attempt{};
+    std::chrono::steady_clock::time_point dedicated_ui_pending_since{};
+    std::chrono::steady_clock::time_point dedicated_ui_resource_pending_since{};
+    bool dedicated_ui_creation_pending{false};
+    bool dedicated_ui_object_created{false};
+    uint64_t dedicated_ui_generation{0};
+    uint64_t in_flight_dedicated_ui_generation{0};
     sdk::FViewport* last_viewport{nullptr};
+    std::atomic<std::shared_ptr<const Everspace2D3D12SceneTargetSnapshot>> everspace2_scene_target_snapshot{};
+    std::atomic<uint64_t> everspace2_scene_target_generation{};
 };
 
 struct VRRenderTargetManager : IStereoRenderTargetManager, VRRenderTargetManager_Base {
@@ -192,6 +305,12 @@ public:
     bool AllocateRenderTargetTexture(uint32_t Index, uint32_t SizeX, uint32_t SizeY, uint8_t Format, uint32_t NumMips,
         ETextureCreateFlags Flags, ETextureCreateFlags TargetableTextureFlags, FTexture2DRHIRef& OutTargetableTexture,
         FTexture2DRHIRef& OutShaderResourceTexture, uint32_t NumSamples = 1) override;
+    bool AllocateRenderTargetTextures(uint32_t SizeX, uint32_t SizeY, uint8_t Format, uint32_t NumLayers,
+        ETextureCreateFlags Flags, ETextureCreateFlags TargetableTextureFlags, TArray<FTexture2DRHIRef>& OutTargetableTextures,
+        TArray<FTexture2DRHIRef>& OutShaderResourceTextures, uint32_t NumSamples = 1) override;
+    uint8_t GetActualColorSwapchainFormat() const override { return 0; }
+    int32_t AcquireColorTexture() override { return -1; }
+    int32_t AcquireDepthTexture() override { return -1; }
 
 public:
     uintptr_t m_last_calculate_render_size_return_address{0};
@@ -277,6 +396,11 @@ public:
     void attempt_hooking();
     void attempt_hook_game_engine_tick(uintptr_t return_address = 0);
     void attempt_hook_slate_thread(uintptr_t return_address = 0, bool alternate = false);
+    void attempt_hook_ue57_slate_elements_pass();
+    void attempt_hook_ue55_slate_output_texture_register();
+    void attempt_hook_ue58_slate_output_texture_register();
+    void attempt_hook_daysgone_slate_intermediate_buffer();
+    void attempt_hook_daysgone_bend_taa_composite();
     void attempt_hook_update_viewport_rhi(uintptr_t return_address);
     void attempt_hook_fsceneview_constructor();
     
@@ -301,6 +425,159 @@ public:
         return m_hooked_slate_thread;
     }
 
+    bool has_seen_stable_slate_draw() const {
+        return m_has_seen_stable_slate_draw;
+    }
+
+    bool has_successful_command_list_hijack() const {
+        return m_has_successful_command_list_hijack;
+    }
+
+    bool prefers_slate_thread_for_session() const {
+        return m_prefer_slate_thread_for_session;
+    }
+
+    bool has_seen_prerender_viewfamily() const {
+        return m_has_seen_prerender_viewfamily;
+    }
+
+    bool has_scene_view_family_offsets_ready() const {
+        return m_has_scene_view_family_offsets_ready;
+    }
+
+    bool set_dune_character_creation_active(bool active) {
+        return m_dune_character_creation_active.exchange(active, std::memory_order_acq_rel);
+    }
+
+    bool is_dune_character_creation_active() const {
+        return m_dune_character_creation_active.load(std::memory_order_acquire);
+    }
+
+    void set_dune_has_live_pawn(bool active) {
+        m_dune_has_live_pawn.store(active, std::memory_order_release);
+    }
+
+    bool dune_has_live_pawn() const {
+        return m_dune_has_live_pawn.load(std::memory_order_acquire);
+    }
+
+    struct DuneTrueStereoFrameSnapshot {
+        uint32_t render_frame{};
+        uint8_t eye{};
+    };
+
+    std::optional<DuneTrueStereoFrameSnapshot> get_dune_true_stereo_frame_snapshot() const {
+        const auto packed = m_dune_true_stereo_frame.load(std::memory_order_acquire);
+        if ((packed & 0x2ull) == 0) {
+            return std::nullopt;
+        }
+
+        return DuneTrueStereoFrameSnapshot{
+            .render_frame = static_cast<uint32_t>(packed >> 2),
+            .eye = static_cast<uint8_t>(packed & 0x1ull),
+        };
+    }
+
+    void note_stable_slate_draw() {
+        if (!m_has_seen_stable_slate_draw) {
+            m_has_seen_stable_slate_draw = true;
+            m_first_stable_slate_draw_at = std::chrono::steady_clock::now();
+        }
+    }
+
+    void note_prerender_viewfamily_seen() {
+        m_has_seen_prerender_viewfamily = true;
+    }
+
+    void note_scene_view_family_offsets_ready() {
+        m_has_scene_view_family_offsets_ready = true;
+    }
+
+    void note_successful_command_list_hijack() {
+        m_has_successful_command_list_hijack = true;
+    }
+
+    uintptr_t get_daysgone_slate_native_ui_target() const {
+        return m_daysgone_slate_native_ui_target.load();
+    }
+
+    uint32_t get_daysgone_slate_native_ui_width() const {
+        return m_daysgone_slate_native_ui_width.load();
+    }
+
+    uint32_t get_daysgone_slate_native_ui_height() const {
+        return m_daysgone_slate_native_ui_height.load();
+    }
+
+    bool should_use_daysgone_slate_ui_overlay() const {
+        return m_daysgone_bend_ui_use_slate_overlay->value() &&
+            m_daysgone_slate_native_ui_target.load() != 0;
+    }
+
+    float get_daysgone_slate_ui_key_threshold() const {
+        return m_daysgone_bend_ui_key_threshold->value();
+    }
+
+    float get_daysgone_slate_ui_key_softness() const {
+        return m_daysgone_bend_ui_key_softness->value();
+    }
+
+    float get_daysgone_slate_ui_key_opacity() const {
+        return m_daysgone_bend_ui_key_opacity->value();
+    }
+
+    float get_daysgone_slate_ui_offset_x() const {
+        return m_daysgone_bend_ui_screen_offset_x->value();
+    }
+
+    float get_daysgone_slate_ui_offset_y() const {
+        return m_daysgone_bend_ui_screen_offset_y->value();
+    }
+
+    float get_daysgone_slate_ui_scale() const {
+        return m_daysgone_bend_ui_screen_scale->value() * m_daysgone_bend_ui_draw_scale->value();
+    }
+
+    bool should_split_daysgone_slate_ui_overlay() const {
+        return m_daysgone_bend_ui_split_overlay->value();
+    }
+
+    float get_daysgone_slate_ui_menu_src_x() const {
+        return m_daysgone_bend_ui_menu_src_x->value();
+    }
+
+    float get_daysgone_slate_ui_menu_src_y() const {
+        return m_daysgone_bend_ui_menu_src_y->value();
+    }
+
+    float get_daysgone_slate_ui_menu_src_w() const {
+        return m_daysgone_bend_ui_menu_src_w->value();
+    }
+
+    float get_daysgone_slate_ui_menu_src_h() const {
+        return m_daysgone_bend_ui_menu_src_h->value();
+    }
+
+    float get_daysgone_slate_ui_menu_offset_x() const {
+        return m_daysgone_bend_ui_menu_offset_x->value();
+    }
+
+    float get_daysgone_slate_ui_menu_offset_y() const {
+        return m_daysgone_bend_ui_menu_offset_y->value();
+    }
+
+    float get_daysgone_slate_ui_menu_scale() const {
+        return m_daysgone_bend_ui_menu_scale->value();
+    }
+
+    float get_daysgone_slate_ui_footer_src_y() const {
+        return m_daysgone_bend_ui_footer_src_y->value();
+    }
+
+    float get_daysgone_slate_ui_footer_src_h() const {
+        return m_daysgone_bend_ui_footer_src_h->value();
+    }
+
     bool should_recreate_textures() const {
         return m_wants_texture_recreation;
     }
@@ -316,6 +593,12 @@ public:
         }
     }
 
+    bool invalidate_ue57_resolution_dependent_state(
+        uint32_t old_width,
+        uint32_t old_height,
+        uint32_t new_width,
+        uint32_t new_height);
+
     void on_config_load(const utility::Config& cfg, bool set_defaults) {
         for (IModValue& option : m_options) {
             option.config_load(cfg, set_defaults);
@@ -330,6 +613,7 @@ public:
 
     void on_frame() override;
     void on_draw_ui() override;
+    void draw_daysgone_bend_ui_controls();
 
     auto get_frame_delay_compensation() const {
         return m_frame_delay_compensation->value();
@@ -374,14 +658,32 @@ public:
     }
 
     // Do not call these directly
+    static void setup_view(ISceneViewExtension* extension, sdk::FSceneViewFamily& view_family, sdk::FSceneView& view);
     static void setup_viewpoint(ISceneViewExtension* extension, void* player_controller, void* view_info);
+    static void setup_view_projection_matrix(ISceneViewExtension* extension, void* projection_data);
     static void localplayer_setup_viewpoint(void* localplayer, void* view_info, void* pass);
     static void setup_view_family(ISceneViewExtension* extension, sdk::FSceneViewFamily& view_family);
     static void begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family);
     static void begin_render_viewfamily(ISceneViewExtension* extension, sdk::FSceneViewFamily& view_family);
     static void pre_render_viewfamily_renderthread(ISceneViewExtension* extension, sdk::FRHICommandListBase* cmd_list, sdk::FSceneViewFamily& view_family);
 
+    const char* get_ghosting_fix_status_text();
+
 private:
+    std::atomic_bool m_dune_character_creation_active{false};
+    std::atomic_bool m_dune_has_live_pawn{false};
+    std::atomic_uint64_t m_dune_true_stereo_frame{0};
+
+    void publish_dune_true_stereo_frame(uint32_t render_frame, uint8_t eye) {
+        m_dune_true_stereo_frame.store(
+            (static_cast<uint64_t>(render_frame) << 2) | 0x2ull | (eye & 0x1u),
+            std::memory_order_release);
+    }
+
+    void invalidate_dune_true_stereo_frame() {
+        m_dune_true_stereo_frame.store(0, std::memory_order_release);
+    }
+
     bool hook();
     bool standard_fake_stereo_hook(uintptr_t vtable);
     bool nonstandard_create_stereo_device_hook();
@@ -401,7 +703,14 @@ private:
 
     bool patch_vtable_checks();
     bool attempt_runtime_inject_stereo();
+    bool hook_ue418_oculus_pixel_density_sink();
     void post_init_properties(uintptr_t localplayer);
+    void try_adopt_scene_viewport_render_target(sdk::FViewport* viewport, const char* source);
+    void update_daysgone_ui_telemetry();
+    void log_daysgone_ui_telemetry_game_thread();
+    void update_daysgone_bend_ui_placement_fix();
+    void apply_daysgone_bend_ui_placement_fix_game_thread();
+    void restore_daysgone_bend_ui_placement_fix_game_thread();
 
     // Hooks
     // UGameEngine
@@ -421,6 +730,7 @@ private:
     static void init_canvas(FFakeStereoRendering* stereo, sdk::FSceneView* view, UCanvas* canvas);
     static uint32_t get_desired_number_of_views_hook(FFakeStereoRendering* stereo, bool is_stereo_enabled);
     static EStereoscopicPass get_view_pass_for_index_hook(FFakeStereoRendering* stereo, bool stereo_requested, int32_t view_index);
+    static bool ue418_oculus_update_pixel_density_hook(void* settings);
 
     static IStereoRenderTargetManager* get_render_target_manager_hook(FFakeStereoRendering* stereo);
     static IStereoLayers* get_stereo_layers_hook(FFakeStereoRendering* stereo);
@@ -432,6 +742,19 @@ private:
     // Slate
     static void* slate_draw_window_render_thread(void* renderer, void* command_list, void* viewport_info, 
                                                  void* elements, void* params, void* unk1, void* unk2);
+    static void ue57_add_slate_draw_elements_pass_hook(safetyhook::Context& ctx);
+    static void slate_output_texture_register_hook_impl(safetyhook::Context& ctx, bool ue58);
+    static void ue55_slate_output_texture_register_hook(safetyhook::Context& ctx);
+    static void ue58_slate_output_texture_register_hook(safetyhook::Context& ctx);
+    static void daysgone_slate_intermediate_buffer_hook(safetyhook::Context& ctx);
+    static void daysgone_bend_taa_composite_hook(safetyhook::Context& ctx);
+    static void windrose_hfsm_state_enter_hook(void* state);
+    static void windrose_hfsm_state_exit_hook(void* state, uintptr_t destination_name);
+    static void windrose_hfsm_component_enter_hook(void* component);
+    static void windrose_hfsm_component_exit_hook(void* component, uintptr_t destination_name, int32_t reason);
+    static void windrose_layout_template_enter_hook(void* layout);
+    static void windrose_layout_template_exit_hook(void* layout, uintptr_t destination_name, int32_t reason);
+    bool attempt_hook_windrose_hfsm_ui();
 
     // FViewport
     static void* viewport_destructor_hook(void* viewport, void* a2, void* a3, void* a4);
@@ -446,6 +769,21 @@ private:
 
     std::unique_ptr<ThreadWorker<FRHICommandListImmediate*>> m_slate_thread_worker{std::make_unique<ThreadWorker<FRHICommandListImmediate*>>()};
 
+    enum class GhostingFixState : uint8_t {
+        Off,
+        WaitingForHooks,
+        LearningViewStates,
+        Active,
+        FailedClosed,
+    };
+
+    struct GhostingFixPair {
+        sdk::FSceneViewStateInterface* eye_state[2]{};
+        uintptr_t scene{};
+        uint32_t first_seen_frame{};
+        uint32_t last_seen_frame{};
+    };
+
     struct {
         std::recursive_mutex mtx{};
         safetyhook::InlineHook constructor_hook{};
@@ -454,6 +792,12 @@ private:
 
         uint32_t last_frame_count{};
         uint32_t last_index{};
+
+        GhostingFixPair ghosting_pair{};
+        GhostingFixState ghosting_state{GhostingFixState::Off};
+        uint32_t ghosting_learning_start_frame{};
+        uint32_t ghosting_fail_frame{};
+        bool ghosting_logged_bootstrap_disabled{};
 
         // For keeping track of what the states were before our modifications.
         std::unordered_map<sdk::FSceneViewStateInterface*, sdk::FSceneViewInitOptionsUE4> view_init_options_ue4{};
@@ -468,7 +812,19 @@ private:
     std::unique_ptr<PointerHook> m_calculate_stereo_view_offset_hook_ptr{}; // some games have a short jmp which isnt supported by safetyhook right now so we use pointerhook
     safetyhook::InlineHook m_calculate_stereo_projection_matrix_hook{};
     safetyhook::InlineHook m_render_texture_render_thread_hook{};
+    safetyhook::InlineHook m_ue418_oculus_pixel_density_hook{};
     safetyhook::InlineHook m_slate_thread_hook{};
+    std::vector<safetyhook::MidHook> m_ue57_slate_elements_hooks{};
+    safetyhook::MidHook m_ue55_slate_output_texture_register_hook{};
+    std::vector<safetyhook::MidHook> m_ue58_slate_output_texture_register_hooks{};
+    safetyhook::MidHook m_daysgone_slate_intermediate_buffer_hook{};
+    safetyhook::MidHook m_daysgone_bend_taa_composite_hook{};
+    safetyhook::InlineHook m_windrose_hfsm_state_enter_hook{};
+    safetyhook::InlineHook m_windrose_hfsm_state_exit_hook{};
+    safetyhook::InlineHook m_windrose_hfsm_component_enter_hook{};
+    safetyhook::InlineHook m_windrose_hfsm_component_exit_hook{};
+    safetyhook::InlineHook m_windrose_layout_template_enter_hook{};
+    safetyhook::InlineHook m_windrose_layout_template_exit_hook{};
     safetyhook::InlineHook m_gameviewportclient_draw_hook{};
     safetyhook::InlineHook m_viewport_draw_hook{}; // for AFR
     safetyhook::InlineHook m_render_module_begin_render_viewfamily_hook{};
@@ -521,9 +877,70 @@ private:
     bool m_finished_hooking{false};
     bool m_hooked_game_engine_tick{false};
     bool m_hooked_slate_thread{false};
+    bool m_hooked_ue57_slate_elements_pass{false};
+    bool m_hooked_ue55_slate_output_texture_register{false};
+    bool m_hooked_ue58_slate_output_texture_register{false};
+    bool m_prefer_slate_thread_for_session{false};
+    bool m_has_seen_stable_slate_draw{false};
+    bool m_has_seen_prerender_viewfamily{false};
+    bool m_has_scene_view_family_offsets_ready{false};
+    bool m_has_successful_command_list_hijack{false};
+    std::chrono::steady_clock::time_point m_first_stable_slate_draw_at{};
     bool m_attempted_hook_game_engine_tick{false};
     bool m_attempted_hook_slate_thread{false};
     bool m_attempted_hook_slate_thread_alternate{false};
+    bool m_attempted_hook_ue57_slate_elements_pass{false};
+    std::chrono::steady_clock::time_point m_ue57_dedicated_ui_missing_since{};
+    uint32_t m_ue57_dedicated_ui_missing_frames{0};
+    bool m_attempted_hook_ue55_slate_output_texture_register{false};
+    bool m_attempted_hook_ue58_slate_output_texture_register{false};
+    bool m_attempted_hook_daysgone_slate_intermediate_buffer{false};
+    bool m_attempted_hook_daysgone_bend_taa_composite{false};
+    bool m_attempted_hook_windrose_hfsm_ui{false};
+    std::atomic<uintptr_t> m_daysgone_slate_intermediate_last_target{0};
+    std::atomic<uintptr_t> m_daysgone_slate_native_ui_target{0};
+    std::atomic<uint32_t> m_daysgone_slate_native_ui_width{0};
+    std::atomic<uint32_t> m_daysgone_slate_native_ui_height{0};
+    std::atomic<uint64_t> m_daysgone_bend_taa_composite_seen{0};
+    std::atomic<uint64_t> m_daysgone_bend_taa_composite_crop_suppressed{0};
+    std::atomic<uint64_t> m_daysgone_bend_taa_composite_extent_overrides{0};
+    std::atomic<uint64_t> m_daysgone_bend_taa_shader_param_overrides{0};
+    std::chrono::steady_clock::time_point m_daysgone_ui_telemetry_last_queue{};
+    std::atomic_bool m_daysgone_ui_telemetry_queued{false};
+    std::string m_daysgone_ui_telemetry_last_signature{};
+    uint64_t m_daysgone_ui_telemetry_log_counter{0};
+    std::atomic_bool m_daysgone_bend_ui_fix_queued{false};
+    std::chrono::steady_clock::time_point m_daysgone_bend_ui_last_apply{};
+    std::string m_daysgone_bend_ui_last_apply_signature{};
+    std::atomic<uint64_t> m_daysgone_bend_ui_manual_apply_generation{0};
+    struct DaysGoneBendUIOriginalState {
+        uintptr_t menu3d{};
+        uintptr_t widget_main{};
+        uintptr_t default_root{};
+        bool captured{false};
+        float distance_from_camera{};
+        float camera_fov{};
+        uint8_t use_player_camera{};
+        struct {
+            float x{};
+            float y{};
+            float z{};
+        } widget_location{}, widget_rotation{}, widget_scale{}, root_location{}, root_rotation{}, root_scale{};
+        struct {
+            float x{};
+            float y{};
+        } screen_offset{}, pivot{};
+        float screen_scale{};
+        float draw_scale{};
+        uint8_t disable_occlusion{};
+        uint8_t tick_when_offscreen{};
+        uint8_t tick_override{};
+        uint8_t tick_enabled{};
+    } m_daysgone_bend_ui_originals{};
+    std::atomic<uintptr_t> m_daysgone_bend_ui_last_menu3d{0};
+    std::atomic<uintptr_t> m_daysgone_bend_ui_last_widget_main{0};
+    std::atomic<uint64_t> m_daysgone_bend_ui_apply_count{0};
+    std::atomic<uint64_t> m_daysgone_bend_ui_restore_count{0};
     bool m_attempted_hook_update_viewport_rhi{false};
     bool m_attempted_hook_fsceneview_constructor{false};
     bool m_uses_old_rendertarget_manager{false};
@@ -590,13 +1007,122 @@ private:
     const ModToggle::Ptr m_asynchronous_scan{ ModToggle::create("VR_AsynchronousScan", true) };
     // Off by default because it can cause issues with some games
     const ModToggle::Ptr m_use_fmalloc_scene_view_extensions{ ModToggle::create("VR_UseFMallocSceneViewExtensions", false) };
+    // Off by default: restores safetyhook's trampoline lock path for games that dislike the faster original-call path.
+    const ModToggle::Ptr m_safe_tick_hook{ ModToggle::create("VR_SafeTickHook", false) };
+    const ModInt32::Ptr m_daysgone_bend_ui_mode{ ModInt32::create("VR_DaysGoneBendUI_Mode", 2, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_force_player_camera{ ModToggle::create("VR_DaysGoneBendUI_ForcePlayerCamera", true, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_override_widget_transform{ ModToggle::create("VR_DaysGoneBendUI_OverrideWidgetTransform", true, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_override_root_transform{ ModToggle::create("VR_DaysGoneBendUI_OverrideRootTransform", false, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_force_widget_refresh{ ModToggle::create("VR_DaysGoneBendUI_ForceWidgetRefresh", true, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_viewport_slot_fix{ ModToggle::create("VR_DaysGoneBendUI_ViewportSlotFix", true, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_live_watchdog{ ModToggle::create("VR_DaysGoneBendUI_LiveWatchdog", false, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_apply_child_render_transform{ ModToggle::create("VR_DaysGoneBendUI_ApplyChildRenderTransform", false, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_viewport_slot_offset_x{ ModSlider::create("VR_DaysGoneBendUI_ViewportSlotOffsetX", -1920.0f, 1920.0f, -240.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_viewport_slot_offset_y{ ModSlider::create("VR_DaysGoneBendUI_ViewportSlotOffsetY", -1080.0f, 1080.0f, 0.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_viewport_slot_scale{ ModSlider::create("VR_DaysGoneBendUI_ViewportSlotScale", 0.1f, 4.0f, 0.85f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_viewport_slot_opacity{ ModSlider::create("VR_DaysGoneBendUI_ViewportSlotOpacity", 0.0f, 2.0f, 1.0f, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_use_slate_overlay{ ModToggle::create("VR_DaysGoneBendUI_UseSlateOverlay", false, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_suppress_in_scene_composite{ ModToggle::create("VR_DaysGoneBendUI_SuppressInSceneComposite", false, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_split_overlay{ ModToggle::create("VR_DaysGoneBendUI_SplitOverlay", true, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_menu_src_x{ ModSlider::create("VR_DaysGoneBendUI_MenuSrcX", 0.0f, 1.0f, 0.52f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_menu_src_y{ ModSlider::create("VR_DaysGoneBendUI_MenuSrcY", 0.0f, 1.0f, 0.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_menu_src_w{ ModSlider::create("VR_DaysGoneBendUI_MenuSrcW", 0.05f, 1.0f, 0.48f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_menu_src_h{ ModSlider::create("VR_DaysGoneBendUI_MenuSrcH", 0.05f, 1.0f, 0.48f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_menu_offset_x{ ModSlider::create("VR_DaysGoneBendUI_MenuOffsetX", -2400.0f, 2400.0f, -450.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_menu_offset_y{ ModSlider::create("VR_DaysGoneBendUI_MenuOffsetY", -2400.0f, 2400.0f, -650.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_menu_scale{ ModSlider::create("VR_DaysGoneBendUI_MenuScale", 0.1f, 4.0f, 1.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_footer_src_y{ ModSlider::create("VR_DaysGoneBendUI_FooterSrcY", 0.0f, 1.0f, 0.68f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_footer_src_h{ ModSlider::create("VR_DaysGoneBendUI_FooterSrcH", 0.05f, 1.0f, 0.32f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_key_threshold{ ModSlider::create("VR_DaysGoneBendUI_KeyThreshold", 0.0f, 0.5f, 0.025f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_key_softness{ ModSlider::create("VR_DaysGoneBendUI_KeySoftness", 0.001f, 0.5f, 0.045f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_key_opacity{ ModSlider::create("VR_DaysGoneBendUI_KeyOpacity", 0.0f, 2.0f, 1.0f, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_disable_taa_crop{ ModToggle::create("VR_DaysGoneBendUI_DisableBendTAACrop", true, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_override_composite_extent{ ModToggle::create("VR_DaysGoneBendUI_OverrideCompositeExtent", false, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_composite_width{ ModSlider::create("VR_DaysGoneBendUI_CompositeWidth", 320.0f, 8192.0f, 1920.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_composite_height{ ModSlider::create("VR_DaysGoneBendUI_CompositeHeight", 180.0f, 8192.0f, 1080.0f, true) };
+    const ModToggle::Ptr m_daysgone_bend_ui_override_shader_params{ ModToggle::create("VR_DaysGoneBendUI_OverrideShaderParams", false, true) };
+    const ModInt32::Ptr m_daysgone_bend_ui_shader_param_target{ ModInt32::create("VR_DaysGoneBendUI_ShaderParamTarget", 3, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_shader_offset_x{ ModSlider::create("VR_DaysGoneBendUI_ShaderOffsetX", -4.0f, 4.0f, 0.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_shader_offset_y{ ModSlider::create("VR_DaysGoneBendUI_ShaderOffsetY", -4.0f, 4.0f, 0.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_shader_scale_x{ ModSlider::create("VR_DaysGoneBendUI_ShaderScaleX", 0.05f, 8.0f, 1.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_shader_scale_y{ ModSlider::create("VR_DaysGoneBendUI_ShaderScaleY", 0.05f, 8.0f, 1.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_distance_from_camera{ ModSlider::create("VR_DaysGoneBendUI_DistanceFromCamera", -6000.0f, 6000.0f, -1371.022f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_camera_fov{ ModSlider::create("VR_DaysGoneBendUI_CameraFOV", 10.0f, 140.0f, 70.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_widget_loc_x{ ModSlider::create("VR_DaysGoneBendUI_WidgetLocX", -4000.0f, 4000.0f, 0.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_widget_loc_y{ ModSlider::create("VR_DaysGoneBendUI_WidgetLocY", -4000.0f, 4000.0f, 0.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_widget_loc_z{ ModSlider::create("VR_DaysGoneBendUI_WidgetLocZ", -6000.0f, 2000.0f, -1371.022f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_widget_rot_pitch{ ModSlider::create("VR_DaysGoneBendUI_WidgetRotPitch", -180.0f, 180.0f, 90.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_widget_rot_yaw{ ModSlider::create("VR_DaysGoneBendUI_WidgetRotYaw", -180.0f, 180.0f, 90.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_widget_rot_roll{ ModSlider::create("VR_DaysGoneBendUI_WidgetRotRoll", -180.0f, 180.0f, 0.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_widget_scale{ ModSlider::create("VR_DaysGoneBendUI_WidgetScale", 0.05f, 8.0f, 1.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_screen_offset_x{ ModSlider::create("VR_DaysGoneBendUI_ScreenOffsetX", -1920.0f, 1920.0f, 0.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_screen_offset_y{ ModSlider::create("VR_DaysGoneBendUI_ScreenOffsetY", -1080.0f, 1080.0f, 0.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_screen_scale{ ModSlider::create("VR_DaysGoneBendUI_ScreenScale", 0.1f, 4.0f, 1.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_draw_scale{ ModSlider::create("VR_DaysGoneBendUI_DrawScale", 0.1f, 4.0f, 1.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_root_loc_x{ ModSlider::create("VR_DaysGoneBendUI_RootLocX", -4000.0f, 4000.0f, 0.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_root_loc_y{ ModSlider::create("VR_DaysGoneBendUI_RootLocY", -4000.0f, 4000.0f, 0.0f, true) };
+    const ModSlider::Ptr m_daysgone_bend_ui_root_loc_z{ ModSlider::create("VR_DaysGoneBendUI_RootLocZ", -6000.0f, 2000.0f, -1200.0f, true) };
 
     void setup_options() {
         m_options = {
             *m_recreate_textures_on_reset,
             *m_frame_delay_compensation,
             *m_asynchronous_scan,
-            *m_use_fmalloc_scene_view_extensions
+            *m_use_fmalloc_scene_view_extensions,
+            *m_safe_tick_hook,
+            *m_daysgone_bend_ui_mode,
+            *m_daysgone_bend_ui_force_player_camera,
+            *m_daysgone_bend_ui_override_widget_transform,
+            *m_daysgone_bend_ui_override_root_transform,
+            *m_daysgone_bend_ui_force_widget_refresh,
+            *m_daysgone_bend_ui_viewport_slot_fix,
+            *m_daysgone_bend_ui_live_watchdog,
+            *m_daysgone_bend_ui_apply_child_render_transform,
+            *m_daysgone_bend_ui_viewport_slot_offset_x,
+            *m_daysgone_bend_ui_viewport_slot_offset_y,
+            *m_daysgone_bend_ui_viewport_slot_scale,
+            *m_daysgone_bend_ui_viewport_slot_opacity,
+            *m_daysgone_bend_ui_use_slate_overlay,
+            *m_daysgone_bend_ui_suppress_in_scene_composite,
+            *m_daysgone_bend_ui_split_overlay,
+            *m_daysgone_bend_ui_menu_src_x,
+            *m_daysgone_bend_ui_menu_src_y,
+            *m_daysgone_bend_ui_menu_src_w,
+            *m_daysgone_bend_ui_menu_src_h,
+            *m_daysgone_bend_ui_menu_offset_x,
+            *m_daysgone_bend_ui_menu_offset_y,
+            *m_daysgone_bend_ui_menu_scale,
+            *m_daysgone_bend_ui_footer_src_y,
+            *m_daysgone_bend_ui_footer_src_h,
+            *m_daysgone_bend_ui_key_threshold,
+            *m_daysgone_bend_ui_key_softness,
+            *m_daysgone_bend_ui_key_opacity,
+            *m_daysgone_bend_ui_disable_taa_crop,
+            *m_daysgone_bend_ui_override_composite_extent,
+            *m_daysgone_bend_ui_composite_width,
+            *m_daysgone_bend_ui_composite_height,
+            *m_daysgone_bend_ui_override_shader_params,
+            *m_daysgone_bend_ui_shader_param_target,
+            *m_daysgone_bend_ui_shader_offset_x,
+            *m_daysgone_bend_ui_shader_offset_y,
+            *m_daysgone_bend_ui_shader_scale_x,
+            *m_daysgone_bend_ui_shader_scale_y,
+            *m_daysgone_bend_ui_distance_from_camera,
+            *m_daysgone_bend_ui_camera_fov,
+            *m_daysgone_bend_ui_widget_loc_x,
+            *m_daysgone_bend_ui_widget_loc_y,
+            *m_daysgone_bend_ui_widget_loc_z,
+            *m_daysgone_bend_ui_widget_rot_pitch,
+            *m_daysgone_bend_ui_widget_rot_yaw,
+            *m_daysgone_bend_ui_widget_rot_roll,
+            *m_daysgone_bend_ui_widget_scale,
+            *m_daysgone_bend_ui_screen_offset_x,
+            *m_daysgone_bend_ui_screen_offset_y,
+            *m_daysgone_bend_ui_screen_scale,
+            *m_daysgone_bend_ui_draw_scale,
+            *m_daysgone_bend_ui_root_loc_x,
+            *m_daysgone_bend_ui_root_loc_y,
+            *m_daysgone_bend_ui_root_loc_z
         };
     }
 

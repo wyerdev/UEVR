@@ -72,6 +72,10 @@ add_subdirectory(dependencies/submodules/UESDK)
 # RenderDoc source/runtime isn't present.
 include(cmake/RenderDocFull.cmake)
 
+set(SAFETYHOOK_FETCH_ZYDIS ON CACHE BOOL "" FORCE)
+message(STATUS "Using vendored safetyhook (b62c7356f3e364209a2ae14489550156d7b58b8b + UEVR patches)...")
+add_subdirectory(dependencies/vendor/safetyhook)
+
 include(FetchContent)
 
 message(STATUS "Fetching bddisasm (70db095765ab2066dd88dfb7bbcc42259ed167c5)...")
@@ -91,17 +95,6 @@ FetchContent_Declare(kananlib
 		7a99a94cea3dbcbd46b54885bd3d04f1d242e21a
 )
 FetchContent_MakeAvailable(kananlib)
-
-set(SAFETYHOOK_FETCH_ZYDIS ON)
-
-message(STATUS "Fetching safetyhook (b62c7356f3e364209a2ae14489550156d7b58b8b)...")
-FetchContent_Declare(safetyhook
-	GIT_REPOSITORY
-		"https://github.com/praydog/safetyhook"
-	GIT_TAG
-		b62c7356f3e364209a2ae14489550156d7b58b8b
-)
-FetchContent_MakeAvailable(safetyhook)
 
 message(STATUS "Fetching sdkgenny (f58077f8da8a271490c17558e93b75843b3afd19)...")
 FetchContent_Declare(sdkgenny
@@ -779,6 +772,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/ImGuiThemeHelpers.cpp"
 	"src/mods/LuaLoader.cpp"
 	"src/mods/PluginLoader.cpp"
+	"src/mods/RenderInspector.cpp"
 	"src/mods/UObjectHook.cpp"
 	"src/mods/VR.cpp"
 	"src/mods/bindings/FS.cpp"
@@ -798,14 +792,20 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/IXRTrackingSystemHook.cpp"
 	"src/mods/vr/OverlayComponent.cpp"
 	"src/mods/vr/RenderTargetPoolHook.cpp"
+	"src/mods/vr/UE57SlateSymbols.cpp"
 	"src/mods/vr/d3d12/CommandContext.cpp"
 	"src/mods/vr/d3d12/DirectXTK.cpp"
 	"src/mods/vr/d3d12/TextureContext.cpp"
 	"src/mods/vr/runtimes/OpenVR.cpp"
 	"src/mods/vr/runtimes/OpenXR.cpp"
+	"src/render/D3D12Diagnostics.cpp"
+	"src/render/FrameResourceInspector.cpp"
+	"src/render/RenderAnalysisExport.cpp"
 	"src/render/RenderDocCaptureControl.cpp"
 	"src/render/RenderDocCaptureService.cpp"
 	"src/render/RenderDocDxgiProofHooks.cpp"
+	"src/render/ShaderCompiler.cpp"
+	"src/render/ShaderOverrideRegistry.cpp"
 	"src/uevr-imgui/imgui_impl_dx11.cpp"
 	"src/uevr-imgui/imgui_impl_dx12.cpp"
 	"src/uevr-imgui/imgui_impl_win32.cpp"
@@ -823,9 +823,11 @@ list(APPEND uevr_SOURCES
 	"src/hooks/WindowsMessageHook.hpp"
 	"src/hooks/XInputHook.hpp"
 	"src/mods/FrameworkConfig.hpp"
+	"src/mods/GameSpecific.hpp"
 	"src/mods/ImGuiThemeHelpers.hpp"
 	"src/mods/LuaLoader.hpp"
 	"src/mods/PluginLoader.hpp"
+	"src/mods/RenderInspector.hpp"
 	"src/mods/UObjectHook.hpp"
 	"src/mods/VR.hpp"
 	"src/mods/bindings/FS.hpp"
@@ -844,6 +846,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/IXRTrackingSystemHook.hpp"
 	"src/mods/vr/OverlayComponent.hpp"
 	"src/mods/vr/RenderTargetPoolHook.hpp"
+	"src/mods/vr/UE57SlateSymbols.hpp"
 	"src/mods/vr/UpscaleHelper.hpp"
 	"src/mods/vr/d3d12/ComPtr.hpp"
 	"src/mods/vr/d3d12/CommandContext.hpp"
@@ -854,9 +857,14 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/runtimes/VRRuntime.hpp"
 	"src/mods/vr/shaders/ps.hpp"
 	"src/mods/vr/shaders/vs.hpp"
+	"src/render/D3D12Diagnostics.hpp"
+	"src/render/FrameResourceInspector.hpp"
+	"src/render/RenderAnalysisExport.hpp"
 	"src/render/RenderDocCaptureControl.hpp"
 	"src/render/RenderDocCaptureService.hpp"
 	"src/render/RenderDocDxgiProofHooks.hpp"
+	"src/render/ShaderCompiler.hpp"
+	"src/render/ShaderOverrideRegistry.hpp"
 	"src/uevr-imgui/font_robotomedium.hpp"
 	"src/uevr-imgui/uevr_imconfig.hpp"
 	"src/utility/ImGui.hpp"
@@ -901,6 +909,8 @@ target_link_libraries(uevr PUBLIC
 	shlwapi
 	d3d11
 	d3d12
+	d3dcompiler
+	dbghelp
 	safetyhook
 	glm
 	imgui

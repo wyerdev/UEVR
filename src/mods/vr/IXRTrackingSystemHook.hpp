@@ -11,6 +11,7 @@
 
 namespace sdk {
 class UEngine;
+class UGameEngine;
 class IXRTrackingSystem;
 class IXRCamera;
 class IHeadMountedDisplay;
@@ -26,6 +27,7 @@ public:
         std::chrono::high_resolution_clock::time_point last_update{std::chrono::high_resolution_clock::now()};
         glm::quat last_aim_rot{glm::identity<glm::quat>()};
         bool was_called{false};
+        bool auto_enabled_decoupled_pitch{false};
     };
 
 public:
@@ -33,10 +35,11 @@ public:
 
     void on_draw_ui() override;
     void on_pre_engine_tick(sdk::UGameEngine* engine, float delta) override;
+    void on_post_engine_tick(sdk::UGameEngine* engine, float delta) override;
 
     auto& get_process_view_rotation_data() { return m_process_view_rotation_data; }
 
-    void manual_update_control_rotation();
+    void manual_update_control_rotation(sdk::UGameEngine* engine = nullptr);
     void update_view_rotation(sdk::UObject* reference_obj, Rotator<float>* rot);
 
 private:
@@ -64,6 +67,7 @@ private:
     static bool is_head_tracking_allowed_for_world(sdk::IXRTrackingSystem*, void* world);
     static SharedPtr* get_xr_camera(sdk::IXRTrackingSystem*, SharedPtr* out, size_t device_id);
     static void get_motion_controller_data(sdk::IXRTrackingSystem*, void* world, uint32_t hand, void* motion_controller_data);
+    static void get_motion_controller_state(sdk::IXRTrackingSystem*, void* world, uint8_t space_type, uint8_t hand, uint8_t pose_type, void* motion_controller_state);
     static void get_hmd_data(sdk::IXRTrackingSystem*, void* world, void* hmd_data);
     static void get_current_pose(sdk::IXRTrackingSystem*, int32_t device_id, Quat<float>* out_rot, glm::vec3* out_pos);
     static int32_t get_xr_system_flags(sdk::IXRTrackingSystem*);

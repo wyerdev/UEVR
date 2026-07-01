@@ -1,20 +1,147 @@
+#include <array>
 #include <thread>
 #include <future>
+#include <optional>
 #include <unordered_set>
 
 #include <spdlog/spdlog.h>
+#include <wrl/client.h>
 #include <utility/Thread.hpp>
 #include <utility/Module.hpp>
 #include <utility/RTTI.hpp>
+#include <utility/String.hpp>
 
 #include "WindowFilter.hpp"
 #include "Framework.hpp"
+#include "render/D3D12Diagnostics.hpp"
+#include "render/ShaderOverrideRegistry.hpp"
 
 #include "render/RenderDocCaptureService.hpp"
 
 #include "D3D12Hook.hpp"
 
 static D3D12Hook* g_d3d12_hook = nullptr;
+
+namespace {
+constexpr size_t CREATE_GRAPHICS_PIPELINE_STATE_VTABLE_INDEX = 10;
+constexpr size_t CREATE_PIPELINE_STATE_VTABLE_INDEX = 47;
+constexpr size_t CREATE_DESCRIPTOR_HEAP_VTABLE_INDEX = 14;
+constexpr size_t CREATE_SHADER_RESOURCE_VIEW_VTABLE_INDEX = 18;
+constexpr size_t CREATE_RENDER_TARGET_VIEW_VTABLE_INDEX = 20;
+constexpr size_t CREATE_DEPTH_STENCIL_VIEW_VTABLE_INDEX = 21;
+constexpr size_t COPY_DESCRIPTORS_VTABLE_INDEX = 23;
+constexpr size_t COPY_DESCRIPTORS_SIMPLE_VTABLE_INDEX = 24;
+constexpr size_t DRAW_INSTANCED_VTABLE_INDEX = 12;
+constexpr size_t DRAW_INDEXED_INSTANCED_VTABLE_INDEX = 13;
+constexpr size_t DISPATCH_VTABLE_INDEX = 14;
+constexpr size_t RS_SET_VIEWPORTS_VTABLE_INDEX = 21;
+constexpr size_t SET_PIPELINE_STATE_VTABLE_INDEX = 25;
+constexpr size_t RESOURCE_BARRIER_VTABLE_INDEX = 26;
+constexpr size_t SET_DESCRIPTOR_HEAPS_VTABLE_INDEX = 28;
+constexpr size_t SET_COMPUTE_ROOT_DESCRIPTOR_TABLE_VTABLE_INDEX = 31;
+constexpr size_t SET_GRAPHICS_ROOT_DESCRIPTOR_TABLE_VTABLE_INDEX = 32;
+constexpr size_t OM_SET_RENDER_TARGETS_VTABLE_INDEX = 46;
+
+bool should_preserve_present_params_for_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && exe_path->find(L"MafiaTheOldCountry") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+bool is_dune_awakening_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && exe_path->find(L"DuneSandbox-Win64-Shipping") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+std::optional<std::wstring> get_d3d12_debug_name(ID3D12Object* object) {
+    if (object == nullptr) {
+        return std::nullopt;
+    }
+
+    UINT byte_count = 0;
+    if (FAILED(object->GetPrivateData(WKPDID_D3DDebugObjectNameW, &byte_count, nullptr)) ||
+        byte_count <= sizeof(wchar_t)) {
+        return std::nullopt;
+    }
+
+    std::wstring name((byte_count + sizeof(wchar_t) - 1) / sizeof(wchar_t), L'\0');
+    if (FAILED(object->GetPrivateData(WKPDID_D3DDebugObjectNameW, &byte_count, name.data()))) {
+        return std::nullopt;
+    }
+
+    name.resize(byte_count / sizeof(wchar_t));
+    while (!name.empty() && name.back() == L'\0') {
+        name.pop_back();
+    }
+
+    return name.empty() ? std::nullopt : std::optional<std::wstring>{std::move(name)};
+}
+
+void log_dune_present_path_once(IDXGISwapChain3* swapchain, ID3D12CommandQueue* command_queue) {
+    static bool logged = false;
+
+    if (logged || !is_dune_awakening_current_game() || swapchain == nullptr) {
+        return;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> buffer{};
+    const auto index = swapchain->GetCurrentBackBufferIndex();
+    if (FAILED(swapchain->GetBuffer(index, IID_PPV_ARGS(&buffer))) || buffer == nullptr) {
+        return;
+    }
+
+    const auto buffer_name = get_d3d12_debug_name(buffer.Get());
+    const auto queue_name = get_d3d12_debug_name(command_queue);
+    const auto desc = buffer->GetDesc();
+
+    spdlog::info(
+        "[Dune][FSR] Real Present path swapchain={:x} index={} buffer={:x} name='{}' [{}x{} fmt={}] queue={:x} name='{}'. "
+        "Dune uses one DXGI swapchain with an FFX custom-present pipeline; no nested swapchain will be selected.",
+        reinterpret_cast<uintptr_t>(swapchain),
+        index,
+        reinterpret_cast<uintptr_t>(buffer.Get()),
+        buffer_name ? utility::narrow(*buffer_name) : "<unnamed>",
+        desc.Width,
+        desc.Height,
+        static_cast<uint32_t>(desc.Format),
+        reinterpret_cast<uintptr_t>(command_queue),
+        queue_name ? utility::narrow(*queue_name) : "<unnamed>");
+
+    logged = true;
+}
+
+template <typename TInterface>
+void add_unique_pointer_hook(
+    TInterface* iface,
+    size_t vtable_index,
+    void* detour,
+    std::vector<std::unique_ptr<PointerHook>>& storage,
+    std::unordered_map<uintptr_t, PointerHook*>& lookup,
+    std::unordered_set<uintptr_t>& seen_slots
+) {
+    if (iface == nullptr) {
+        return;
+    }
+
+    auto** slot = &(*(void***)iface)[vtable_index];
+    const auto slot_key = reinterpret_cast<uintptr_t>(slot);
+
+    if (!seen_slots.emplace(slot_key).second) {
+        return;
+    }
+
+    auto hook = std::make_unique<PointerHook>(slot, detour);
+    lookup.emplace(slot_key, hook.get());
+    storage.emplace_back(std::move(hook));
+}
+}
 
 D3D12Hook::~D3D12Hook() {
     unhook();
@@ -28,6 +155,8 @@ bool D3D12Hook::hook() {
     IDXGISwapChain1* swap_chain1{ nullptr };
     IDXGISwapChain3* swap_chain{ nullptr };
     ID3D12Device* device{ nullptr };
+    ID3D12CommandAllocator* command_allocator{ nullptr };
+    ID3D12GraphicsCommandList* command_list{ nullptr };
 
     D3D_FEATURE_LEVEL feature_level = D3D_FEATURE_LEVEL_11_0;
     DXGI_SWAP_CHAIN_DESC1 swap_chain_desc1;
@@ -123,6 +252,16 @@ bool D3D12Hook::hook() {
     ID3D12CommandQueue* command_queue{ nullptr };
     if (FAILED(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&command_queue)))) {
         spdlog::error("Failed to create D3D12 Dummy Command Queue");
+        return false;
+    }
+
+    if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&command_allocator)))) {
+        spdlog::error("Failed to create D3D12 Dummy Command Allocator");
+        return false;
+    }
+
+    if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, command_allocator, nullptr, IID_PPV_ARGS(&command_list)))) {
+        spdlog::error("Failed to create D3D12 Dummy Graphics Command List");
         return false;
     }
 
@@ -226,27 +365,41 @@ bool D3D12Hook::hook() {
         return false;
     }
 
-    try {
-        const auto ti = utility::rtti::get_type_info(swap_chain1);
-        const auto swapchain_classname = ti != nullptr && ti->name() != nullptr ? std::string_view{ti->name()} : "unknown";
-        const auto raw_name = ti != nullptr && ti->raw_name() != nullptr ? std::string_view{ti->raw_name()} : "unknown";
+    if (is_dune_awakening_current_game()) {
+        // This object is UEVR's startup dummy, not Dune's later FFX custom
+        // present. DXGI COM implementations are not required to expose MSVC
+        // RTTI, so probing vtable[-1] cannot identify Dune's FSR path.
+        m_skip_dummy_swapchain_type_info_probe = true;
+        spdlog::info(
+            "[Dune][FSR] Skipping MSVC RTTI on UEVR's dummy DXGI swapchain; "
+            "the real single-swapchain FFX custom-present path will be identified at Present");
+    }
 
-        spdlog::info("Swapchain type info: {}", swapchain_classname);
-        spdlog::info("Swapchain raw type info: {}", raw_name);
-        
-        if (swapchain_classname.contains("interposer::DXGISwapChain")) { // DLSS3
-            spdlog::info("Found Streamline (DLSSFG) swapchain during dummy initialization: {:x}", (uintptr_t)swap_chain1);
-            m_using_frame_generation_swapchain = true;
+    if (!m_skip_dummy_swapchain_type_info_probe) {
+        try {
+            const auto ti = utility::rtti::get_type_info(swap_chain1);
+            const auto swapchain_classname = ti != nullptr && ti->name() != nullptr ? std::string_view{ti->name()} : "unknown";
+            const auto raw_name = ti != nullptr && ti->raw_name() != nullptr ? std::string_view{ti->raw_name()} : "unknown";
+
+            spdlog::info("Swapchain type info: {}", swapchain_classname);
+            spdlog::info("Swapchain raw type info: {}", raw_name);
+            
+            if (swapchain_classname.contains("interposer::DXGISwapChain")) { // DLSS3
+                spdlog::info("Found Streamline (DLSSFG) swapchain during dummy initialization: {:x}", (uintptr_t)swap_chain1);
+                m_using_frame_generation_swapchain = true;
+            }
+            // Need to test this one to see if it actually has the same issues - disabling it for now
+            /*else if (swapchain_classname.contains("FrameInterpolationSwapChain")) { // FSR3
+                spdlog::info("Found FSR3 swapchain during dummy initialization: {:x}", (uintptr_t)swap_chain1);
+                m_using_frame_generation_swapchain = true;
+            }*/
+        } catch (const std::exception& e) {
+            spdlog::error("Failed to get type info: {}. Disabling dummy swapchain RTTI probe for this session.", e.what());
+            m_skip_dummy_swapchain_type_info_probe = true;
+        } catch (...) {
+            spdlog::error("Failed to get type info: unknown exception. Disabling dummy swapchain RTTI probe for this session.");
+            m_skip_dummy_swapchain_type_info_probe = true;
         }
-        // Need to test this one to see if it actually has the same issues - disabling it for now
-        /*else if (swapchain_classname.contains("FrameInterpolationSwapChain")) { // FSR3
-            spdlog::info("Found FSR3 swapchain during dummy initialization: {:x}", (uintptr_t)swap_chain1);
-            m_using_frame_generation_swapchain = true;
-        }*/
-    } catch (const std::exception& e) {
-        spdlog::error("Failed to get type info: {}", e.what());
-    } catch (...) {
-        spdlog::error("Failed to get type info: unknown exception");
     }
 
     spdlog::info("Finding command queue offset");
@@ -339,6 +492,16 @@ bool D3D12Hook::hook() {
         spdlog::info("Initializing hooks");
         m_present_hook.reset();
         m_present1_hook.reset();
+        m_create_graphics_pipeline_state_hooks.clear();
+        m_create_pipeline_state_hooks.clear();
+        m_create_render_target_view_hooks.clear();
+        m_create_depth_stencil_view_hooks.clear();
+        m_set_pipeline_state_hooks.clear();
+        m_create_graphics_pipeline_state_hook_lookup.clear();
+        m_create_pipeline_state_hook_lookup.clear();
+        m_create_render_target_view_hook_lookup.clear();
+        m_create_depth_stencil_view_hook_lookup.clear();
+        m_set_pipeline_state_hook_lookup.clear();
         m_swapchain_hook.reset();
 
         m_is_phase_1 = true;
@@ -347,10 +510,167 @@ bool D3D12Hook::hook() {
         auto& present1_fn = (*(void***)target_swapchain)[22]; // Present1
         m_present_hook = std::make_unique<PointerHook>(&present_fn, (void*)&D3D12Hook::present);
         m_present1_hook = std::make_unique<PointerHook>(&present1_fn, (void*)&D3D12Hook::present1);
+
+        std::unordered_set<uintptr_t> graphics_pipeline_state_slots{};
+        std::unordered_set<uintptr_t> pipeline_state_stream_slots{};
+        std::unordered_set<uintptr_t> render_target_view_slots{};
+        std::unordered_set<uintptr_t> depth_stencil_view_slots{};
+        std::unordered_set<uintptr_t> set_pipeline_state_slots{};
+
+        add_unique_pointer_hook(
+            device,
+            CREATE_GRAPHICS_PIPELINE_STATE_VTABLE_INDEX,
+            reinterpret_cast<void*>(&D3D12Hook::create_graphics_pipeline_state),
+            m_create_graphics_pipeline_state_hooks,
+            m_create_graphics_pipeline_state_hook_lookup,
+            graphics_pipeline_state_slots
+        );
+
+        Microsoft::WRL::ComPtr<ID3D12Device1> device1{};
+        Microsoft::WRL::ComPtr<ID3D12Device2> device2{};
+        Microsoft::WRL::ComPtr<ID3D12Device3> device3{};
+        Microsoft::WRL::ComPtr<ID3D12Device4> device4{};
+        Microsoft::WRL::ComPtr<ID3D12Device5> device5{};
+        Microsoft::WRL::ComPtr<ID3D12Device6> device6{};
+        Microsoft::WRL::ComPtr<ID3D12Device7> device7{};
+        Microsoft::WRL::ComPtr<ID3D12Device8> device8{};
+        Microsoft::WRL::ComPtr<ID3D12Device9> device9{};
+        Microsoft::WRL::ComPtr<ID3D12Device10> device10{};
+
+        device->QueryInterface(IID_PPV_ARGS(&device1));
+        device->QueryInterface(IID_PPV_ARGS(&device2));
+        device->QueryInterface(IID_PPV_ARGS(&device3));
+        device->QueryInterface(IID_PPV_ARGS(&device4));
+        device->QueryInterface(IID_PPV_ARGS(&device5));
+        device->QueryInterface(IID_PPV_ARGS(&device6));
+        device->QueryInterface(IID_PPV_ARGS(&device7));
+        device->QueryInterface(IID_PPV_ARGS(&device8));
+        device->QueryInterface(IID_PPV_ARGS(&device9));
+        device->QueryInterface(IID_PPV_ARGS(&device10));
+
+        const std::array<IUnknown*, 10> device_interfaces{
+            device1.Get(),
+            device2.Get(),
+            device3.Get(),
+            device4.Get(),
+            device5.Get(),
+            device6.Get(),
+            device7.Get(),
+            device8.Get(),
+            device9.Get(),
+            device10.Get()
+        };
+
+        for (auto* iface : device_interfaces) {
+            add_unique_pointer_hook(
+                iface,
+                CREATE_GRAPHICS_PIPELINE_STATE_VTABLE_INDEX,
+                reinterpret_cast<void*>(&D3D12Hook::create_graphics_pipeline_state),
+                m_create_graphics_pipeline_state_hooks,
+                m_create_graphics_pipeline_state_hook_lookup,
+                graphics_pipeline_state_slots
+            );
+
+            add_unique_pointer_hook(
+                iface,
+                CREATE_RENDER_TARGET_VIEW_VTABLE_INDEX,
+                reinterpret_cast<void*>(&D3D12Hook::create_render_target_view),
+                m_create_render_target_view_hooks,
+                m_create_render_target_view_hook_lookup,
+                render_target_view_slots
+            );
+
+            add_unique_pointer_hook(
+                iface,
+                CREATE_DEPTH_STENCIL_VIEW_VTABLE_INDEX,
+                reinterpret_cast<void*>(&D3D12Hook::create_depth_stencil_view),
+                m_create_depth_stencil_view_hooks,
+                m_create_depth_stencil_view_hook_lookup,
+                depth_stencil_view_slots
+            );
+        }
+
+        const std::array<IUnknown*, 9> pipeline_stream_interfaces{
+            device2.Get(),
+            device3.Get(),
+            device4.Get(),
+            device5.Get(),
+            device6.Get(),
+            device7.Get(),
+            device8.Get(),
+            device9.Get(),
+            device10.Get()
+        };
+
+        for (auto* iface : pipeline_stream_interfaces) {
+            add_unique_pointer_hook(
+                iface,
+                CREATE_PIPELINE_STATE_VTABLE_INDEX,
+                reinterpret_cast<void*>(&D3D12Hook::create_pipeline_state),
+                m_create_pipeline_state_hooks,
+                m_create_pipeline_state_hook_lookup,
+                pipeline_state_stream_slots
+            );
+        }
+
+        add_unique_pointer_hook(
+            command_list,
+            SET_PIPELINE_STATE_VTABLE_INDEX,
+            reinterpret_cast<void*>(&D3D12Hook::set_pipeline_state),
+            m_set_pipeline_state_hooks,
+            m_set_pipeline_state_hook_lookup,
+            set_pipeline_state_slots
+        );
+
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList1> command_list1{};
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList2> command_list2{};
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList3> command_list3{};
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> command_list4{};
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList5> command_list5{};
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList6> command_list6{};
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList7> command_list7{};
+
+        command_list->QueryInterface(IID_PPV_ARGS(&command_list1));
+        command_list->QueryInterface(IID_PPV_ARGS(&command_list2));
+        command_list->QueryInterface(IID_PPV_ARGS(&command_list3));
+        command_list->QueryInterface(IID_PPV_ARGS(&command_list4));
+        command_list->QueryInterface(IID_PPV_ARGS(&command_list5));
+        command_list->QueryInterface(IID_PPV_ARGS(&command_list6));
+        command_list->QueryInterface(IID_PPV_ARGS(&command_list7));
+
+        const std::array<IUnknown*, 7> command_list_interfaces{
+            command_list1.Get(),
+            command_list2.Get(),
+            command_list3.Get(),
+            command_list4.Get(),
+            command_list5.Get(),
+            command_list6.Get(),
+            command_list7.Get()
+        };
+
+        for (auto* iface : command_list_interfaces) {
+            add_unique_pointer_hook(
+                iface,
+                SET_PIPELINE_STATE_VTABLE_INDEX,
+                reinterpret_cast<void*>(&D3D12Hook::set_pipeline_state),
+                m_set_pipeline_state_hooks,
+                m_set_pipeline_state_hook_lookup,
+                set_pipeline_state_slots
+            );
+        }
+
         m_hooked = true;
     } catch (const std::exception& e) {
         spdlog::error("Failed to initialize hooks: {}", e.what());
         m_hooked = false;
+    }
+
+    if (command_list != nullptr) {
+        command_list->Release();
+    }
+
+    if (command_allocator != nullptr) {
+        command_allocator->Release();
     }
 
     device->Release();
@@ -379,6 +699,16 @@ bool D3D12Hook::unhook() {
 
     m_present_hook.reset();
     m_present1_hook.reset();
+    m_create_graphics_pipeline_state_hooks.clear();
+    m_create_pipeline_state_hooks.clear();
+    m_create_render_target_view_hooks.clear();
+    m_create_depth_stencil_view_hooks.clear();
+    m_set_pipeline_state_hooks.clear();
+    m_create_graphics_pipeline_state_hook_lookup.clear();
+    m_create_pipeline_state_hook_lookup.clear();
+    m_create_render_target_view_hook_lookup.clear();
+    m_create_depth_stencil_view_hook_lookup.clear();
+    m_set_pipeline_state_hook_lookup.clear();
     m_swapchain_hook.reset();
 
     m_hooked = false;
@@ -387,10 +717,52 @@ bool D3D12Hook::unhook() {
     return true;
 }
 
+PointerHook* D3D12Hook::find_create_graphics_pipeline_state_hook(void* slot) const {
+    if (const auto it = m_create_graphics_pipeline_state_hook_lookup.find(reinterpret_cast<uintptr_t>(slot)); it != m_create_graphics_pipeline_state_hook_lookup.end()) {
+        return it->second;
+    }
+
+    return m_create_graphics_pipeline_state_hooks.empty() ? nullptr : m_create_graphics_pipeline_state_hooks.front().get();
+}
+
+PointerHook* D3D12Hook::find_create_pipeline_state_hook(void* slot) const {
+    if (const auto it = m_create_pipeline_state_hook_lookup.find(reinterpret_cast<uintptr_t>(slot)); it != m_create_pipeline_state_hook_lookup.end()) {
+        return it->second;
+    }
+
+    return m_create_pipeline_state_hooks.empty() ? nullptr : m_create_pipeline_state_hooks.front().get();
+}
+
+PointerHook* D3D12Hook::find_create_render_target_view_hook(void* slot) const {
+    if (const auto it = m_create_render_target_view_hook_lookup.find(reinterpret_cast<uintptr_t>(slot)); it != m_create_render_target_view_hook_lookup.end()) {
+        return it->second;
+    }
+
+    return m_create_render_target_view_hooks.empty() ? nullptr : m_create_render_target_view_hooks.front().get();
+}
+
+PointerHook* D3D12Hook::find_create_depth_stencil_view_hook(void* slot) const {
+    if (const auto it = m_create_depth_stencil_view_hook_lookup.find(reinterpret_cast<uintptr_t>(slot)); it != m_create_depth_stencil_view_hook_lookup.end()) {
+        return it->second;
+    }
+
+    return m_create_depth_stencil_view_hooks.empty() ? nullptr : m_create_depth_stencil_view_hooks.front().get();
+}
+
+PointerHook* D3D12Hook::find_set_pipeline_state_hook(void* slot) const {
+    if (const auto it = m_set_pipeline_state_hook_lookup.find(reinterpret_cast<uintptr_t>(slot)); it != m_set_pipeline_state_hook_lookup.end()) {
+        return it->second;
+    }
+
+    return m_set_pipeline_state_hooks.empty() ? nullptr : m_set_pipeline_state_hooks.front().get();
+}
+
 thread_local int32_t g_present_depth = 0;
 
 HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_interval, UINT flags, DXGI_PRESENT_PARAMETERS* params, bool present1) {
     auto d3d12 = g_d3d12_hook;
+    const auto original_sync_interval = sync_interval;
+    const auto original_flags = flags;
 
     HWND swapchain_wnd{nullptr};
     swap_chain->GetHwnd(&swapchain_wnd);
@@ -449,6 +821,20 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
         } else {
             d3d12->m_command_queue = *(ID3D12CommandQueue**)((uintptr_t)swap_chain + d3d12->m_command_queue_offset);
         }
+
+        render::D3D12Diagnostics::get().begin_frame(
+            d3d12->m_device,
+            swap_chain,
+            d3d12->m_command_queue,
+            d3d12->m_render_width,
+            d3d12->m_render_height,
+            d3d12->m_display_width,
+            d3d12->m_display_height,
+            d3d12->m_using_proton_swapchain,
+            d3d12->m_using_frame_generation_swapchain
+        );
+
+        log_dune_present_path_once(swap_chain, d3d12->m_command_queue);
     }
 
     if (d3d12->m_swapchain_0 == nullptr) {
@@ -493,19 +879,40 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
         d3d12->m_on_present(*d3d12);
 
         if (d3d12->m_next_present_interval) {
-            sync_interval = *d3d12->m_next_present_interval;
+            const auto requested_sync_interval = *d3d12->m_next_present_interval;
             d3d12->m_next_present_interval = std::nullopt;
 
-            if (sync_interval == 0) {
-                BOOL is_fullscreen = 0;
-                swap_chain->GetFullscreenState(&is_fullscreen, nullptr);
-                flags &= ~DXGI_PRESENT_DO_NOT_SEQUENCE;
+            const auto swapchain_key = reinterpret_cast<uintptr_t>(swap_chain);
+            const auto preserve_for_current_game = should_preserve_present_params_for_current_game();
 
-                DXGI_SWAP_CHAIN_DESC swap_desc{};
-                swap_chain->GetDesc(&swap_desc);
+            if (preserve_for_current_game || d3d12->m_swapchains_requiring_original_present_params.contains(swapchain_key)) {
+                if (d3d12->m_original_present_param_skip_logged_swapchains.insert(swapchain_key).second) {
+                    if (preserve_for_current_game) {
+                        spdlog::warn(
+                            "Skipping UEVR Present param override for MafiaTheOldCountry swapchain {:x}; preserving original sync={} flags={:x}",
+                            swapchain_key,
+                            original_sync_interval,
+                            original_flags);
+                    } else {
+                        spdlog::warn(
+                            "Skipping UEVR Present param override for swapchain {:x} after prior original-param recovery",
+                            swapchain_key);
+                    }
+                }
+            } else {
+                sync_interval = requested_sync_interval;
 
-                if (!is_fullscreen && (swap_desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0) {
-                    flags |= DXGI_PRESENT_ALLOW_TEARING;
+                if (sync_interval == 0) {
+                    BOOL is_fullscreen = 0;
+                    swap_chain->GetFullscreenState(&is_fullscreen, nullptr);
+                    flags &= ~DXGI_PRESENT_DO_NOT_SEQUENCE;
+
+                    DXGI_SWAP_CHAIN_DESC swap_desc{};
+                    swap_chain->GetDesc(&swap_desc);
+
+                    if (!is_fullscreen && (swap_desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0) {
+                        flags |= DXGI_PRESENT_ALLOW_TEARING;
+                    }
                 }
             }
         }
@@ -517,6 +924,32 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
     
     if (!d3d12->m_ignore_next_present) {
         result = present_fn(swap_chain, sync_interval, flags, params);
+
+        if (result == DXGI_ERROR_INVALID_CALL &&
+            (sync_interval != original_sync_interval || flags != original_flags))
+        {
+            spdlog::warn(
+                "Present failed with modified params, retrying original params. modified_sync={} modified_flags={:x} original_sync={} original_flags={:x}",
+                sync_interval,
+                flags,
+                original_sync_interval,
+                original_flags);
+
+            result = present_fn(swap_chain, original_sync_interval, original_flags, params);
+
+            if (result == S_OK) {
+                spdlog::warn("Present retry with original params succeeded");
+                const auto swapchain_key = reinterpret_cast<uintptr_t>(swap_chain);
+
+                if (d3d12->m_swapchains_requiring_original_present_params.insert(swapchain_key).second) {
+                    spdlog::warn(
+                        "Marked swapchain {:x} to preserve original Present params after DXGI_ERROR_INVALID_CALL recovery",
+                        swapchain_key);
+                }
+            } else {
+                spdlog::error("Present retry with original params failed: {:x}", result);
+            }
+        }
 
         if (result != S_OK) {
             spdlog::error("Present failed: {:x}", result);
@@ -583,6 +1016,133 @@ HRESULT WINAPI D3D12Hook::present1(IDXGISwapChain3* swap_chain, UINT sync_interv
     std::scoped_lock _{g_framework->get_hook_monitor_mutex()};
 
     return D3D12Hook::present_internal(swap_chain, sync_interval, flags, params, true);
+}
+
+HRESULT WINAPI D3D12Hook::create_graphics_pipeline_state(
+    ID3D12Device* device,
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc,
+    REFIID riid,
+    void** pipeline_state
+) {
+    auto d3d12 = g_d3d12_hook;
+    const auto slot = &(*(void***)device)[CREATE_GRAPHICS_PIPELINE_STATE_VTABLE_INDEX];
+    auto* hook = d3d12->find_create_graphics_pipeline_state_hook(slot);
+    auto original = hook != nullptr ? hook->get_original<decltype(D3D12Hook::create_graphics_pipeline_state)*>() : nullptr;
+
+    if (original == nullptr) {
+        return E_FAIL;
+    }
+
+    const auto result = original(device, desc, riid, pipeline_state);
+
+    auto& shader_registry = render::ShaderOverrideRegistry::get();
+    if (shader_registry.should_track_d3d12_pipelines() &&
+        SUCCEEDED(result) &&
+        pipeline_state != nullptr &&
+        *pipeline_state != nullptr &&
+        riid == __uuidof(ID3D12PipelineState) &&
+        desc != nullptr) {
+        shader_registry.register_d3d12_graphics_pipeline_state_creation(
+            device,
+            static_cast<ID3D12PipelineState*>(*pipeline_state),
+            desc
+        );
+    }
+
+    return result;
+}
+
+HRESULT WINAPI D3D12Hook::create_pipeline_state(
+    ID3D12Device2* device,
+    const D3D12_PIPELINE_STATE_STREAM_DESC* desc,
+    REFIID riid,
+    void** pipeline_state
+) {
+    auto d3d12 = g_d3d12_hook;
+    const auto slot = &(*(void***)device)[CREATE_PIPELINE_STATE_VTABLE_INDEX];
+    auto* hook = d3d12->find_create_pipeline_state_hook(slot);
+    auto original = hook != nullptr ? hook->get_original<decltype(D3D12Hook::create_pipeline_state)*>() : nullptr;
+
+    if (original == nullptr) {
+        return E_FAIL;
+    }
+
+    const auto result = original(device, desc, riid, pipeline_state);
+
+    auto& shader_registry = render::ShaderOverrideRegistry::get();
+    if (shader_registry.should_track_d3d12_pipelines() &&
+        SUCCEEDED(result) &&
+        pipeline_state != nullptr &&
+        *pipeline_state != nullptr &&
+        riid == __uuidof(ID3D12PipelineState) &&
+        desc != nullptr) {
+        shader_registry.register_d3d12_pipeline_state_stream_creation(
+            device,
+            static_cast<ID3D12PipelineState*>(*pipeline_state),
+            desc
+        );
+    }
+
+    return result;
+}
+
+void WINAPI D3D12Hook::create_render_target_view(
+    ID3D12Device* device,
+    ID3D12Resource* resource,
+    const D3D12_RENDER_TARGET_VIEW_DESC* desc,
+    D3D12_CPU_DESCRIPTOR_HANDLE descriptor
+) {
+    (void)desc;
+    auto d3d12 = g_d3d12_hook;
+    const auto slot = device != nullptr ? &(*(void***)device)[CREATE_RENDER_TARGET_VIEW_VTABLE_INDEX] : nullptr;
+    auto* hook = d3d12 != nullptr ? d3d12->find_create_render_target_view_hook(slot) : nullptr;
+    auto original = hook != nullptr ? hook->get_original<decltype(D3D12Hook::create_render_target_view)*>() : nullptr;
+
+    if (original != nullptr) {
+        original(device, resource, desc, descriptor);
+    }
+
+    render::D3D12Diagnostics::get().register_rtv_descriptor("D3D12Hook::CreateRenderTargetView", resource, descriptor);
+}
+
+void WINAPI D3D12Hook::create_depth_stencil_view(
+    ID3D12Device* device,
+    ID3D12Resource* resource,
+    const D3D12_DEPTH_STENCIL_VIEW_DESC* desc,
+    D3D12_CPU_DESCRIPTOR_HANDLE descriptor
+) {
+    (void)desc;
+    auto d3d12 = g_d3d12_hook;
+    const auto slot = device != nullptr ? &(*(void***)device)[CREATE_DEPTH_STENCIL_VIEW_VTABLE_INDEX] : nullptr;
+    auto* hook = d3d12 != nullptr ? d3d12->find_create_depth_stencil_view_hook(slot) : nullptr;
+    auto original = hook != nullptr ? hook->get_original<decltype(D3D12Hook::create_depth_stencil_view)*>() : nullptr;
+
+    if (original != nullptr) {
+        original(device, resource, desc, descriptor);
+    }
+
+    render::D3D12Diagnostics::get().register_dsv_descriptor("D3D12Hook::CreateDepthStencilView", resource, descriptor);
+}
+
+void WINAPI D3D12Hook::set_pipeline_state(ID3D12GraphicsCommandList* command_list, ID3D12PipelineState* pipeline_state) {
+    auto d3d12 = g_d3d12_hook;
+    const auto slot = &(*(void***)command_list)[SET_PIPELINE_STATE_VTABLE_INDEX];
+    auto* hook = d3d12->find_set_pipeline_state_hook(slot);
+    auto original = hook != nullptr ? hook->get_original<decltype(D3D12Hook::set_pipeline_state)*>() : nullptr;
+
+    if (original == nullptr) {
+        return;
+    }
+
+    auto& shader_registry = render::ShaderOverrideRegistry::get();
+    if (!shader_registry.should_track_d3d12_pipelines()) {
+        original(command_list, pipeline_state);
+        return;
+    }
+
+    auto bound_pipeline_state = shader_registry.resolve_d3d12_pipeline_state(pipeline_state);
+    shader_registry.note_d3d12_pipeline_state_bound(pipeline_state, bound_pipeline_state);
+    original(command_list, bound_pipeline_state);
 }
 
 thread_local int32_t g_resize_buffers_depth = 0;

@@ -1,9 +1,14 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
+#include <mutex>
 #include <optional>
 #include <memory>
 #include <string>
+#include <string_view>
 
+#include <utility/Config.hpp>
 #include <sdk/CVar.hpp>
 
 #include "../../Mod.hpp"
@@ -24,6 +29,18 @@ public:
     void spawn_console();
 
     void execute_console_script(sdk::UGameEngine* engine, const std::string& filename);
+
+    struct ChangeSnapshot {
+        uint64_t counter{};
+        std::string name{};
+        std::string value{};
+        std::string source{};
+    };
+
+    ChangeSnapshot get_change_snapshot() const;
+    uint64_t get_change_counter() const;
+    static void record_global_change(std::wstring_view name, std::wstring_view value, std::string_view source);
+    static void record_global_command(std::string_view command, std::string_view source);
 
     bool is_hzbo_frozen_and_enabled() const {
         if (m_hzbo == nullptr) {
@@ -64,6 +81,7 @@ public:
         virtual ~CVar() = default;
 
         virtual void load(bool set_defaults) = 0;
+        virtual void load_from_config(const utility::Config& cfg, bool set_defaults) = 0;
         virtual void save() = 0;
         virtual void freeze() = 0;
         virtual void update() = 0;
@@ -101,7 +119,11 @@ public:
 
     protected:
         void load_internal(const std::string& filename, bool set_defaults);
+        void load_from_config_internal(const utility::Config& cfg, bool set_defaults);
         void save_internal(const std::string& filename);
+        int clamp_int_value(int value) const;
+        float clamp_float_value(float value) const;
+        int effective_max_int_value() const;
 
         std::wstring m_module{};
         std::wstring m_name{};
@@ -139,6 +161,7 @@ public:
         }
 
         void load(bool set_defaults) override;
+        void load_from_config(const utility::Config& cfg, bool set_defaults) override;
         void save() override;
         void freeze() override;
         void update() override;
@@ -147,6 +170,7 @@ public:
     protected:
         std::wstring m_frozen_value{};
         sdk::IConsoleVariable** m_cvar{nullptr};
+        bool m_setter_unavailable{false};
     };
 
     class CVarData : public CVar {
@@ -161,6 +185,7 @@ public:
         }
 
         void load(bool set_defaults) override;
+        void load_from_config(const utility::Config& cfg, bool set_defaults) override;
         void save() override;
         void freeze() override;
         void update() override;
@@ -171,6 +196,8 @@ public:
     };
 
 private:
+    void refresh_frozen_cvar_state();
+
     std::vector<std::shared_ptr<CVar>> m_displayed_cvars{};
     std::vector<std::shared_ptr<CVar>> m_all_cvars{}; // ones the user can manually add to cvars.txt'
 
@@ -197,6 +224,19 @@ private:
     bool m_wants_display_console{false};
     bool m_native_console_spawned{false};
     bool m_should_execute_console_script{false};
+    bool m_has_frozen_cvars{false};
+    bool m_needs_full_refresh{true};
+    bool m_cvar_ui_open_this_frame{false};
+    bool m_ue51_fsr3_runtime_cvars_done{false};
+    int m_ue51_fsr3_runtime_cvar_attempts{0};
+    bool m_aphelion_framegen_runtime_cvars_done{false};
+    int m_aphelion_framegen_runtime_cvar_attempts{0};
+    bool m_windrose_shadow_runtime_cvars_done{false};
+    int m_windrose_shadow_runtime_cvar_attempts{0};
+
+    static inline std::mutex s_change_mutex{};
+    static inline std::atomic_uint64_t s_change_counter{};
+    static inline ChangeSnapshot s_change_snapshot{};
 
     static inline std::vector<std::shared_ptr<CVarStandard>> s_default_standard_cvars {
         // Bools
@@ -210,6 +250,7 @@ private:
         std::make_unique<CVarStandard>(L"Renderer", L"r.DefaultFeature.AmbientOcclusion", CVar::Type::INT, 0, 2),
         std::make_unique<CVarStandard>(L"Renderer", L"r.TemporalAA.Algorithm", CVar::Type::INT, 0, 1),
         std::make_unique<CVarStandard>(L"Renderer", L"r.TemporalAA.Upsampling", CVar::Type::INT, 0, 1),
+        std::make_unique<CVarStandard>(L"Renderer", L"r.PostProcessing.PropagateAlpha", CVar::Type::INT, 0, 2),
         std::make_unique<CVarStandard>(L"Renderer", L"r.Upscale.Quality", CVar::Type::INT, 0, 5),
         std::make_unique<CVarStandard>(L"Renderer", L"r.LightCulling.Quality", CVar::Type::INT, 0, 2),
         std::make_unique<CVarStandard>(L"Renderer", L"r.SubsurfaceScattering", CVar::Type::INT, 0, 2),

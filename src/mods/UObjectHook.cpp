@@ -1,6 +1,11 @@
+#include <atomic>
+#include <algorithm>
+#include <cstdio>
 #include <fstream>
+#include <vector>
 
 #include <utility/Logging.hpp>
+#include <utility/Module.hpp>
 #include <utility/String.hpp>
 #include <utility/ScopeGuard.hpp>
 
@@ -27,10 +32,18 @@
 #include <sdk/FObjectProperty.hpp>
 #include <sdk/FArrayProperty.hpp>
 #include <sdk/UMotionControllerComponent.hpp>
+#include <sdk/Utility.hpp>
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 
 #include "uobjecthook/SDKDumper.hpp"
 #include "VR.hpp"
 
+#include "GameSpecific.hpp"
 #include "UObjectHook.hpp"
 
 //#define VERBOSE_UOBJECTHOOK
@@ -38,6 +51,379 @@
 std::shared_ptr<UObjectHook>& UObjectHook::get() {
     static std::shared_ptr<UObjectHook> instance = std::make_shared<UObjectHook>();
     return instance;
+}
+
+namespace {
+constexpr size_t STALKER2_BULK_SCENE_ATTACHMENT_CAP = 32;
+constexpr uint32_t STALKER2_FULL_SCAN_BUDGET = 128;
+constexpr size_t STALKER2_PERSISTENT_STATE_RESOLVE_BUDGET = 8;
+constexpr size_t STALKER2_PERSISTENT_PROPERTY_RESOLVE_BUDGET = 4;
+constexpr size_t STALKER2_CLASS_BROWSER_CLASS_CAP = 256;
+constexpr size_t STALKER2_CLASS_BROWSER_OBJECT_CAP = 128;
+
+bool is_ue_5_1_uobjecthook_guard_enabled() {
+    static const bool is_ue_5_1 = []() {
+        const auto disk_version = sdk::get_file_version_info();
+        const auto found_version = sdk::search_for_version(GetModuleHandleW(nullptr));
+
+        if (found_version) {
+            const auto version = utility::narrow(*found_version);
+            return version == "5.1" || version.starts_with("5.1.");
+        }
+
+        return disk_version.dwFileVersionMS == 0x00050001;
+    }();
+
+    return is_ue_5_1;
+}
+
+bool is_avowed_uobjecthook_guard_enabled() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && uevr::games::is_avowed_executable_path(*exe_path);
+    }();
+
+    return result;
+}
+
+bool is_stalker2_uobjecthook_guard_enabled() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && exe_path->find(L"Stalker2-Win64-Shipping") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+bool is_everwind_uobjecthook_guard_enabled() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && exe_path->find(L"Everwind-Win64-Shipping") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+bool is_ue_5_5_or_newer_uobjecthook() {
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto found_version = sdk::search_for_version(utility::get_executable());
+
+    if (found_version) {
+        const auto version = utility::narrow(*found_version);
+        int major = 0;
+        int minor = 0;
+
+        if (std::sscanf(version.c_str(), "%d.%d", &major, &minor) == 2) {
+            return major > 5 || (major == 5 && minor >= 5);
+        }
+    }
+
+    const auto major = HIWORD(disk_version.dwFileVersionMS);
+    const auto minor = LOWORD(disk_version.dwFileVersionMS);
+    return major > 5 || (major == 5 && minor >= 5);
+}
+
+bool should_tick_motion_controller_attachments_for_view(int32_t view_index, bool is_double) {
+    if ((view_index + 1) % 2 == 0) {
+        return true;
+    }
+
+    auto& vr = VR::get();
+    if (view_index != 0 ||
+        !is_double ||
+        !vr->is_using_synchronized_afr() ||
+        vr->is_sceneview_compatibility_enabled() ||
+        !is_ue_5_5_or_newer_uobjecthook())
+    {
+        return false;
+    }
+
+    const auto runtime = vr->get_runtime();
+    const auto frame_count = runtime != nullptr ? runtime->internal_frame_count : vr->get_frame_count();
+
+    if ((frame_count % 2) != 1) {
+        return false;
+    }
+
+    SPDLOG_INFO_ONCE("[SyncedSequential][MotionController] Treating UE5.5+ raw view_index 0 as the right-eye attachment update");
+    return true;
+}
+
+bool use_dynamic_uobjecthook_candidate_guard() {
+    return is_ue_5_1_uobjecthook_guard_enabled() ||
+        is_avowed_uobjecthook_guard_enabled() ||
+        is_stalker2_uobjecthook_guard_enabled() ||
+        is_everwind_uobjecthook_guard_enabled();
+}
+
+bool should_incrementally_refresh_uobject_array() {
+    return is_ue_5_1_uobjecthook_guard_enabled() ||
+        is_stalker2_uobjecthook_guard_enabled();
+}
+
+bool should_use_stalker2_on_demand_uobject_tracking(int32_t object_count) {
+    (void)object_count;
+    return is_stalker2_uobjecthook_guard_enabled();
+}
+
+bool should_use_everwind_lazy_uobjecthook_startup() {
+    return is_everwind_uobjecthook_guard_enabled();
+}
+
+bool is_stalker2_bulk_scene_component(sdk::USceneComponent* component) {
+    if (!is_stalker2_uobjecthook_guard_enabled() || component == nullptr) {
+        return false;
+    }
+
+    if (!sdk::UObjectReference{component}.valid()) {
+        return false;
+    }
+
+    const auto component_class = component->get_class();
+
+    if (component_class == nullptr) {
+        return false;
+    }
+
+    static const auto scene_component_class = sdk::USceneComponent::static_class();
+
+    if (component_class != scene_component_class) {
+        return false;
+    }
+
+    const auto component_name = component->get_fname().to_string();
+    return component_name.rfind(L"SceneComponent", 0) == 0;
+}
+
+bool is_readable_process_range(uintptr_t address, size_t size) {
+    if (address == 0 || size == 0) {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION mbi{};
+
+    if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) {
+        return false;
+    }
+
+    if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+
+    const auto protect = mbi.Protect & 0xff;
+    const auto readable =
+        protect == PAGE_READONLY ||
+        protect == PAGE_READWRITE ||
+        protect == PAGE_WRITECOPY ||
+        protect == PAGE_EXECUTE_READ ||
+        protect == PAGE_EXECUTE_READWRITE ||
+        protect == PAGE_EXECUTE_WRITECOPY;
+
+    if (!readable) {
+        return false;
+    }
+
+    const auto region_start = (uintptr_t)mbi.BaseAddress;
+    const auto region_end = region_start + mbi.RegionSize;
+
+    return address >= region_start && address <= region_end && size <= (region_end - address);
+}
+
+bool safe_read_uintptr(uintptr_t address, uintptr_t& value) {
+    if (!is_readable_process_range(address, sizeof(uintptr_t))) {
+        return false;
+    }
+
+    __try {
+        value = *(uintptr_t*)address;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    return true;
+}
+
+bool safe_read_u32(uintptr_t address, uint32_t& value) {
+    if (!is_readable_process_range(address, sizeof(uint32_t))) {
+        return false;
+    }
+
+    __try {
+        value = *(uint32_t*)address;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    return true;
+}
+
+bool has_plausible_fname(uintptr_t object_address) {
+    if (!is_readable_process_range(object_address + sdk::UObjectBase::get_fname_offset(), sizeof(sdk::FName))) {
+        return false;
+    }
+
+    uint32_t comparison_index{};
+
+    if (!safe_read_u32(object_address + sdk::UObjectBase::get_fname_offset(), comparison_index)) {
+        return false;
+    }
+
+    const auto block_index = comparison_index >> 16;
+
+    // Keep this intentionally loose; the goal is to reject obvious non-UObjects without
+    // depending on a specific game's name-pool limits during very early object startup.
+    return block_index < 0x4000;
+}
+
+bool is_uobject_array_member(sdk::UObjectBase* object) {
+    const auto object_address = (uintptr_t)object;
+
+    if (object_address == 0) {
+        return false;
+    }
+
+    uint32_t internal_index{};
+
+    if (!safe_read_u32(object_address + sdk::UObjectBase::get_internal_index_offset(), internal_index)) {
+        return false;
+    }
+
+    auto object_array = sdk::FUObjectArray::get();
+
+    if (object_array == nullptr) {
+        return false;
+    }
+
+    const auto object_count = object_array->get_object_count();
+
+    if (object_count <= 0 || internal_index >= (uint32_t)object_count) {
+        return false;
+    }
+
+    auto item = object_array->get_object((int32_t)internal_index);
+
+    if (item == nullptr || !is_readable_process_range((uintptr_t)item, sizeof(sdk::FUObjectItem))) {
+        return false;
+    }
+
+    uintptr_t item_object{};
+
+    if (!safe_read_uintptr((uintptr_t)item + sdk::FUObjectArray::get_item_object_offset(), item_object)) {
+        return false;
+    }
+
+    return item_object == object_address;
+}
+
+std::optional<std::pair<int32_t, int32_t>> get_uobject_index_serial(sdk::UObjectBase* object) {
+    const auto object_address = (uintptr_t)object;
+
+    if (object_address == 0) {
+        return std::nullopt;
+    }
+
+    uint32_t internal_index{};
+
+    if (!safe_read_u32(object_address + sdk::UObjectBase::get_internal_index_offset(), internal_index)) {
+        return std::nullopt;
+    }
+
+    auto object_array = sdk::FUObjectArray::get();
+
+    if (object_array == nullptr) {
+        return std::nullopt;
+    }
+
+    const auto object_count = object_array->get_object_count();
+
+    if (object_count <= 0 || internal_index >= (uint32_t)object_count) {
+        return std::nullopt;
+    }
+
+    auto item = object_array->get_object((int32_t)internal_index);
+
+    if (item == nullptr || !is_readable_process_range((uintptr_t)item, sizeof(sdk::FUObjectItem))) {
+        return std::nullopt;
+    }
+
+    uintptr_t item_object{};
+
+    if (!safe_read_uintptr((uintptr_t)item + sdk::FUObjectArray::get_item_object_offset(), item_object) || item_object != object_address) {
+        return std::nullopt;
+    }
+
+    return std::pair{(int32_t)internal_index, item->get_serial_number()};
+}
+
+bool is_probably_uobject_layout(sdk::UObjectBase* object, uintptr_t* class_address = nullptr) {
+    const auto object_address = (uintptr_t)object;
+
+    if (!is_readable_process_range(object_address, sdk::UObjectBase::get_class_size())) {
+        return false;
+    }
+
+    uintptr_t object_vtable{};
+
+    if (!safe_read_uintptr(object_address, object_vtable) || !is_readable_process_range(object_vtable, sizeof(uintptr_t))) {
+        return false;
+    }
+
+    uintptr_t class_ptr{};
+
+    if (!safe_read_uintptr(object_address + sdk::UObjectBase::get_class_private_offset(), class_ptr) || class_ptr == 0) {
+        return false;
+    }
+
+    if (!is_readable_process_range(class_ptr, sdk::UObjectBase::get_class_size())) {
+        return false;
+    }
+
+    uintptr_t class_vtable{};
+
+    if (!safe_read_uintptr(class_ptr, class_vtable) || !is_readable_process_range(class_vtable, sizeof(uintptr_t))) {
+        return false;
+    }
+
+    uintptr_t class_class_ptr{};
+
+    if (!safe_read_uintptr(class_ptr + sdk::UObjectBase::get_class_private_offset(), class_class_ptr) || class_class_ptr == 0) {
+        return false;
+    }
+
+    if (!is_readable_process_range(class_class_ptr, sizeof(uintptr_t))) {
+        return false;
+    }
+
+    if (!has_plausible_fname(object_address) || !has_plausible_fname(class_ptr)) {
+        return false;
+    }
+
+    if (class_address != nullptr) {
+        *class_address = class_ptr;
+    }
+
+    return true;
+}
+
+bool is_safe_uobject_candidate(UObjectHook& hook, sdk::UObjectBase* object, bool require_array_member = false) {
+    uintptr_t class_address{};
+
+    if (!is_probably_uobject_layout(object, &class_address)) {
+        return false;
+    }
+
+    if (require_array_member && !is_uobject_array_member(object)) {
+        return false;
+    }
+
+    const auto cls = (sdk::UObjectBase*)class_address;
+
+    if (hook.exists(cls)) {
+        return true;
+    }
+
+    return is_probably_uobject_layout(cls);
+}
 }
 
 UObjectHook::MotionControllerState::~MotionControllerState() {
@@ -104,6 +490,33 @@ void UObjectHook::hook() {
 
     SPDLOG_INFO("[UObjectHook] Hooking UObjectBase");
 
+    if (should_use_everwind_lazy_uobjecthook_startup()) {
+        // Everwind's shipped UE5.5 build can stall inside UObjectBase AddObject/
+        // destructor resolver scans when the UObject/Developer UI is opened.
+        // Keep the UI responsive by avoiding the resolver and old-object backfill.
+        auto uobjectarray = sdk::FUObjectArray::get();
+        const auto object_count = uobjectarray != nullptr ? uobjectarray->get_object_count() : 0;
+
+        m_hooked = true;
+        m_wants_activate = false;
+        m_add_object_hooked = false;
+        m_uobject_array_scan_cursor = object_count;
+        m_uobject_array_last_object_count = object_count;
+        m_uobject_array_startup_scan_until = std::chrono::steady_clock::now();
+        m_uobject_array_full_sweep_active = false;
+        m_force_uobject_array_creation_scan.store(false, std::memory_order_relaxed);
+
+        SPDLOG_WARN(
+            "[Everwind][UObjectHook] Skipping UObjectBase hook resolver/backfill for {} existing UObjects; using fail-closed lazy UI mode",
+            object_count);
+        SPDLOG_INFO("[UObjectHook] Deserializing persistent states");
+        reload_persistent_states();
+        SPDLOG_INFO("[UObjectHook] Deserialized {} persistent states", m_persistent_states.size());
+
+        m_fully_hooked = true;
+        return;
+    }
+
     m_hooked = true;
     m_wants_activate = false;
 
@@ -127,8 +540,9 @@ void UObjectHook::hook() {
         if (uobjectarray != nullptr) {
             for (auto i = 0; i < uobjectarray->get_object_count(); ++i) {
                 auto object = uobjectarray->get_object(i);
-                if (object == nullptr || object->object == nullptr) continue;
-                add_new_object(object->object);
+                if (object == nullptr || object->get_object() == nullptr)
+                    continue;
+                add_new_object(object->get_object());
             }
             SPDLOG_INFO("[UObjectHook] Dumper mode: added {} existing objects", m_objects.size());
         }
@@ -148,8 +562,7 @@ void UObjectHook::hook() {
     auto add_object_fn = sdk::UObjectBase::get_add_object();
 
     if (!add_object_fn) {
-        SPDLOG_ERROR("[UObjectHook] Failed to find UObjectBase::AddObject, cannot hook UObjectBase");
-        return;
+        SPDLOG_WARN("[UObjectHook] UObjectBase::AddObject was not found; using incremental FUObjectArray creation tracking");
     }
 
     m_destructor_hook = safetyhook::create_inline((void**)destructor_fn.value(), &destructor);
@@ -159,26 +572,55 @@ void UObjectHook::hook() {
         return;
     }
 
-    m_add_object_hook = safetyhook::create_inline((void**)add_object_fn.value(), &add_object);
+    if (add_object_fn) {
+        m_add_object_hook = safetyhook::create_inline((void**)add_object_fn.value(), &add_object);
 
-    if (!m_add_object_hook) {
-        SPDLOG_ERROR("[UObjectHook] Failed to hook UObjectBase::AddObject, cannot hook UObjectBase");
-        return;
+        if (m_add_object_hook) {
+            m_add_object_hooked = true;
+        } else {
+            SPDLOG_WARN("[UObjectHook] Failed to hook UObjectBase::AddObject; using incremental FUObjectArray creation tracking");
+        }
     }
 
-    SPDLOG_INFO("[UObjectHook] Hooked UObjectBase");
+    m_force_uobject_array_creation_scan.store(!m_add_object_hooked, std::memory_order_relaxed);
+
+    if (m_add_object_hooked) {
+        SPDLOG_INFO("[UObjectHook] Hooked UObjectBase");
+    } else {
+        SPDLOG_INFO("[UObjectHook] Hooked UObjectBase destructor; AddObject creation tracking is using FUObjectArray scanning");
+    }
 
     // Add all the objects that already exist
     auto uobjectarray = sdk::FUObjectArray::get();
+    const auto object_count = uobjectarray != nullptr ? uobjectarray->get_object_count() : 0;
 
-    for (auto i = 0; i < uobjectarray->get_object_count(); ++i) {
-        auto object = uobjectarray->get_object(i);
+    if (should_use_stalker2_on_demand_uobject_tracking(object_count)) {
+        // Stalker2 has a very large live object array. Synchronously adopting it
+        // when the UObject UI is first opened causes a visible multi-second hitch.
+        // Start at the current end and adopt gameplay roots directly/on demand instead
+        // of backfilling hundreds of thousands of old entries on the game thread.
+        m_uobject_array_scan_cursor = object_count;
+        m_uobject_array_last_object_count = object_count;
+        m_uobject_array_startup_scan_until = std::chrono::steady_clock::now();
+        m_uobject_array_full_sweep_active = false;
+        m_force_uobject_array_creation_scan.store(false, std::memory_order_relaxed);
+        SPDLOG_WARN(
+            "[Stalker2][UObjectHook] Deferring initial adoption of {} existing UObjects; using on-demand common-root tracking",
+            object_count);
+    } else {
+        for (auto i = 0; i < object_count; ++i) {
+            auto object = uobjectarray->get_object(i);
 
-        if (object == nullptr || object->object == nullptr) {
-            continue;
+            if (object == nullptr || object->get_object() == nullptr) {
+                continue;
+            }
+
+            add_new_object(object->get_object());
         }
 
-        add_new_object(object->object);
+        m_uobject_array_scan_cursor = object_count;
+        m_uobject_array_last_object_count = object_count;
+        m_uobject_array_startup_scan_until = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     }
 
     SPDLOG_INFO("[UObjectHook] Added {} existing objects", m_objects.size());
@@ -214,8 +656,8 @@ void UObjectHook::hook_process_event() {
     for (auto i = 0; i < uobjectarray->get_object_count(); ++i) {
         const auto object = uobjectarray->get_object(i);
 
-        if (object != nullptr && object->object != nullptr) {
-            first_obj = (sdk::UObject*)object->object;
+        if (object != nullptr && object->get_object() != nullptr) {
+            first_obj = (sdk::UObject*)object->get_object();
             break;
         }
     }
@@ -369,25 +811,44 @@ void* UObjectHook::process_event_hook(sdk::UObject* obj, sdk::UFunction* func, v
     
                     auto& bak_arr = *(GenericArray*)((uintptr_t)bak.data() + prop_desc->get_offset());
                     auto new_arr = sdk::TArray<void*>{};
+                    auto fmalloc = sdk::FMalloc::get();
 
                     if (bak_arr.data != nullptr) {
                         new_arr = std::move(bak_arr);
     
                         if (arr.capacity > new_arr.capacity) {
-                            new_arr.data = (void**)sdk::FMalloc::get()->realloc(new_arr.data, arr.capacity * inner_size, sizeof(void*));
-                            new_arr.capacity = arr.capacity;
+                            if (fmalloc != nullptr) {
+                                new_arr.data = (void**)fmalloc->realloc(new_arr.data, arr.capacity * inner_size, sizeof(void*));
+                                new_arr.capacity = arr.capacity;
+                            } else {
+                                static bool logged_missing_fmalloc = false;
+
+                                if (!logged_missing_fmalloc) {
+                                    logged_missing_fmalloc = true;
+                                    SPDLOG_WARN("[UObjectHook] FMalloc is unavailable; capping ProcessEvent array parameter copies to existing storage");
+                                }
+                            }
                         }
     
-                        new_arr.count = arr.count;
+                        new_arr.count = std::min(arr.count, new_arr.capacity);
                     } else if (arr.capacity > 0) {
-                        new_arr.data = (void**)sdk::FMalloc::get()->malloc(arr.capacity * inner_size, sizeof(void*));
-                        std::memset(new_arr.data, 0, arr.capacity * inner_size);
-                        new_arr.count = arr.count;
-                        new_arr.capacity = arr.capacity;
+                        if (fmalloc != nullptr) {
+                            new_arr.data = (void**)fmalloc->malloc(arr.capacity * inner_size, sizeof(void*));
+                            std::memset(new_arr.data, 0, arr.capacity * inner_size);
+                            new_arr.count = arr.count;
+                            new_arr.capacity = arr.capacity;
+                        } else {
+                            static bool logged_missing_fmalloc = false;
+
+                            if (!logged_missing_fmalloc) {
+                                logged_missing_fmalloc = true;
+                                SPDLOG_WARN("[UObjectHook] FMalloc is unavailable; skipping ProcessEvent array parameter allocation");
+                            }
+                        }
                     }
     
-                    if (arr.data != nullptr && arr.count > 0 && arr.capacity >= arr.count && new_arr.data != nullptr && !IsBadReadPtr((void*)arr.data, arr.capacity * inner_size)) {
-                        memcpy(new_arr.data, arr.data, arr.count * inner_size);
+                    if (arr.data != nullptr && new_arr.count > 0 && arr.capacity >= new_arr.count && new_arr.data != nullptr && !IsBadReadPtr((void*)arr.data, new_arr.count * inner_size)) {
+                        memcpy(new_arr.data, arr.data, new_arr.count * inner_size);
                         arr.data = nullptr;
                         arr.count = 0;
                         arr.capacity = 0;
@@ -411,26 +872,45 @@ void* UObjectHook::process_event_hook(sdk::UObject* obj, sdk::UFunction* func, v
                     auto& bak_str = *(FString*)((uintptr_t)bak.data() + prop_desc->get_offset());
     
                     auto new_str = FString{};
+                    auto fmalloc = sdk::FMalloc::get();
     
                     // Same thing but much simpler because we know it's wchar_t
                     if (bak_str.data != nullptr) {
                         new_str = std::move(bak_str);
     
                         if (str.capacity > new_str.capacity) {
-                            new_str.data = (wchar_t*)sdk::FMalloc::get()->realloc(new_str.data, str.capacity * sizeof(wchar_t), sizeof(wchar_t));
-                            new_str.capacity = str.capacity;
+                            if (fmalloc != nullptr) {
+                                new_str.data = (wchar_t*)fmalloc->realloc(new_str.data, str.capacity * sizeof(wchar_t), sizeof(wchar_t));
+                                new_str.capacity = str.capacity;
+                            } else {
+                                static bool logged_missing_fmalloc = false;
+
+                                if (!logged_missing_fmalloc) {
+                                    logged_missing_fmalloc = true;
+                                    SPDLOG_WARN("[UObjectHook] FMalloc is unavailable; capping ProcessEvent string parameter copies to existing storage");
+                                }
+                            }
                         }
     
-                        new_str.count = str.count;
+                        new_str.count = std::min(str.count, new_str.capacity);
                     } else if (str.capacity > 0) {
-                        new_str.data = (wchar_t*)sdk::FMalloc::get()->malloc(str.capacity * sizeof(wchar_t), sizeof(wchar_t));
-                        std::memset(new_str.data, 0, str.capacity * sizeof(wchar_t));
-                        new_str.count = str.count;
-                        new_str.capacity = str.capacity;
+                        if (fmalloc != nullptr) {
+                            new_str.data = (wchar_t*)fmalloc->malloc(str.capacity * sizeof(wchar_t), sizeof(wchar_t));
+                            std::memset(new_str.data, 0, str.capacity * sizeof(wchar_t));
+                            new_str.count = str.count;
+                            new_str.capacity = str.capacity;
+                        } else {
+                            static bool logged_missing_fmalloc = false;
+
+                            if (!logged_missing_fmalloc) {
+                                logged_missing_fmalloc = true;
+                                SPDLOG_WARN("[UObjectHook] FMalloc is unavailable; skipping ProcessEvent string parameter allocation");
+                            }
+                        }
                     }
     
-                    if (str.data != nullptr && str.count > 0 && str.capacity >= str.count && new_str.data != nullptr && !IsBadReadPtr((void*)str.data, str.capacity * sizeof(wchar_t))) {
-                        memcpy(new_str.data, str.data, str.count * sizeof(wchar_t));
+                    if (str.data != nullptr && new_str.count > 0 && str.capacity >= new_str.count && new_str.data != nullptr && !IsBadReadPtr((void*)str.data, new_str.count * sizeof(wchar_t))) {
+                        memcpy(new_str.data, str.data, new_str.count * sizeof(wchar_t));
                         str.data = nullptr;
                         str.count = 0;
                         str.capacity = 0;
@@ -450,8 +930,27 @@ void* UObjectHook::process_event_hook(sdk::UObject* obj, sdk::UFunction* func, v
     return result;
 }
 
-void UObjectHook::add_new_object(sdk::UObjectBase* object) {
+void UObjectHook::add_new_object(sdk::UObjectBase* object, bool run_creation_jobs) {
+    {
+        std::shared_lock _{m_mutex};
+        if (exists_unsafe(object)) {
+            return;
+        }
+    }
+
+    const auto require_array_member = is_avowed_uobjecthook_guard_enabled();
+
+    if (use_dynamic_uobjecthook_candidate_guard() && !is_safe_uobject_candidate(*this, object, require_array_member)) {
+        SPDLOG_WARNING_EVERY_N_SEC(2, "[UObjectHook] Skipping unsafe UObject candidate {:x}", (uintptr_t)object);
+        return;
+    }
+
     std::unique_lock _{m_mutex};
+
+    if (exists_unsafe(object)) {
+        return;
+    }
+
     std::unique_ptr<MetaObject> meta_object{};
 
     /*static const auto prim_comp_t = sdk::find_uobject<sdk::UClass>(L"Class /Script/Engine.PrimitiveComponent");
@@ -494,7 +993,7 @@ void UObjectHook::add_new_object(sdk::UObjectBase* object) {
 
         m_objects_by_class[(sdk::UClass*)super].insert(object);
 
-        if (auto it = m_on_creation_add_component_jobs.find((sdk::UClass*)super); it != m_on_creation_add_component_jobs.end()) {
+        if (run_creation_jobs && m_on_creation_add_component_jobs.contains((sdk::UClass*)super)) {
             GameThreadWorker::get().enqueue([object, this]() {
                 if (!this->exists(object)) {
                     return;
@@ -524,6 +1023,586 @@ void UObjectHook::add_new_object(sdk::UObjectBase* object) {
 #ifdef VERBOSE_UOBJECTHOOK
     SPDLOG_INFO("Adding object {:x} {:s}", (uintptr_t)object, utility::narrow(m_meta_objects[object]->full_name));
 #endif
+}
+
+bool UObjectHook::try_track_reachable_ui_object(sdk::UObjectBase* parent, sdk::UObjectBase* child, std::string_view context) {
+    if (child == nullptr) {
+        return false;
+    }
+
+    if (exists(child)) {
+        return true;
+    }
+
+    if (parent != nullptr && !exists(parent)) {
+        return false;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+
+    {
+        std::unique_lock _{m_mutex};
+
+        if (m_last_ui_nested_resolve_refusal_prune.time_since_epoch().count() == 0 ||
+            now - m_last_ui_nested_resolve_refusal_prune >= std::chrono::seconds(10))
+        {
+            for (auto it = m_ui_nested_resolve_refusals.begin(); it != m_ui_nested_resolve_refusals.end();) {
+                if (now - it->second >= std::chrono::seconds(30)) {
+                    it = m_ui_nested_resolve_refusals.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+
+            m_last_ui_nested_resolve_refusal_prune = now;
+        }
+
+        if (const auto refused = m_ui_nested_resolve_refusals.find(child); refused != m_ui_nested_resolve_refusals.end() &&
+            now - refused->second < std::chrono::seconds(2))
+        {
+            ++m_ui_nested_resolve_stats.cached_refusals;
+            return false;
+        }
+
+        ++m_ui_nested_resolve_stats.attempts;
+    }
+
+    const auto child_index_serial = get_uobject_index_serial(child);
+    const auto safe_child = child_index_serial.has_value() && is_safe_uobject_candidate(*this, child, true);
+
+    if (!safe_child) {
+        {
+            std::unique_lock _{m_mutex};
+            m_ui_nested_resolve_refusals[child] = now;
+            ++m_ui_nested_resolve_stats.refused;
+        }
+
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[UObjectHook] Refusing to adopt reachable UI UObject from {}: parent={:x} child={:x}",
+            context,
+            (uintptr_t)parent,
+            (uintptr_t)child);
+        return false;
+    }
+
+    // UI browsing can reveal valid objects that AddObject missed. Track metadata only;
+    // do not run creation jobs from a passive explorer expansion.
+    add_new_object(child, false);
+
+    const auto tracked = exists(child);
+
+    if (tracked) {
+        {
+            std::unique_lock _{m_mutex};
+            m_ui_nested_resolve_refusals.erase(child);
+            ++m_ui_nested_resolve_stats.adopted;
+        }
+
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[UObjectHook] Adopted reachable UI UObject from {}: parent={:x} child={:x} index={} serial={}",
+            context,
+            (uintptr_t)parent,
+            (uintptr_t)child,
+            child_index_serial->first,
+            child_index_serial->second);
+    } else {
+        std::unique_lock _{m_mutex};
+        m_ui_nested_resolve_refusals[child] = now;
+        ++m_ui_nested_resolve_stats.refused;
+    }
+
+    return tracked;
+}
+
+void UObjectHook::ui_handle_reachable_object(sdk::UObject* parent, sdk::UObject* child, std::string_view context) {
+    if (child != nullptr && !exists(child)) {
+        try_track_reachable_ui_object(parent, child, context);
+    }
+
+    ui_handle_object(child);
+}
+
+bool UObjectHook::try_track_object(
+    sdk::UObjectBase* object,
+    std::string_view context,
+    bool require_array_member,
+    bool run_creation_jobs) {
+    if (object == nullptr) {
+        return false;
+    }
+
+    const auto already_tracked = exists(object);
+
+    if (!already_tracked) {
+        if (!is_safe_uobject_candidate(*this, object, require_array_member)) {
+            SPDLOG_WARNING_EVERY_N_SEC(
+                2,
+                "[UObjectHook] Refusing to adopt untracked UObject from {}: {:x}",
+                context,
+                (uintptr_t)object);
+            return false;
+        }
+
+        add_new_object(object, run_creation_jobs);
+    }
+
+    const auto tracked = exists(object);
+
+    if (tracked && !already_tracked) {
+        SPDLOG_INFO("[UObjectHook] Adopted untracked UObject from {}: {:x}", context, (uintptr_t)object);
+    } else if (!tracked) {
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[UObjectHook] Failed to adopt untracked UObject from {} after validation: {:x}",
+            context,
+            (uintptr_t)object);
+    }
+
+    if (tracked) {
+        const auto object_class = object->get_class();
+
+        if (object_class != nullptr &&
+            (sdk::UObjectBase*)object_class != object &&
+            !exists((sdk::UObjectBase*)object_class) &&
+            is_probably_uobject_layout((sdk::UObjectBase*)object_class)) {
+            // On-demand tracking skips the old bulk FUObjectArray backfill, so also
+            // adopt the class metadata needed by the explorer to display the object.
+            try_track_object((sdk::UObjectBase*)object_class, "tracked object class", false, false);
+        }
+    }
+
+    return tracked;
+}
+
+void UObjectHook::mark_persistent_tracking_miss() {
+    m_last_persistent_tracking_miss = std::chrono::steady_clock::now();
+    ++m_uobject_array_scan_stats.persistent_tracking_misses;
+}
+
+void UObjectHook::prune_destroyed_object_tombstones(std::chrono::steady_clock::time_point now) {
+    std::unique_lock _{m_mutex};
+
+    if (m_destroyed_object_tombstones.empty()) {
+        return;
+    }
+
+    if (m_last_tombstone_prune.time_since_epoch().count() != 0 && now - m_last_tombstone_prune < std::chrono::seconds(5)) {
+        return;
+    }
+
+    m_last_tombstone_prune = now;
+
+    for (auto it = m_destroyed_object_tombstones.begin(); it != m_destroyed_object_tombstones.end();) {
+        if (it->second.time.time_since_epoch().count() == 0 || now - it->second.time > std::chrono::seconds(30)) {
+            it = m_destroyed_object_tombstones.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool UObjectHook::is_stalker2_bulk_scene_path(const StatePath& path) const {
+    if (!is_stalker2_uobjecthook_guard_enabled()) {
+        return false;
+    }
+
+    const auto& parts = path.path();
+
+    for (auto it = parts.begin(); it != parts.end(); ++it) {
+        if (*it != "Components") {
+            continue;
+        }
+
+        const auto next = it + 1;
+
+        if (next == parts.end()) {
+            return false;
+        }
+
+        if (next->starts_with("SceneComponent ") ||
+            next->starts_with("SceneComponent_") ||
+            *next == "SceneComponent") {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void UObjectHook::request_stalker2_uobject_full_scan() {
+    if (!is_stalker2_uobjecthook_guard_enabled()) {
+        return;
+    }
+
+    m_stalker2_class_browser_enabled = true;
+    m_stalker2_uobject_full_scan_requested.store(true, std::memory_order_relaxed);
+    m_uobject_array_scan_cursor = 0;
+    m_uobject_array_full_sweep_active = true;
+    ++m_uobject_array_scan_stats.full_sweeps;
+    SPDLOG_WARN("[Stalker2][UObjectHook] Explicit full FUObjectArray scan requested from UI; this can hitch while it backfills objects");
+}
+
+size_t UObjectHook::get_stalker2_bulk_scene_attachment_count() const {
+    if (!is_stalker2_uobjecthook_guard_enabled()) {
+        return 0;
+    }
+
+    size_t count = 0;
+    std::shared_lock _{m_mutex};
+
+    for (const auto& [component, state] : m_motion_controller_attached_components) {
+        if (component != nullptr && state != nullptr && is_stalker2_bulk_scene_component(component)) {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+size_t UObjectHook::detach_non_persistent_motion_controller_states() {
+    std::unique_lock _{m_mutex};
+
+    size_t removed = 0;
+
+    for (auto it = m_motion_controller_attached_components.begin(); it != m_motion_controller_attached_components.end();) {
+        if (it->second == nullptr || !it->second->permanent) {
+            it = m_motion_controller_attached_components.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+
+    return removed;
+}
+
+size_t UObjectHook::detach_stalker2_bulk_scene_component_states() {
+    std::vector<sdk::USceneComponent*> removed_components{};
+
+    {
+        std::unique_lock _{m_mutex};
+
+        for (auto it = m_motion_controller_attached_components.begin(); it != m_motion_controller_attached_components.end();) {
+            if (is_stalker2_bulk_scene_component(it->first)) {
+                removed_components.push_back(it->first);
+                it = m_motion_controller_attached_components.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    if (removed_components.empty()) {
+        return 0;
+    }
+
+    const auto was_removed = [&removed_components](sdk::USceneComponent* component) {
+        return std::find(removed_components.begin(), removed_components.end(), component) != removed_components.end();
+    };
+
+    for (auto it = m_persistent_states.begin(); it != m_persistent_states.end();) {
+        const auto& state = *it;
+
+        if (state == nullptr) {
+            it = m_persistent_states.erase(it);
+            continue;
+        }
+
+        const auto resolved = state->last_object != nullptr && was_removed(state->last_object) ?
+            state->last_object :
+            state->path.resolve(false).as<sdk::USceneComponent*>();
+
+        if (resolved != nullptr && was_removed(resolved)) {
+            state->erase_json_file();
+            it = m_persistent_states.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    return removed_components.size();
+}
+
+uint32_t UObjectHook::get_uobject_array_scan_budget(sdk::UGameEngine* engine) {
+    const bool force_scan = m_force_uobject_array_creation_scan.load(std::memory_order_relaxed);
+    const bool add_object_guard_unreliable = m_add_object_guard_unreliable.load(std::memory_order_relaxed);
+
+    if (!should_incrementally_refresh_uobject_array() && !force_scan && !add_object_guard_unreliable) {
+        m_uobject_array_scan_stats.last_budget = 0;
+        return 0;
+    }
+
+    auto object_array = sdk::FUObjectArray::get();
+
+    if (object_array == nullptr) {
+        m_uobject_array_scan_stats.last_budget = 0;
+        return 0;
+    }
+
+    const auto object_count = object_array->get_object_count();
+
+    if (object_count <= 0) {
+        m_uobject_array_scan_stats.last_budget = 0;
+        return 0;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const bool stalker2_on_demand_tracking = should_use_stalker2_on_demand_uobject_tracking(object_count);
+
+    if (m_uobject_array_scan_cursor < 0 || m_uobject_array_scan_cursor > object_count || object_count < m_uobject_array_last_object_count) {
+        if (stalker2_on_demand_tracking) {
+            m_uobject_array_scan_cursor = object_count;
+            m_uobject_array_full_sweep_active = false;
+        } else {
+            m_uobject_array_scan_cursor = 0;
+            m_uobject_array_full_sweep_active = true;
+            ++m_uobject_array_scan_stats.full_sweeps;
+        }
+    }
+
+    if (object_count > m_uobject_array_last_object_count && m_uobject_array_scan_cursor >= m_uobject_array_last_object_count) {
+        // Prefer fresh indices first when the array grows; this catches new pawns/components without
+        // continuously sweeping the whole FUObjectArray.
+        m_uobject_array_scan_cursor = m_uobject_array_last_object_count;
+    }
+
+    m_uobject_array_last_object_count = object_count;
+
+    bool pawn_tracking_unhealthy = false;
+
+    if (engine != nullptr) {
+        if (const auto world = engine->get_world(); world != nullptr) {
+            if (const auto player_controller = sdk::UGameplayStatics::get()->get_player_controller(world, 0); player_controller != nullptr) {
+                if (stalker2_on_demand_tracking && !exists((sdk::UObjectBase*)player_controller)) {
+                    try_track_object(
+                        (sdk::UObjectBase*)player_controller,
+                        "Stalker2 common root/PlayerController",
+                        false,
+                        false);
+                }
+
+                if (const auto pawn = player_controller->get_acknowledged_pawn(); pawn != nullptr && !exists(pawn)) {
+                    if (stalker2_on_demand_tracking) {
+                        if (try_track_object(
+                                (sdk::UObjectBase*)pawn,
+                                "Stalker2 common root/Acknowledged Pawn",
+                                false,
+                                false)) {
+                            SPDLOG_INFO_EVERY_N_SEC(
+                                5,
+                                "[Stalker2][UObjectHook] Adopted acknowledged pawn directly without FUObjectArray backscan pawn={:x}",
+                                (uintptr_t)pawn);
+                        } else {
+                            SPDLOG_WARNING_EVERY_N_SEC(
+                                5,
+                                "[Stalker2][UObjectHook] Acknowledged pawn is valid but direct tracking failed; not sweeping full FUObjectArray pawn={:x}",
+                                (uintptr_t)pawn);
+                        }
+                    } else {
+                        pawn_tracking_unhealthy = true;
+                        m_last_untracked_pawn_seen = now;
+                        SPDLOG_WARNING_EVERY_N_SEC(
+                            5,
+                            "[UObjectHook] Local pawn is valid but not tracked; raising FUObjectArray scan budget pawn={:x}",
+                            (uintptr_t)pawn);
+                    }
+                }
+
+                if (stalker2_on_demand_tracking) {
+                    if (const auto camera_manager = player_controller->get_player_camera_manager();
+                        camera_manager != nullptr && !exists((sdk::UObjectBase*)camera_manager)) {
+                        try_track_object(
+                            (sdk::UObjectBase*)camera_manager,
+                            "Stalker2 common root/Camera Manager",
+                            false,
+                            false);
+                    }
+                }
+            }
+
+            if (stalker2_on_demand_tracking && !exists((sdk::UObjectBase*)world)) {
+                try_track_object((sdk::UObjectBase*)world, "Stalker2 common root/World", false, false);
+            }
+        }
+    }
+
+    if (stalker2_on_demand_tracking) {
+        // The Stalker2 object array is large enough that periodic full sweeps are visible
+        // as VR hitches. Keep the common roots above tracked and do not backfill the old
+        // FUObjectArray unless the user explicitly requests it from Objects by class.
+        m_force_uobject_array_creation_scan.store(false, std::memory_order_relaxed);
+
+        uint32_t budget = 0;
+
+        if (m_stalker2_uobject_full_scan_requested.load(std::memory_order_relaxed)) {
+            if (m_uobject_array_scan_cursor < object_count) {
+                budget = STALKER2_FULL_SCAN_BUDGET;
+                m_uobject_array_full_sweep_active = true;
+            } else {
+                m_stalker2_uobject_full_scan_requested.store(false, std::memory_order_relaxed);
+                m_uobject_array_full_sweep_active = false;
+            }
+        } else {
+            m_uobject_array_scan_cursor = object_count;
+            m_uobject_array_last_object_count = object_count;
+            m_uobject_array_full_sweep_active = false;
+        }
+
+        m_uobject_array_scan_stats.last_budget = budget;
+        return budget;
+    }
+
+    const bool startup_window = now < m_uobject_array_startup_scan_until;
+    const bool recent_tracking_miss =
+        m_last_persistent_tracking_miss.time_since_epoch().count() != 0 &&
+        now - m_last_persistent_tracking_miss < std::chrono::seconds(10);
+    const bool high_priority =
+        startup_window ||
+        recent_tracking_miss ||
+        pawn_tracking_unhealthy;
+
+    uint32_t budget = 0;
+
+    if (high_priority) {
+        if (m_uobject_array_scan_cursor >= object_count) {
+            m_uobject_array_scan_cursor = 0;
+            m_uobject_array_full_sweep_active = true;
+            ++m_uobject_array_scan_stats.full_sweeps;
+        }
+
+        // When AddObject is unreliable, scan fast enough to catch newly possessed pawns
+        // without doing a permanent full-speed sweep every frame after gameplay starts.
+        budget = add_object_guard_unreliable ? 4096 : 8192;
+    } else if (m_uobject_array_scan_cursor < object_count) {
+        budget = 1024;
+    } else if (!m_uobject_array_full_sweep_active && now - m_last_uobject_array_full_sweep >= std::chrono::seconds(5)) {
+        m_uobject_array_full_sweep_active = true;
+        m_last_uobject_array_full_sweep = now;
+        m_uobject_array_scan_cursor = 0;
+        ++m_uobject_array_scan_stats.full_sweeps;
+        budget = 512;
+    } else if (m_uobject_array_full_sweep_active) {
+        budget = 512;
+    }
+
+    m_uobject_array_scan_stats.last_budget = budget;
+    return budget;
+}
+
+void UObjectHook::refresh_new_objects_from_uobject_array(uint32_t max_objects) {
+    const bool force_scan = m_force_uobject_array_creation_scan.load(std::memory_order_relaxed);
+    const bool add_object_guard_unreliable = m_add_object_guard_unreliable.load(std::memory_order_relaxed);
+
+    if ((!should_incrementally_refresh_uobject_array() && !force_scan && !add_object_guard_unreliable) || max_objects == 0) {
+        return;
+    }
+
+    auto object_array = sdk::FUObjectArray::get();
+
+    if (object_array == nullptr) {
+        return;
+    }
+
+    const auto object_count = object_array->get_object_count();
+
+    if (object_count <= 0) {
+        return;
+    }
+
+    if (m_uobject_array_scan_cursor < 0 || m_uobject_array_scan_cursor > object_count) {
+        m_uobject_array_scan_cursor = 0;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    prune_destroyed_object_tombstones(now);
+    const auto start = m_uobject_array_scan_cursor;
+    const auto end = (int32_t)std::min<uint32_t>((uint32_t)object_count, (uint32_t)start + max_objects);
+    uint32_t added = 0;
+    uint32_t rejected = 0;
+    uint32_t tombstone_skips = 0;
+
+    ++m_uobject_array_scan_stats.ticks;
+    m_uobject_array_scan_stats.scanned += (uint64_t)std::max(0, end - start);
+
+    for (auto i = start; i < end; ++i) {
+        auto item = object_array->get_object(i);
+
+        if (item == nullptr) {
+            continue;
+        }
+
+        auto object = item->get_object();
+
+        if (object == nullptr || exists(object)) {
+            continue;
+        }
+
+        bool skip_tombstoned_object = false;
+
+        {
+            std::unique_lock _{m_mutex};
+
+            if (const auto tombstone_it = m_destroyed_object_tombstones.find(object); tombstone_it != m_destroyed_object_tombstones.end()) {
+                const auto serial = item->get_serial_number();
+
+                if (tombstone_it->second.index == i &&
+                    tombstone_it->second.serial == serial &&
+                    now - tombstone_it->second.time <= std::chrono::seconds(30))
+                {
+                    skip_tombstoned_object = true;
+                } else {
+                    m_destroyed_object_tombstones.erase(tombstone_it);
+                }
+            }
+        }
+
+        if (skip_tombstoned_object) {
+            ++tombstone_skips;
+            continue;
+        }
+
+        // Objects found directly through FUObjectArray must still pass layout and index validation.
+        if (!is_safe_uobject_candidate(*this, object, true)) {
+            ++rejected;
+            continue;
+        }
+
+        add_new_object(object);
+
+        if (exists(object)) {
+            ++added;
+        }
+    }
+
+    m_uobject_array_scan_cursor = end;
+    m_uobject_array_scan_stats.added += added;
+    m_uobject_array_scan_stats.rejected += rejected;
+    m_uobject_array_scan_stats.tombstone_skips += tombstone_skips;
+
+    if (m_uobject_array_scan_cursor >= object_count && m_uobject_array_full_sweep_active) {
+        m_uobject_array_full_sweep_active = false;
+
+        if (is_stalker2_uobjecthook_guard_enabled() &&
+            m_stalker2_uobject_full_scan_requested.exchange(false, std::memory_order_relaxed)) {
+            SPDLOG_INFO("[Stalker2][UObjectHook] Explicit full FUObjectArray scan completed");
+        }
+    }
+
+    if (added > 0) {
+        static auto last_log = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+
+        if (now - last_log >= std::chrono::seconds(2)) {
+            SPDLOG_INFO(
+                "[UObjectHook] Incrementally tracked {} UObjectArray objects (cursor {}/{})",
+                added,
+                m_uobject_array_scan_cursor,
+                object_count);
+            last_log = now;
+        }
+    }
 }
 
 void UObjectHook::on_config_load(const utility::Config& cfg, bool set_defaults) {
@@ -565,6 +1644,9 @@ void UObjectHook::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
             }
         }
 
+        if (const auto scan_budget = get_uobject_array_scan_budget(engine); scan_budget > 0) {
+            refresh_new_objects_from_uobject_array(scan_budget);
+        }
         update_persistent_states();
     }
 }
@@ -645,7 +1727,7 @@ void UObjectHook::on_pre_calculate_stereo_view_offset(void* stereo_device, const
         } // else todo?
     }
 
-    if ((view_index + 1) % 2 == 0) {
+    if (should_tick_motion_controller_attachments_for_view(view_index, is_double)) {
         tick_attachments(view_rotation, world_to_meters, view_location, is_double);
     }
 }
@@ -731,7 +1813,20 @@ void UObjectHook::tick_attachments(Rotator<float>* view_rotation, const float wo
         return result;
     };
 
-    auto comps = with_mutex([this]() { return m_motion_controller_attached_components; });
+    auto comps = with_mutex([this]() -> decltype(m_motion_controller_attached_components) {
+        if (!is_stalker2_uobjecthook_guard_enabled()) {
+            return m_motion_controller_attached_components;
+        }
+
+        if (m_motion_controller_attached_components.size() <= STALKER2_BULK_SCENE_ATTACHMENT_CAP) {
+            return m_motion_controller_attached_components;
+        }
+
+        m_stalker2_lazy_stats.tick_bulk_skips.fetch_add(
+            m_motion_controller_attached_components.size(),
+            std::memory_order_relaxed);
+        return {};
+    });
 
     const auto is_using_controllers = vr->is_using_controllers();
     const auto has_any_head_components = std::any_of(comps.begin(), comps.end(), [](auto& it) { return it.second->hand == 2; });
@@ -740,8 +1835,8 @@ void UObjectHook::tick_attachments(Rotator<float>* view_rotation, const float wo
         return;
     }
 
-    glm::vec3 right_hand_position = vr->get_grip_position(vr->get_right_controller_index());
-    glm::quat right_hand_rotation = vr->get_aim_rotation(vr->get_right_controller_index());
+    glm::vec3 right_hand_position = vr->get_controller_position_with_offset(VRRuntime::Hand::RIGHT, true);
+    glm::quat right_hand_rotation = vr->get_controller_rotation_with_offset(VRRuntime::Hand::RIGHT);
 
     const float lerp_speed = m_attach_lerp_speed->value() * m_last_delta_time;
 
@@ -762,8 +1857,8 @@ void UObjectHook::tick_attachments(Rotator<float>* view_rotation, const float wo
     const auto original_right_hand_rotation = right_hand_rotation;
     const auto original_right_hand_position = right_hand_position - hmd_origin;
 
-    glm::vec3 left_hand_position = vr->get_grip_position(vr->get_left_controller_index());
-    glm::quat left_hand_rotation = vr->get_aim_rotation(vr->get_left_controller_index());
+    glm::vec3 left_hand_position = vr->get_controller_position_with_offset(VRRuntime::Hand::LEFT, true);
+    glm::quat left_hand_rotation = vr->get_controller_rotation_with_offset(VRRuntime::Hand::LEFT);
 
     if (m_attach_lerp_enabled->value()) {
         auto spherical_distance_left = glm::dot(left_hand_rotation, m_last_left_aim_rotation);
@@ -1537,34 +2632,60 @@ void UObjectHook::update_persistent_states() {
         m_fixed_visibilities = true;
     }};
 
+    bool had_tracking_miss = false;
+
     // Camera state
     if (m_persistent_camera_state != nullptr) {
-        auto obj = m_persistent_camera_state->path.resolve();
+        auto obj = m_persistent_camera_state->path.resolve(true);
 
         if (obj != nullptr) {
             m_camera_attach.object = obj;
             m_camera_attach.offset = m_persistent_camera_state->offset;
+        } else {
+            had_tracking_miss = true;
         }
     }
 
     // Motion controller states
     if (!m_persistent_states.empty()) {
-        for (const auto& state : m_persistent_states) {
+        const bool stalker2_lazy = is_stalker2_uobjecthook_guard_enabled();
+        size_t stalker2_bulk_scene_attachments = stalker2_lazy ?
+            STALKER2_BULK_SCENE_ATTACHMENT_CAP :
+            0;
+
+        auto handle_persistent_state = [&](const std::shared_ptr<PersistentState>& state) {
             if (state == nullptr) {
-                continue;
+                return;
             }
 
-            auto obj = state->path.resolve();
+            if (stalker2_lazy && is_stalker2_bulk_scene_path(state->path)) {
+                m_stalker2_lazy_stats.persistent_path_skips.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+
+            auto obj = state->path.resolve(true);
 
             if (obj == nullptr) {
-                continue;
+                had_tracking_miss = true;
+                return;
             }
 
             static const auto scene_component_t = sdk::USceneComponent::static_class();
 
             // TODO? will need some reworking to support properties from arbitrary objects
             if (!obj.definition->is_a(scene_component_t)) {
-                continue;
+                return;
+            }
+
+            const auto scene_component = obj.as<sdk::USceneComponent*>();
+            const auto is_stalker2_bulk_scene_attachment = is_stalker2_bulk_scene_component(scene_component);
+            const auto existing_motion_state = get_motion_controller_state(scene_component);
+
+            if (is_stalker2_bulk_scene_attachment &&
+                !existing_motion_state.has_value() &&
+                stalker2_bulk_scene_attachments >= STALKER2_BULK_SCENE_ATTACHMENT_CAP) {
+                m_stalker2_lazy_stats.persistent_bulk_skips.fetch_add(1, std::memory_order_relaxed);
+                return;
             }
 
             // Destroy the existing mc state if it exists
@@ -1574,10 +2695,14 @@ void UObjectHook::update_persistent_states() {
                 remove_motion_controller_state(state->last_object);
             }
 
-            auto mc_state = get_or_add_motion_controller_state(obj.as<sdk::USceneComponent*>());
+            auto mc_state = get_or_add_motion_controller_state(scene_component);
 
             if (mc_state == nullptr) {
-                continue;
+                return;
+            }
+
+            if (is_stalker2_bulk_scene_attachment && !existing_motion_state.has_value()) {
+                ++stalker2_bulk_scene_attachments;
             }
 
             if (mc_state->adjusting) {
@@ -1586,23 +2711,56 @@ void UObjectHook::update_persistent_states() {
                 *mc_state = state->state;
             }
 
-            state->last_object = obj.as<sdk::USceneComponent*>();
+            state->last_object = scene_component;
+        };
+
+        if (stalker2_lazy) {
+            if (m_stalker2_persistent_state_cursor >= m_persistent_states.size()) {
+                m_stalker2_persistent_state_cursor = 0;
+            }
+
+            const auto end = std::min(
+                m_persistent_states.size(),
+                m_stalker2_persistent_state_cursor + STALKER2_PERSISTENT_STATE_RESOLVE_BUDGET);
+
+            for (auto i = m_stalker2_persistent_state_cursor; i < end; ++i) {
+                handle_persistent_state(m_persistent_states[i]);
+            }
+
+            if (end < m_persistent_states.size()) {
+                m_stalker2_lazy_stats.persistent_budget_skips.fetch_add(
+                    m_persistent_states.size() - end,
+                    std::memory_order_relaxed);
+            }
+
+            m_stalker2_persistent_state_cursor = end >= m_persistent_states.size() ? 0 : end;
+        } else {
+            for (const auto& state : m_persistent_states) {
+                handle_persistent_state(state);
+            }
         }
     }
 
     // Persistent properties
     if (!m_persistent_properties.empty()) {
+        const bool stalker2_lazy = is_stalker2_uobjecthook_guard_enabled();
         const auto scene_comp_t = sdk::USceneComponent::static_class();
         const auto primitive_comp_t = sdk::UPrimitiveComponent::static_class();
-        for (const auto& prop_base : m_persistent_properties) {
+        auto handle_persistent_properties = [&](const std::shared_ptr<PersistentProperties>& prop_base) {
             if (prop_base == nullptr) {
-                continue;
+                return;
             }
 
-            auto obj = prop_base->path.resolve();
+            if (stalker2_lazy && is_stalker2_bulk_scene_path(prop_base->path)) {
+                m_stalker2_lazy_stats.persistent_path_skips.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+
+            auto obj = prop_base->path.resolve(true);
 
             if (obj == nullptr) {
-                continue;
+                had_tracking_miss = true;
+                return;
             }
 
             if (prop_base->hide) {
@@ -1683,7 +2841,37 @@ void UObjectHook::update_persistent_states() {
                     break;
                 };
             }
+        };
+
+        if (stalker2_lazy) {
+            if (m_stalker2_persistent_property_cursor >= m_persistent_properties.size()) {
+                m_stalker2_persistent_property_cursor = 0;
+            }
+
+            const auto end = std::min(
+                m_persistent_properties.size(),
+                m_stalker2_persistent_property_cursor + STALKER2_PERSISTENT_PROPERTY_RESOLVE_BUDGET);
+
+            for (auto i = m_stalker2_persistent_property_cursor; i < end; ++i) {
+                handle_persistent_properties(m_persistent_properties[i]);
+            }
+
+            if (end < m_persistent_properties.size()) {
+                m_stalker2_lazy_stats.persistent_budget_skips.fetch_add(
+                    m_persistent_properties.size() - end,
+                    std::memory_order_relaxed);
+            }
+
+            m_stalker2_persistent_property_cursor = end >= m_persistent_properties.size() ? 0 : end;
+        } else {
+            for (const auto& prop_base : m_persistent_properties) {
+                handle_persistent_properties(prop_base);
+            }
         }
+    }
+
+    if (had_tracking_miss) {
+        mark_persistent_tracking_miss();
     }
 }
 
@@ -1823,10 +3011,26 @@ sdk::UObject* UObjectHook::StatePath::resolve_base_object() const {
     return nullptr;
 }
 
-UObjectHook::ResolvedObject UObjectHook::StatePath::resolve() const {
+UObjectHook::ResolvedObject UObjectHook::StatePath::resolve(bool require_tracked_objects) const {
     const auto base = resolve_base_object();
 
     if (base == nullptr) {
+        return nullptr;
+    }
+
+    const auto hook = UObjectHook::get();
+    const auto is_stalker2_acknowledged_pawn_path =
+        is_stalker2_uobjecthook_guard_enabled() &&
+        !m_path.empty() &&
+        m_path.front() == "Acknowledged Pawn";
+
+    if (require_tracked_objects && !hook->try_track_object(base, "persistent path base", true)) {
+        if (is_stalker2_acknowledged_pawn_path) {
+            SPDLOG_WARNING_EVERY_N_SEC(
+                2,
+                "[Stalker2][UObjectHook] Deferring persistent Acknowledged Pawn path because the pawn is not tracked yet");
+        }
+
         return nullptr;
     }
 
@@ -1881,7 +3085,13 @@ UObjectHook::ResolvedObject UObjectHook::StatePath::resolve() const {
                 return nullptr;
             }
 
+            bool found = false;
+
             for (auto comp : components) {
+                if (comp == nullptr) {
+                    continue;
+                }
+
                 const auto& comp_fname = comp->get_fname();
                 const auto comp_name = comp_fname.to_string_remove_numbers();
                 const auto comp_ends_with_number = comp_fname.get_number() != 0;
@@ -1891,11 +3101,20 @@ UObjectHook::ResolvedObject UObjectHook::StatePath::resolve() const {
                                                             : *next_it == comp_expanded_name;
 
                 if (is_match) {
+                    if (require_tracked_objects && !hook->try_track_object(comp, "persistent path component", true)) {
+                        return nullptr;
+                    }
+
+                    found = true;
                     previous_data = comp;
                     previous_data_desc = comp->get_class();
                     ++it;
                     break;
                 }
+            }
+
+            if (!found) {
+                return nullptr;
             }
 
             break;
@@ -1930,6 +3149,10 @@ UObjectHook::ResolvedObject UObjectHook::StatePath::resolve() const {
                 const auto obj = obj_ptr != nullptr ? *obj_ptr : nullptr;
 
                 if (obj == nullptr) {
+                    return nullptr;
+                }
+
+                if (require_tracked_objects && !hook->try_track_object(obj, "persistent path object property", true)) {
                     return nullptr;
                 }
 
@@ -2009,6 +3232,10 @@ UObjectHook::ResolvedObject UObjectHook::StatePath::resolve() const {
                                                                : *prop_it == obj_expanded_name;
 
                     if (is_match) {
+                        if (require_tracked_objects && !hook->try_track_object(obj, "persistent path array object", true)) {
+                            return nullptr;
+                        }
+
                         found = true;
                         previous_data = obj;
                         previous_data_desc = obj->get_class();
@@ -2335,7 +3562,34 @@ void UObjectHook::draw_main() {
             }
 
             // make a copy because the user could press the detach button while iterating
-            auto attached = m_motion_controller_attached_components;
+            auto attached = decltype(m_motion_controller_attached_components){};
+
+            if (is_stalker2_uobjecthook_guard_enabled() &&
+                m_motion_controller_attached_components.size() > STALKER2_BULK_SCENE_ATTACHMENT_CAP) {
+                m_stalker2_lazy_stats.tick_bulk_skips.fetch_add(
+                    m_motion_controller_attached_components.size(),
+                    std::memory_order_relaxed);
+                ImGui::TextWrapped(
+                    "Stalker2 lazy mode suppressed %zu attached-component entries. Use Detach bulk SceneComponents in UObjectHook Health if this came from an old profile.",
+                    m_motion_controller_attached_components.size());
+            } else if (is_stalker2_uobjecthook_guard_enabled()) {
+                attached.reserve(std::min<size_t>(m_motion_controller_attached_components.size(), STALKER2_CLASS_BROWSER_OBJECT_CAP));
+
+                for (const auto& [component, state] : m_motion_controller_attached_components) {
+                    if (component == nullptr || state == nullptr || is_stalker2_bulk_scene_component(component)) {
+                        m_stalker2_lazy_stats.tick_bulk_skips.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+
+                    attached.emplace(component, state);
+
+                    if (attached.size() >= STALKER2_CLASS_BROWSER_OBJECT_CAP) {
+                        break;
+                    }
+                }
+            } else {
+                attached = m_motion_controller_attached_components;
+            }
 
             for (auto& it : attached) {
                 if (!this->exists_unsafe(it.first) || it.second == nullptr) {
@@ -2429,7 +3683,102 @@ void UObjectHook::draw_main() {
         }
     }
 
-    ImGui::Text("Objects: %zu (%zu actual)", m_objects.size(), sdk::FUObjectArray::get()->get_object_count());
+    const auto uobject_array = sdk::FUObjectArray::get();
+    const auto actual_object_count = uobject_array != nullptr ? uobject_array->get_object_count() : 0;
+    ImGui::Text("Objects: %zu (%zu actual)", m_objects.size(), actual_object_count);
+
+    if (ImGui::TreeNode("UObjectHook Health")) {
+        const bool add_object_guard_unreliable = m_add_object_guard_unreliable.load(std::memory_order_relaxed);
+        const bool force_scan = m_force_uobject_array_creation_scan.load(std::memory_order_relaxed);
+        const auto add_object_valid_candidates = m_add_object_guard_stats.valid_candidate_calls.load(std::memory_order_relaxed);
+        const auto add_object_no_candidates = m_add_object_guard_stats.no_candidate_calls.load(std::memory_order_relaxed);
+        const auto add_object_unreliable_transitions = m_add_object_guard_stats.unreliable_transitions.load(std::memory_order_relaxed);
+
+        ImGui::Text(
+            "AddObject hook: %s",
+            add_object_guard_unreliable ? "hooked but unreliable; fallback scan" : (m_add_object_hooked ? "hooked" : "fallback scan"));
+        ImGui::Text(
+            "AddObject guard: valid=%llu no_candidate=%llu unreliable_transitions=%llu",
+            add_object_valid_candidates,
+            add_object_no_candidates,
+            add_object_unreliable_transitions);
+        ImGui::Text(
+            "Scan: cursor=%d/%d budget=%u full_sweep=%s force_scan=%s",
+            m_uobject_array_scan_cursor,
+            actual_object_count,
+            m_uobject_array_scan_stats.last_budget,
+            m_uobject_array_full_sweep_active ? "yes" : "no",
+            force_scan ? "yes" : "no");
+        ImGui::Text(
+            "Scan totals: ticks=%llu scanned=%llu added=%llu rejected=%llu tombstone_skips=%llu full_sweeps=%llu",
+            m_uobject_array_scan_stats.ticks,
+            m_uobject_array_scan_stats.scanned,
+            m_uobject_array_scan_stats.added,
+            m_uobject_array_scan_stats.rejected,
+            m_uobject_array_scan_stats.tombstone_skips,
+            m_uobject_array_scan_stats.full_sweeps);
+        ImGui::Text(
+            "Persistent misses: %llu tombstones=%zu",
+            m_uobject_array_scan_stats.persistent_tracking_misses,
+            m_destroyed_object_tombstones.size());
+        ImGui::Text(
+            "UI nested resolver: attempts=%llu adopted=%llu refused=%llu cached_refusals=%llu",
+            m_ui_nested_resolve_stats.attempts,
+            m_ui_nested_resolve_stats.adopted,
+            m_ui_nested_resolve_stats.refused,
+            m_ui_nested_resolve_stats.cached_refusals);
+
+        if (is_stalker2_uobjecthook_guard_enabled()) {
+            const auto bulk_scene_attachments = get_stalker2_bulk_scene_attachment_count();
+            const auto addobject_skips = m_stalker2_lazy_stats.addobject_skips.load(std::memory_order_relaxed);
+            const auto persistent_bulk_skips = m_stalker2_lazy_stats.persistent_bulk_skips.load(std::memory_order_relaxed);
+            const auto tick_bulk_skips = m_stalker2_lazy_stats.tick_bulk_skips.load(std::memory_order_relaxed);
+            const auto persistent_path_skips = m_stalker2_lazy_stats.persistent_path_skips.load(std::memory_order_relaxed);
+            const auto persistent_budget_skips = m_stalker2_lazy_stats.persistent_budget_skips.load(std::memory_order_relaxed);
+            const auto class_browser_suppressed = m_stalker2_lazy_stats.class_browser_suppressed.load(std::memory_order_relaxed);
+            const bool full_scan_requested = m_stalker2_uobject_full_scan_requested.load(std::memory_order_relaxed);
+
+            ImGui::Separator();
+            ImGui::Text(
+                "Stalker2 Lazy Mode: on%s class_browser=%s",
+                full_scan_requested ? " (full scan requested)" : "",
+                m_stalker2_class_browser_enabled ? "on" : "off");
+            ImGui::Text(
+                "Stalker2 lazy skips: addobject=%llu persistent_bulk=%llu tick_bulk=%llu path=%llu budget=%llu class_ui=%llu",
+                addobject_skips,
+                persistent_bulk_skips,
+                tick_bulk_skips,
+                persistent_path_skips,
+                persistent_budget_skips,
+                class_browser_suppressed);
+
+            if (bulk_scene_attachments > STALKER2_BULK_SCENE_ATTACHMENT_CAP) {
+                ImGui::TextColored(
+                    ImVec4(1.0f, 0.35f, 0.1f, 1.0f),
+                    "Bulk SceneComponent attachments: %zu/%zu; ticking is suppressed",
+                    bulk_scene_attachments,
+                    STALKER2_BULK_SCENE_ATTACHMENT_CAP);
+            } else {
+                ImGui::Text(
+                    "Bulk SceneComponent attachments: %zu/%zu",
+                    bulk_scene_attachments,
+                    STALKER2_BULK_SCENE_ATTACHMENT_CAP);
+            }
+
+            if (ImGui::Button("Detach non-persistent")) {
+                const auto removed = detach_non_persistent_motion_controller_states();
+                SPDLOG_INFO("[Stalker2][UObjectHook] Detached {} non-persistent motion-controller states from UI", removed);
+            }
+
+            ImGui::SameLine();
+
+            if (ImGui::Button("Detach bulk SceneComponents")) {
+                const auto removed = detach_stalker2_bulk_scene_component_states();
+                SPDLOG_WARN("[Stalker2][UObjectHook] Detached {} bulk SceneComponent motion-controller states from UI", removed);
+            }
+        }
+        ImGui::TreePop();
+    }
 
     if (ImGui::TreeNode("Recent Objects")) {
         for (auto& object : m_most_recent_objects) {
@@ -2452,11 +3801,19 @@ void UObjectHook::draw_main() {
         auto world = engine != nullptr ? engine->get_world() : nullptr;
 
         if (world != nullptr) {
+            const bool stalker2_common_root = is_stalker2_uobjecthook_guard_enabled();
+            const bool require_common_root_array_member = !stalker2_common_root;
+
             if (ImGui::TreeNode("PlayerController")) {
                 auto scope = m_path.enter_clean("Player Controller");
                 auto player_controller = sdk::UGameplayStatics::get()->get_player_controller(world, 0);
 
                 if (player_controller != nullptr) {
+                    try_track_object(
+                        (sdk::UObjectBase*)player_controller,
+                        "Common Objects/PlayerController",
+                        require_common_root_array_member,
+                        false);
                     ui_handle_object(player_controller);
                 } else {
                     ImGui::Text("No player controller");
@@ -2473,6 +3830,11 @@ void UObjectHook::draw_main() {
                     auto pawn = player_controller->get_acknowledged_pawn();
 
                     if (pawn != nullptr) {
+                        try_track_object(
+                            (sdk::UObjectBase*)pawn,
+                            "Common Objects/Acknowledged Pawn",
+                            require_common_root_array_member,
+                            false);
                         ui_handle_object(pawn);
                     } else {
                         ImGui::Text("No pawn");
@@ -2492,6 +3854,11 @@ void UObjectHook::draw_main() {
                     auto camera_manager = player_controller->get_player_camera_manager();
 
                     if (camera_manager != nullptr) {
+                        try_track_object(
+                            (sdk::UObjectBase*)camera_manager,
+                            "Common Objects/Camera Manager",
+                            require_common_root_array_member,
+                            false);
                         ui_handle_object((sdk::UObject*)camera_manager);
                     } else {
                         ImGui::Text("No camera manager");
@@ -2505,6 +3872,7 @@ void UObjectHook::draw_main() {
 
             if (ImGui::TreeNode("World")) {
                 auto scope = m_path.enter_clean("World");
+                try_track_object((sdk::UObjectBase*)world, "Common Objects/World", require_common_root_array_member, false);
                 ui_handle_object(world);
                 ImGui::TreePop();
             }
@@ -2516,6 +3884,33 @@ void UObjectHook::draw_main() {
     }
 
     if (ImGui::TreeNode("Objects by class")) {
+        if (is_stalker2_uobjecthook_guard_enabled()) {
+            const bool full_scan_requested = m_stalker2_uobject_full_scan_requested.load(std::memory_order_relaxed);
+            ImGui::TextWrapped(
+                "Stalker2 lazy mode is active. Class browsing is off by default because sorting/backfilling the gameplay object set can hitch badly after level load.");
+
+            if (full_scan_requested) {
+                ImGui::Text("Full scan is running with a low per-frame budget.");
+            } else if (ImGui::Button("Full scan UObjectArray (slow)")) {
+                request_stalker2_uobject_full_scan();
+            }
+
+            ImGui::SameLine();
+
+            if (!m_stalker2_class_browser_enabled && ImGui::Button("Enable class browser")) {
+                m_stalker2_class_browser_enabled = true;
+            }
+
+            ImGui::Separator();
+
+            if (!m_stalker2_class_browser_enabled) {
+                m_stalker2_lazy_stats.class_browser_suppressed.fetch_add(1, std::memory_order_relaxed);
+                ImGui::TextWrapped("Open Common Objects for PlayerController, Acknowledged Pawn, Camera Manager, and World. Use class browsing only when you need a full object search.");
+                ImGui::TreePop();
+                return;
+            }
+        }
+
         ImGui::Checkbox("Hide Default Classes", &m_hide_default_classes);
 
         static char filter[256]{};
@@ -2575,7 +3970,17 @@ void UObjectHook::draw_main() {
             //}
         }};
 
+        size_t stalker2_displayed_classes = 0;
+
         for (auto uclass : m_sorted_classes) {
+            if (is_stalker2_uobjecthook_guard_enabled() &&
+                stalker2_displayed_classes >= STALKER2_CLASS_BROWSER_CLASS_CAP) {
+                ImGui::TextWrapped(
+                    "Stalker2 class browser capped at %zu classes this frame. Use the filter or Full scan only if you need more.",
+                    STALKER2_CLASS_BROWSER_CLASS_CAP);
+                break;
+            }
+
             const auto& objects_ref = m_objects_by_class[uclass];
 
             if (objects_ref.empty()) {
@@ -2618,6 +4023,10 @@ void UObjectHook::draw_main() {
                 continue;
             }
 
+            if (is_stalker2_uobjecthook_guard_enabled()) {
+                ++stalker2_displayed_classes;
+            }
+
             if (ImGui::TreeNode(uclass_name.data())) {
                 ui_standard_object_context_menu(uclass);
 
@@ -2636,6 +4045,15 @@ void UObjectHook::draw_main() {
                 std::sort(objects.begin(), objects.end(), [this](sdk::UObjectBase* a, sdk::UObjectBase* b) {
                     return m_meta_objects[a]->full_name < m_meta_objects[b]->full_name;
                 });
+
+                if (is_stalker2_uobjecthook_guard_enabled() &&
+                    objects.size() > STALKER2_CLASS_BROWSER_OBJECT_CAP) {
+                    ImGui::TextWrapped(
+                        "Showing first %zu/%zu objects for this Stalker2 class. Use filters or a direct address lookup for more.",
+                        STALKER2_CLASS_BROWSER_OBJECT_CAP,
+                        objects.size());
+                    objects.resize(STALKER2_CLASS_BROWSER_OBJECT_CAP);
+                }
 
                 if (uclass->is_a(sdk::AActor::static_class())) {
                     static char component_add_name[256]{};
@@ -2756,6 +4174,10 @@ void UObjectHook::ui_handle_object(sdk::UObject* object) {
     }
 
     if (!this->exists_unsafe(object)) {
+        try_track_reachable_ui_object(nullptr, object, "ui direct object");
+    }
+
+    if (!this->exists_unsafe(object)) {
         ImGui::Text("Invalid object");
         return;
     }
@@ -2769,6 +4191,9 @@ void UObjectHook::ui_handle_object(sdk::UObject* object) {
         return;
     }
 
+    if (!this->exists_unsafe(uclass)) {
+        try_track_object((sdk::UObjectBase*)uclass, "ui object class", false, false);
+    }
 
     if (!this->exists_unsafe(uclass)) {
         ImGui::Text("Invalid class");
@@ -2780,7 +4205,7 @@ void UObjectHook::ui_handle_object(sdk::UObject* object) {
             auto def = ((sdk::UClass*)object)->get_class_default_object();
 
             if (def != nullptr) {
-                ui_handle_object(def);
+                ui_handle_reachable_object(object, def, "ui default object");
             } else {
                 ImGui::Text("Null default object");
             }
@@ -2793,7 +4218,7 @@ void UObjectHook::ui_handle_object(sdk::UObject* object) {
 
     if (ImGui::TreeNode("Outer")) {
         auto outer_scope = m_path.enter("Outer");
-        ui_handle_object(object->get_outer());
+        ui_handle_reachable_object(object, object->get_outer(), "ui outer");
         ImGui::TreePop();
     }
 
@@ -3468,7 +4893,7 @@ void UObjectHook::ui_handle_actor(sdk::UObject* object) {
 
             if (made) {
                 auto scope2 = m_path.enter(utility::narrow(comp_name));
-                ui_handle_object(comp_obj);
+                ui_handle_reachable_object(object, comp_obj, "ui actor component");
                 ImGui::TreePop();
             }
 
@@ -3866,7 +5291,13 @@ void UObjectHook::ui_handle_properties(void* object, sdk::UStruct* uclass) {
                 
                 if (ImGui::TreeNode(utility::narrow(prop->get_field_name().to_string()).data())) {
                     auto scope2 = m_path.enter(utility::narrow(prop->get_field_name().to_string()));
-                    ui_handle_object(value);
+                    auto parent_object = (sdk::UObject*)object;
+
+                    if (!exists(parent_object)) {
+                        parent_object = nullptr;
+                    }
+
+                    ui_handle_reachable_object(parent_object, value, "ui object property");
                     ImGui::TreePop();
                 }
             }
@@ -3986,6 +5417,11 @@ void UObjectHook::ui_handle_array_property(void* addr, sdk::FArrayProperty* prop
     case "ObjectProperty"_fnv:
     {
         const auto& array_obj = *(sdk::TArray<sdk::UObject*>*)((uintptr_t)addr + prop->get_offset());
+        auto parent_object = (sdk::UObject*)addr;
+
+        if (!exists(parent_object)) {
+            parent_object = nullptr;
+        }
 
         for (auto obj : array_obj) {
             std::wstring name = obj->get_class()->get_fname().to_string() + L" " + obj->get_fname().to_string();
@@ -3993,7 +5429,7 @@ void UObjectHook::ui_handle_array_property(void* addr, sdk::FArrayProperty* prop
 
             if (ImGui::TreeNode(narrow_name.data())) {
                 auto scope = m_path.enter(narrow_name);
-                ui_handle_object(obj);
+                ui_handle_reachable_object(parent_object, obj, "ui object array");
                 ImGui::TreePop();
             }
         }
@@ -4091,26 +5527,154 @@ void* UObjectHook::add_object(void* rcx, void* rdx, void* r8, void* r9, void* st
     auto& hook = UObjectHook::get();
     auto result = hook->m_add_object_hook.unsafe_call<void*>(rcx, rdx, r8, r9, stack1, stack2, stack3, stack4);
 
-    {
-        static bool is_rcx = [&]() {
-            if (!IsBadReadPtr(rcx, sizeof(void*)) && 
-                !IsBadReadPtr(*(void**)rcx, sizeof(void*)) &&
-                !IsBadReadPtr(**(void***)rcx, sizeof(void*))) 
-            {
-                SPDLOG_INFO("[UObjectHook] RCX is UObjectBase*");
-                return true;
-            } else {
-                SPDLOG_INFO("[UObjectHook] RDX is UObjectBase*");
-                return false;
-            }
-        }();
+    if (is_stalker2_uobjecthook_guard_enabled() &&
+        !hook->m_stalker2_uobject_full_scan_requested.load(std::memory_order_relaxed)) {
+        // Stalker2 can create huge UObject bursts during gameplay loads. In lazy
+        // mode the common roots are tracked separately, so avoid the expensive
+        // per-AddObject candidate validation hotpath entirely.
+        hook->m_stalker2_lazy_stats.addobject_skips.fetch_add(1, std::memory_order_relaxed);
+        return result;
+    }
 
+    {
         sdk::UObjectBase* obj = nullptr;
 
-        if (is_rcx) {
-            obj = (sdk::UObjectBase*)rcx;
+        if (use_dynamic_uobjecthook_candidate_guard()) {
+            if (hook->m_add_object_guard_unreliable.load(std::memory_order_relaxed)) {
+                return result;
+            }
+
+            struct Candidate {
+                const char* name;
+                sdk::UObjectBase* object;
+            };
+
+            static std::atomic<int> preferred_candidate{0}; // 0 unset, otherwise 1-based index into candidates.
+            static std::atomic<int> logged_candidate{0};
+
+            const Candidate candidates[] = {
+                {"RCX", (sdk::UObjectBase*)rcx},
+                {"RDX", (sdk::UObjectBase*)rdx},
+                {"R8", (sdk::UObjectBase*)r8},
+                {"R9", (sdk::UObjectBase*)r9},
+                {"stack1", (sdk::UObjectBase*)stack1},
+                {"stack2", (sdk::UObjectBase*)stack2},
+                {"stack3", (sdk::UObjectBase*)stack3},
+                {"stack4", (sdk::UObjectBase*)stack4},
+            };
+
+            constexpr size_t candidate_count = sizeof(candidates) / sizeof(candidates[0]);
+            bool valid_candidates[candidate_count]{};
+
+            // The original call has completed by this point, so a real AddObject candidate
+            // should now be present in FUObjectArray. Requiring array membership keeps
+            // wrong callsites from polluting UObjectHook with random UObject-looking values.
+            constexpr bool require_array_member = true;
+
+            for (size_t i = 0; i < candidate_count; ++i) {
+                valid_candidates[i] = is_safe_uobject_candidate(*hook, candidates[i].object, require_array_member);
+            }
+
+            const auto previous = preferred_candidate.load(std::memory_order_relaxed);
+            int selected_candidate{};
+
+            if (previous > 0 && previous <= (int)candidate_count && valid_candidates[previous - 1]) {
+                selected_candidate = previous;
+            } else {
+                for (size_t i = 0; i < candidate_count; ++i) {
+                    if (valid_candidates[i]) {
+                        selected_candidate = (int)i + 1;
+                        break;
+                    }
+                }
+            }
+
+            if (selected_candidate != 0) {
+                hook->m_add_object_guard_stats.valid_candidate_calls.fetch_add(1, std::memory_order_relaxed);
+                preferred_candidate.store(selected_candidate, std::memory_order_relaxed);
+                obj = candidates[selected_candidate - 1].object;
+
+                const auto previous_logged = logged_candidate.exchange(selected_candidate, std::memory_order_relaxed);
+
+                if (previous_logged != selected_candidate) {
+                    SPDLOG_INFO("[UObjectHook] Guarded AddObject selected {} as UObjectBase*", candidates[selected_candidate - 1].name);
+                }
+            } else {
+                constexpr uint64_t unreliable_threshold = 32;
+                const auto no_candidate_count =
+                    hook->m_add_object_guard_stats.no_candidate_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+                const auto valid_candidate_count =
+                    hook->m_add_object_guard_stats.valid_candidate_calls.load(std::memory_order_relaxed);
+
+                if (valid_candidate_count == 0 && no_candidate_count >= unreliable_threshold) {
+                    const auto was_unreliable =
+                        hook->m_add_object_guard_unreliable.exchange(true, std::memory_order_relaxed);
+
+                    if (!was_unreliable) {
+                        const auto object_array = sdk::FUObjectArray::get();
+                        const auto object_count = object_array != nullptr ? object_array->get_object_count() : 0;
+                        const bool stalker2_on_demand_tracking = should_use_stalker2_on_demand_uobject_tracking(object_count);
+
+                        if (stalker2_on_demand_tracking) {
+                            hook->m_uobject_array_scan_cursor = object_count;
+                            hook->m_uobject_array_last_object_count = object_count;
+                            hook->m_uobject_array_full_sweep_active = false;
+                            hook->m_force_uobject_array_creation_scan.store(false, std::memory_order_relaxed);
+                        } else {
+                            hook->m_force_uobject_array_creation_scan.store(true, std::memory_order_relaxed);
+                        }
+
+                        hook->m_add_object_guard_stats.unreliable_transitions.fetch_add(1, std::memory_order_relaxed);
+
+                        if (stalker2_on_demand_tracking) {
+                            SPDLOG_WARN(
+                                "[Stalker2][UObjectHook] Guarded AddObject produced {} calls with no safe UObject candidate; AddObject is unreliable, using on-demand roots instead of FUObjectArray backscan (rcx={:x}, rdx={:x}, r8={:x}, r9={:x})",
+                                no_candidate_count,
+                                (uintptr_t)rcx,
+                                (uintptr_t)rdx,
+                                (uintptr_t)r8,
+                                (uintptr_t)r9);
+                        } else {
+                            SPDLOG_WARN(
+                                "[UObjectHook] Guarded AddObject produced {} calls with no safe UObject candidate; treating AddObject hook as unreliable and relying on FUObjectArray scan (rcx={:x}, rdx={:x}, r8={:x}, r9={:x})",
+                                no_candidate_count,
+                                (uintptr_t)rcx,
+                                (uintptr_t)rdx,
+                                (uintptr_t)r8,
+                                (uintptr_t)r9);
+                        }
+                    }
+                } else {
+                    SPDLOG_WARNING_EVERY_N_SEC(
+                        2,
+                        "[UObjectHook] Skipping AddObject call with no safe UObject candidate (rcx={:x}, rdx={:x}, r8={:x}, r9={:x})",
+                        (uintptr_t)rcx,
+                        (uintptr_t)rdx,
+                        (uintptr_t)r8,
+                        (uintptr_t)r9);
+                }
+
+                return result;
+            }
         } else {
-            obj = (sdk::UObjectBase*)rdx;
+            static bool is_rcx = [&]() {
+                if (!IsBadReadPtr(rcx, sizeof(void*)) && 
+                    !IsBadReadPtr(*(void**)rcx, sizeof(void*)) &&
+                    !IsBadReadPtr(**(void***)rcx, sizeof(void*))) 
+                {
+                    SPDLOG_INFO("[UObjectHook] RCX is UObjectBase*");
+                    return true;
+                } else {
+                    SPDLOG_INFO("[UObjectHook] RDX is UObjectBase*");
+                    return false;
+                }
+            }();
+
+            if (is_rcx) {
+                obj = (sdk::UObjectBase*)rcx;
+            } else {
+                obj = (sdk::UObjectBase*)rdx;
+            }
         }
 
         ++hook->m_debug.constructor_calls;
@@ -4132,6 +5696,19 @@ void* UObjectHook::destructor(sdk::UObjectBase* object, void* rdx, void* r8, voi
 #ifdef VERBOSE_UOBJECTHOOK
             SPDLOG_INFO("Removing object {:x} {:s}", (uintptr_t)object, utility::narrow(it->second->full_name));
 #endif
+            if (should_incrementally_refresh_uobject_array() ||
+                hook->m_force_uobject_array_creation_scan.load(std::memory_order_relaxed) ||
+                hook->m_add_object_guard_unreliable.load(std::memory_order_relaxed))
+            {
+                if (const auto index_serial = get_uobject_index_serial(object); index_serial.has_value()) {
+                    hook->m_destroyed_object_tombstones[object] = UObjectHook::DestroyedObjectTombstone{
+                        index_serial->first,
+                        index_serial->second,
+                        std::chrono::steady_clock::now()
+                    };
+                }
+            }
+
             hook->m_objects.erase(object);
             hook->m_motion_controller_attached_components.erase((sdk::USceneComponent*)object);
             hook->m_spawned_spheres.erase((sdk::USceneComponent*)object);

@@ -1,9 +1,11 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <unordered_set>
 #include <memory>
 #include <filesystem>
+#include <string_view>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/details/registry.h>
@@ -18,6 +20,9 @@
 
 class Mods;
 class VR;
+namespace render {
+class FrameResourceInspector;
+}
 
 #include "hooks/D3D11Hook.hpp"
 #include "hooks/D3D12Hook.hpp"
@@ -73,6 +78,8 @@ struct SidebarEntryInfo {
 class Framework {
 private:
     std::shared_ptr<VR> m_vr{};
+
+    friend class render::FrameResourceInspector;
 
 private:
     void hook_monitor();
@@ -149,6 +156,7 @@ public:
     auto get_renderer_type() const { return m_renderer_type; }
     auto& get_d3d11_hook() const { return m_d3d11_hook; }
     auto& get_d3d12_hook() const { return m_d3d12_hook; }
+    const auto& get_last_framework_on_frame_time() const { return m_last_framework_on_frame; }
 
     auto get_window() const { return m_wnd; }
     auto get_last_window_pos() const { return m_last_window_pos; } // Framework imgui window
@@ -158,6 +166,20 @@ public:
         return m_draw_ui;
     }
 
+    bool is_sidebar_entry_selected(std::string_view label) const {
+        if (!m_draw_ui || m_sidebar_state.selected_entry < 0) {
+            return false;
+        }
+
+        const auto selected_index = static_cast<size_t>(m_sidebar_state.selected_entry);
+
+        if (selected_index >= m_sidebar_state.entries.size()) {
+            return false;
+        }
+
+        return m_sidebar_state.entries[selected_index].m_label == label;
+    }
+
     bool is_drawing_anything() const;
 
     void set_draw_ui(bool state, bool should_save = true);
@@ -165,6 +187,8 @@ public:
     auto& get_hook_monitor_mutex() {
         return m_hook_monitor_mutex;
     }
+
+    void notify_render_activity();
 
     void set_font_size(int size) { 
         if (m_font_size != size) {
@@ -349,9 +373,12 @@ private:
     std::chrono::steady_clock::time_point m_last_message_time{};
     std::chrono::steady_clock::time_point m_last_sendmessage_time{};
     std::chrono::steady_clock::time_point m_last_chance_time{};
+    std::chrono::steady_clock::time_point m_last_framework_on_frame{};
     std::chrono::steady_clock::time_point m_last_page_dec_time{};
     std::chrono::steady_clock::time_point m_last_page_inc_time{};
+    std::chrono::steady_clock::time_point m_next_d3d12_init_attempt{};
     uint32_t m_frames_since_init{0};
+    uint32_t m_d3d12_init_failure_count{0};
     bool m_has_last_chance{true};
     bool m_first_initialize{true};
 
@@ -383,6 +410,7 @@ private: // D3D12 Init
 
 private: // D3D11 members
     struct D3D11 {
+        ComPtr<ID3D11Texture2D> bb_tex{};
         ComPtr<ID3D11Texture2D> blank_rt{};
 		ComPtr<ID3D11Texture2D> rt{};
         ComPtr<ID3D11RenderTargetView> blank_rt_rtv{};
@@ -424,6 +452,7 @@ private: // D3D12 members
             IMGUI_FONT_VR,
             IMGUI_VR,
             BLANK,
+            INSPECTOR_PREVIEW,
             COUNT
         };
 

@@ -1,10 +1,26 @@
 #define NOMINMAX
 
 #include <windows.h>
+#include <d3d11.h>
 #include <winternl.h>
 
 #include <asmjit/asmjit.h>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <bit>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <cwctype>
 #include <future>
+#include <limits>
+#include <mutex>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include <spdlog/spdlog.h>
 #include <utility/Memory.hpp>
@@ -32,6 +48,7 @@
 #include <sdk/FViewport.hpp>
 #include <sdk/UKismetRenderingLibrary.hpp>
 #include <sdk/UTexture.hpp>
+#include <sdk/UObjectBase.hpp>
 #include <sdk/APlayerCameraManager.hpp>
 #include <sdk/FStructProperty.hpp>
 #include <sdk/FSceneViewFamily.hpp>
@@ -46,6 +63,7 @@
 #include "Mods.hpp"
 #include "DumperMode.hpp"
 #include "mods/UObjectHook.hpp"
+#include "mods/GameSpecific.hpp"
 
 #include <bdshemu.h>
 #include <bddisasm.h>
@@ -65,6 +83,3631 @@
 
 FFakeStereoRenderingHook* g_hook = nullptr;
 uint32_t g_frame_count{};
+
+namespace {
+bool is_readable_process_range(uintptr_t address, size_t size);
+bool is_executable_process_range(uintptr_t address, size_t size);
+
+std::mutex g_shf_texture_probe_mutex{};
+std::unordered_set<uintptr_t> g_shf_logged_texture_probe_keys{};
+std::unordered_map<uintptr_t, std::chrono::steady_clock::time_point> g_shf_last_texture_probe_by_base{};
+std::unordered_set<uintptr_t> g_shf_logged_rtm_candidate_natives{};
+uint64_t g_shf_rtm_candidate_count{};
+uint64_t g_shf_rtm_candidate_suppressed{};
+std::atomic_bool g_dune_force_viewport_rhi_once{false};
+std::atomic_uint64_t g_dune_rejected_flat_viewport_rts{0};
+
+struct DunePendingTrueStereoView {
+    bool valid{false};
+    uint32_t render_frame{};
+    uint8_t eye{};
+    uintptr_t player_controller{};
+    uintptr_t view_info{};
+    glm::quat adjusted_quaternion{1.0f, 0.0f, 0.0f, 0.0f};
+};
+
+thread_local DunePendingTrueStereoView g_dune_pending_true_stereo_view{};
+
+constexpr uint32_t AVOWED_NATIVE_FIX_STABLE_FRAMES = 180;
+constexpr uint32_t AVOWED_NATIVE_FIX_FAST_REACQUIRE_STABLE_FRAMES = 45;
+constexpr auto AVOWED_NATIVE_FIX_RENDER_GAP = std::chrono::milliseconds(250);
+constexpr auto AVOWED_NATIVE_FIX_TRANSITION_HOLD = std::chrono::seconds(10);
+constexpr auto AVOWED_NATIVE_FIX_FAST_REACQUIRE_HOLD = std::chrono::milliseconds(1500);
+constexpr auto AVOWED_NATIVE_FIX_FAST_REACQUIRE_MAX_MISSING = std::chrono::seconds(60);
+
+bool is_deadzone_ue56_executable() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+
+        if (!exe_path || exe_path->find(L"DeadzoneSteam-Win64-Shipping") == std::wstring::npos) {
+            return false;
+        }
+
+        const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+        const auto file_version = sdk::get_file_version_info();
+
+        return str_version.starts_with("5.6") || file_version.dwFileVersionMS == 0x00050006;
+    }();
+
+    return result;
+}
+
+struct AvowedNativeFixGateState {
+    uintptr_t scene{};
+    uintptr_t render_target{};
+    uintptr_t scene_capture_render_target{};
+    uintptr_t scene_capture_native{};
+    uintptr_t last_ready_scene{};
+    uintptr_t last_ready_render_target{};
+    std::chrono::steady_clock::time_point last_update{};
+    std::chrono::steady_clock::time_point hold_until{};
+    std::chrono::steady_clock::time_point missing_since{};
+    uint32_t stable_frames{};
+    uint32_t required_stable_frames{AVOWED_NATIVE_FIX_STABLE_FRAMES};
+    bool ready{};
+    bool has_baseline{};
+    bool had_ready_baseline{};
+    bool targets_missing{};
+    bool fast_reacquire{};
+};
+
+std::mutex g_avowed_native_fix_gate_mutex{};
+AvowedNativeFixGateState g_avowed_native_fix_gate{};
+std::mutex g_ue56_rt_probe_mutex{};
+std::unordered_map<uintptr_t, bool> g_ue56_native_resource_probe_cache{};
+
+struct UE51RenderTargetChurnStats {
+    uint64_t allocate_seen{};
+    uint64_t ui_created{};
+    uint64_t ui_reused{};
+    uintptr_t last_allocate_return_address{};
+    uintptr_t last_ui_create_return_address{};
+    uintptr_t last_ui_texture{};
+    uint32_t last_ui_width{};
+    uint32_t last_ui_height{};
+    std::chrono::steady_clock::time_point last_log{};
+};
+
+std::mutex g_ue51_rt_churn_mutex{};
+UE51RenderTargetChurnStats g_ue51_rt_churn{};
+constexpr auto ENGINE_RENDER_TIMING_LOG_INTERVAL = std::chrono::seconds(5);
+
+struct EngineRenderTimingStats {
+    uint64_t count{};
+    double total_ms{};
+    double max_ms{};
+
+    void add(std::chrono::steady_clock::duration duration) {
+        const auto ms = std::chrono::duration<double, std::milli>{duration}.count();
+        ++count;
+        total_ms += ms;
+        if (ms > max_ms) {
+            max_ms = ms;
+        }
+    }
+
+    double avg() const {
+        return count == 0 ? 0.0 : total_ms / (double)count;
+    }
+
+    void reset() {
+        count = 0;
+        total_ms = 0.0;
+        max_ms = 0.0;
+    }
+};
+
+EngineRenderTimingStats g_begin_render_viewfamily_real_timing{};
+EngineRenderTimingStats g_begin_render_viewfamily_timing{};
+EngineRenderTimingStats g_prerender_viewfamily_rt_timing{};
+std::chrono::steady_clock::time_point g_engine_render_last_log{};
+
+bool shf_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && exe_path->find(L"SHf-Win64-Shipping") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+bool aphelion_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path &&
+            (exe_path->find(L"PIO-WinGDK-Shipping") != std::wstring::npos ||
+             exe_path->find(L"PIO-Win64-Shipping") != std::wstring::npos ||
+             exe_path->find(L"Aphelion") != std::wstring::npos);
+    }();
+
+    return result;
+}
+
+bool ark_ascended_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path &&
+            (exe_path->find(L"ArkAscended.exe") != std::wstring::npos ||
+             exe_path->find(L"ArkAscended-Win64-Shipping") != std::wstring::npos);
+    }();
+
+    return result;
+}
+
+bool mechwarrior_clans_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path &&
+            (exe_path->find(L"MechWarrior-Win64-Shipping") != std::wstring::npos ||
+             exe_path->find(L"MW5Clans") != std::wstring::npos);
+    }();
+
+    return result;
+}
+
+bool directive8020_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && exe_path->find(L"Directive8020") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+bool everwind_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && exe_path->find(L"Everwind-Win64-Shipping") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+bool stalker2_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && exe_path->find(L"Stalker2-Win64-Shipping") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+bool avowed_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && uevr::games::is_avowed_executable_path(*exe_path);
+    }();
+
+    return result;
+}
+
+bool dune_awakening_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && uevr::games::is_dune_awakening_executable_path(*exe_path);
+    }();
+
+    return result;
+}
+
+bool dune_should_preserve_native_viewport_target() {
+    return dune_awakening_is_current_game() &&
+        g_hook != nullptr &&
+        (g_hook->is_dune_character_creation_active() || g_hook->dune_has_live_pawn());
+}
+
+bool dune_is_auxiliary_view_family(sdk::FSceneViewFamily* view_family, const char* source) {
+    if (!dune_awakening_is_current_game() || view_family == nullptr) {
+        return false;
+    }
+
+    if (g_hook == nullptr) {
+        return false;
+    }
+
+    // A different render-target pointer is not sufficient to identify a
+    // showroom family once Dune has entered a playable world. Its custom
+    // FidelityFX pipeline legitimately replaces the main family target.
+    if (g_hook->dune_has_live_pawn()) {
+        return false;
+    }
+
+    try {
+        auto* rtm = g_hook->get_render_target_manager();
+        auto* main_viewport = rtm != nullptr ? rtm->get_viewport() : nullptr;
+        auto* family_target = view_family->get_render_target();
+
+        if (main_viewport == nullptr || family_target == nullptr) {
+            return false;
+        }
+
+        if (reinterpret_cast<void*>(family_target) == reinterpret_cast<void*>(main_viewport)) {
+            return false;
+        }
+
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[Dune][Showroom] Isolating auxiliary view family at {} target={:x} main_viewport={:x}",
+            source != nullptr ? source : "<unknown>",
+            reinterpret_cast<uintptr_t>(family_target),
+            reinterpret_cast<uintptr_t>(main_viewport));
+        return true;
+    } catch (...) {
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[Dune][Showroom] Failed to classify view family at {}; preserving normal UEVR behavior",
+            source != nullptr ? source : "<unknown>");
+        return false;
+    }
+}
+
+bool subnautica2_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path &&
+            (exe_path->find(L"Subnautica2-Win64-Shipping") != std::wstring::npos ||
+             exe_path->find(L"Subnautica2-WinGDK-Shipping") != std::wstring::npos);
+    }();
+
+    return result;
+}
+
+bool daysgone_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path &&
+            (exe_path->find(L"DaysGone.exe") != std::wstring::npos ||
+             exe_path->find(L"BendGame") != std::wstring::npos);
+    }();
+
+    return result;
+}
+
+bool strikers_club_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path &&
+            exe_path->find(L"StrikersClubDemo") != std::wstring::npos &&
+            exe_path->find(L"UFG-Win64-Shipping.exe") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+std::atomic<uintptr_t> g_strikers_club_shadow_object{};
+std::atomic<uintptr_t> g_strikers_club_shadow_vtable{};
+
+struct StrikersClubViewExtensionsHeader {
+    uintptr_t data{};
+    int32_t count{};
+    int32_t capacity{};
+};
+
+bool strikers_club_has_valid_engine_stereo_layout(uintptr_t engine, uintptr_t stereo_device_offset) {
+    constexpr auto shared_ptr_size = sizeof(TWeakPtr<void*>);
+    constexpr int32_t max_reasonable_view_extensions = 4096;
+
+    if (engine == 0 || stereo_device_offset == 0) {
+        return false;
+    }
+
+    uintptr_t view_extensions{};
+    SIZE_T bytes_read{};
+    const auto view_extensions_slot = engine + stereo_device_offset + (shared_ptr_size * 2);
+
+    if (!ReadProcessMemory(
+            GetCurrentProcess(),
+            reinterpret_cast<const void*>(view_extensions_slot),
+            &view_extensions,
+            sizeof(view_extensions),
+            &bytes_read) ||
+        bytes_read != sizeof(view_extensions) ||
+        view_extensions == 0) {
+        return false;
+    }
+
+    StrikersClubViewExtensionsHeader header{};
+    bytes_read = 0;
+    if (!ReadProcessMemory(
+            GetCurrentProcess(),
+            reinterpret_cast<const void*>(view_extensions),
+            &header,
+            sizeof(header),
+            &bytes_read) ||
+        bytes_read != sizeof(header)) {
+        return false;
+    }
+
+    if (header.count < 0 ||
+        header.capacity < 0 ||
+        header.count > header.capacity ||
+        header.capacity > max_reasonable_view_extensions) {
+        return false;
+    }
+
+    if (header.data == 0) {
+        return header.count == 0;
+    }
+
+    if (header.count == 0) {
+        return true;
+    }
+
+    uintptr_t first_extension{};
+    bytes_read = 0;
+    return ReadProcessMemory(
+               GetCurrentProcess(),
+               reinterpret_cast<const void*>(header.data),
+               &first_extension,
+               sizeof(first_extension),
+               &bytes_read) &&
+        bytes_read == sizeof(first_extension);
+}
+
+bool install_strikers_club_shadow_vtable(uintptr_t stereo_device) {
+    // UE 5.7.1 IStereoRendering ends at EndFinalPostprocessSettings (slot 20).
+    constexpr size_t vtable_entry_count = 21;
+    static std::array<uintptr_t, vtable_entry_count> shadow_vtable{};
+    uintptr_t original_vtable{};
+    SIZE_T bytes_read{};
+
+    if (stereo_device == 0 ||
+        !ReadProcessMemory(
+            GetCurrentProcess(),
+            reinterpret_cast<const void*>(stereo_device),
+            &original_vtable,
+            sizeof(original_vtable),
+            &bytes_read) ||
+        bytes_read != sizeof(original_vtable) ||
+        original_vtable == 0) {
+        SPDLOG_WARN(
+            "[StrikersClub] Failed to read stereo-device vtable pointer object={:x} error={}",
+            stereo_device,
+            GetLastError());
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION object_page{};
+    MEMORY_BASIC_INFORMATION vtable_page{};
+    VirtualQuery(reinterpret_cast<const void*>(stereo_device), &object_page, sizeof(object_page));
+    VirtualQuery(reinterpret_cast<const void*>(original_vtable), &vtable_page, sizeof(vtable_page));
+
+    const auto vtable_bytes = shadow_vtable.size() * sizeof(uintptr_t);
+    bytes_read = 0;
+    if (!ReadProcessMemory(
+            GetCurrentProcess(),
+            reinterpret_cast<const void*>(original_vtable),
+            shadow_vtable.data(),
+            vtable_bytes,
+            &bytes_read) ||
+        bytes_read != vtable_bytes) {
+        SPDLOG_WARN(
+            "[StrikersClub] Failed to clone stereo vtable object={:x} vtable={:x} bytes={}/{} object_protect={:x} "
+            "vtable_protect={:x} error={}",
+            stereo_device,
+            original_vtable,
+            bytes_read,
+            vtable_bytes,
+            object_page.Protect,
+            vtable_page.Protect,
+            GetLastError());
+        return false;
+    }
+
+    auto* const shadow_vtable_ptr = shadow_vtable.data();
+    SIZE_T bytes_written{};
+    if (!WriteProcessMemory(
+            GetCurrentProcess(),
+            reinterpret_cast<void*>(stereo_device),
+            &shadow_vtable_ptr,
+            sizeof(shadow_vtable_ptr),
+            &bytes_written) ||
+        bytes_written != sizeof(shadow_vtable_ptr)) {
+        DWORD old_protect{};
+        if (!VirtualProtect(
+                reinterpret_cast<void*>(stereo_device),
+                sizeof(shadow_vtable_ptr),
+                PAGE_READWRITE,
+                &old_protect)) {
+            SPDLOG_WARN(
+                "[StrikersClub] Failed to make stereo object writable object={:x} vtable={:x} protect={:x} error={}",
+                stereo_device,
+                original_vtable,
+                object_page.Protect,
+                GetLastError());
+            return false;
+        }
+
+        std::memcpy(reinterpret_cast<void*>(stereo_device), &shadow_vtable_ptr, sizeof(shadow_vtable_ptr));
+
+        DWORD restored_protect{};
+        VirtualProtect(
+            reinterpret_cast<void*>(stereo_device),
+            sizeof(shadow_vtable_ptr),
+            old_protect,
+            &restored_protect);
+    }
+
+    uintptr_t installed_vtable{};
+    bytes_read = 0;
+    if (!ReadProcessMemory(
+            GetCurrentProcess(),
+            reinterpret_cast<const void*>(stereo_device),
+            &installed_vtable,
+            sizeof(installed_vtable),
+            &bytes_read) ||
+        bytes_read != sizeof(installed_vtable) ||
+        installed_vtable != reinterpret_cast<uintptr_t>(shadow_vtable_ptr)) {
+        SPDLOG_WARN(
+            "[StrikersClub] Stereo shadow vtable verification failed object={:x} expected={:x} actual={:x}",
+            stereo_device,
+            reinterpret_cast<uintptr_t>(shadow_vtable_ptr),
+            installed_vtable);
+        return false;
+    }
+
+    SPDLOG_INFO(
+        "[StrikersClub] Stereo shadow vtable installed object={:x} original={:x} shadow={:x} object_protect={:x} "
+        "vtable_protect={:x}",
+        stereo_device,
+        original_vtable,
+        installed_vtable,
+        object_page.Protect,
+        vtable_page.Protect);
+    g_strikers_club_shadow_object.store(stereo_device, std::memory_order_release);
+    g_strikers_club_shadow_vtable.store(installed_vtable, std::memory_order_release);
+    return true;
+}
+
+bool everspace2_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && uevr::games::is_everspace2_executable_path(*exe_path);
+    }();
+
+    return result;
+}
+
+enum class Everspace2PoolTraceKind : uint32_t {
+    CreateTracked,
+    RefAssignment,
+    FinalRelease,
+};
+
+constexpr size_t EVERSPACE2_POOL_TRACE_STACK_DEPTH = 12;
+
+struct Everspace2PoolTraceEvent {
+    std::atomic<uint64_t> committed_sequence{};
+    Everspace2PoolTraceKind kind{};
+    uintptr_t pooled_target{};
+    uintptr_t targetable_texture{};
+    uintptr_t shader_resource_texture{};
+    uintptr_t owning_pool{};
+    uintptr_t owner_slot{};
+    uintptr_t replacement{};
+    uint32_t ref_count{};
+    uint32_t thread_id{};
+    uint16_t stack_depth{};
+    std::array<uintptr_t, EVERSPACE2_POOL_TRACE_STACK_DEPTH> stack{};
+    std::array<wchar_t, 64> name{};
+};
+
+struct Everspace2ExecutableProfile {
+    const char* name;
+    uint32_t image_timestamp;
+    uint32_t image_size;
+    uintptr_t compute_memory_size_rva;
+    uintptr_t create_render_target_rva;
+    uintptr_t ref_assignment_rva;
+    uintptr_t preshadow_depth_assignment_return_rva;
+    std::array<uint8_t, 5> preshadow_assignment_call_signature;
+    uintptr_t final_release_path_rva;
+    std::array<uint8_t, 9> final_release_signature;
+    uintptr_t world_cleanup_rva;
+    std::array<uint8_t, 19> world_cleanup_signature;
+};
+
+constexpr Everspace2ExecutableProfile EVERSPACE2_DEMO_PROFILE{
+    "Steam Demo",
+    0xECBB6BE7,
+    0x0A7B1000,
+    0x1353B8C,
+    0x1600E44,
+    0x1583B68,
+    0x1356DEB,
+    {0xE8, 0x7D, 0xCD, 0x22, 0x00},
+    0x11AF8E8,
+    {0x48, 0x83, 0xC1, 0x70, 0xE8, 0x3B, 0x21, 0x45, 0x00},
+    0,
+    {},
+};
+
+constexpr Everspace2ExecutableProfile EVERSPACE2_RETAIL_PROFILE{
+    "Steam Retail",
+    0xFBD525DD,
+    0x0A7B2000,
+    0x15A0D18,
+    0x162386C,
+    0x15877B8,
+    0x15A3EC3,
+    {0xE8, 0xF5, 0x38, 0xFE, 0xFF},
+    0x11AD448,
+    {0x48, 0x83, 0xC1, 0x70, 0xE8, 0x03, 0x70, 0x47, 0x00},
+    0x3BA4AA8,
+    {
+        0x48, 0x89, 0x5C, 0x24, 0x08,
+        0x48, 0x89, 0x74, 0x24, 0x10,
+        0x57, 0x48, 0x83, 0xEC, 0x20,
+        0x48, 0x8D, 0x59, 0x30,
+    },
+};
+
+constexpr size_t EVERSPACE2_POOL_TRACE_CAPACITY = 16384;
+
+std::array<Everspace2PoolTraceEvent, EVERSPACE2_POOL_TRACE_CAPACITY> g_everspace2_pool_trace{};
+std::atomic<uint64_t> g_everspace2_pool_trace_sequence{};
+std::atomic<uintptr_t> g_everspace2_last_bad_pool_entry{};
+safetyhook::MidHook g_everspace2_pool_trace_hook{};
+safetyhook::InlineHook g_everspace2_create_render_target_hook{};
+safetyhook::InlineHook g_everspace2_ref_assignment_hook{};
+safetyhook::MidHook g_everspace2_final_release_hook{};
+safetyhook::InlineHook g_everspace2_world_cleanup_hook{};
+std::atomic_bool g_everspace2_pool_trace_attempted{};
+std::atomic<uint32_t> g_everspace2_last_view_pose_frame{std::numeric_limits<uint32_t>::max()};
+std::atomic<uint32_t> g_everspace2_next_view_pose_frame{};
+std::mutex g_everspace2_preshadow_depth_assignment_mutex{};
+const Everspace2ExecutableProfile* g_everspace2_active_profile{};
+
+uint32_t everspace2_get_next_view_pose_frame(VRRuntime* runtime) {
+    auto frame_count = g_everspace2_next_view_pose_frame.load(std::memory_order_acquire);
+
+    if (frame_count != 0) {
+        return frame_count;
+    }
+
+    const auto initial_frame_count = runtime->internal_frame_count + 1;
+    if (g_everspace2_next_view_pose_frame.compare_exchange_strong(
+            frame_count,
+            initial_frame_count,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire))
+    {
+        return initial_frame_count;
+    }
+
+    return frame_count;
+}
+
+bool everspace2_is_live_uniform_buffer(uintptr_t buffer) {
+    if (buffer == 0 || (buffer & (alignof(void*) - 1)) != 0) {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION object_region{};
+    if (VirtualQuery(reinterpret_cast<void*>(buffer), &object_region, sizeof(object_region)) == 0 ||
+        object_region.State != MEM_COMMIT ||
+        (object_region.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
+        buffer + 0x10 > reinterpret_cast<uintptr_t>(object_region.BaseAddress) + object_region.RegionSize)
+    {
+        return false;
+    }
+
+    const auto vtable = *reinterpret_cast<const uintptr_t*>(buffer);
+    const auto module = reinterpret_cast<uintptr_t>(utility::get_executable());
+    const auto module_size = utility::get_module_size(reinterpret_cast<HMODULE>(module));
+
+    if (!module_size || vtable < module || vtable >= module + *module_size) {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION vtable_region{};
+    if (VirtualQuery(reinterpret_cast<void*>(vtable), &vtable_region, sizeof(vtable_region)) == 0 ||
+        vtable_region.State != MEM_COMMIT ||
+        (vtable_region.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
+        vtable + sizeof(uintptr_t) >
+            reinterpret_cast<uintptr_t>(vtable_region.BaseAddress) + vtable_region.RegionSize)
+    {
+        return false;
+    }
+
+    const auto first_virtual = *reinterpret_cast<const uintptr_t*>(vtable);
+    return first_virtual >= module && first_virtual < module + *module_size;
+}
+
+void everspace2_world_cleanup_hook(void* scene) {
+    constexpr uintptr_t uniform_buffers_offset = 0x30;
+    constexpr size_t uniform_buffer_count = 5;
+    size_t sanitized{};
+
+    if (scene != nullptr && !IsBadWritePtr(
+            reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(scene) + uniform_buffers_offset),
+            sizeof(uintptr_t) * uniform_buffer_count))
+    {
+        auto* slots = reinterpret_cast<uintptr_t*>(
+            reinterpret_cast<uintptr_t>(scene) + uniform_buffers_offset);
+
+        for (size_t index = 0; index < uniform_buffer_count; ++index) {
+            const auto buffer = slots[index];
+            if (buffer != 0 && !everspace2_is_live_uniform_buffer(buffer)) {
+                slots[index] = 0;
+                ++sanitized;
+                SPDLOG_ERROR(
+                    "[Everspace2][WorldCleanup] Dropped stale persistent uniform buffer "
+                    "scene={:x} slot={} buffer={:x} before FScene::OnWorldCleanup",
+                    reinterpret_cast<uintptr_t>(scene),
+                    index,
+                    buffer);
+            }
+        }
+    }
+
+    if (sanitized != 0) {
+        if (const auto logger = spdlog::default_logger(); logger != nullptr) {
+            logger->flush();
+        }
+    }
+
+    g_everspace2_world_cleanup_hook.call<void>(scene);
+}
+
+const Everspace2ExecutableProfile* everspace2_find_executable_profile(HMODULE module) {
+    if (module == nullptr || IsBadReadPtr(module, sizeof(IMAGE_DOS_HEADER))) {
+        return nullptr;
+    }
+
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        return nullptr;
+    }
+
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>((uintptr_t)module + dos->e_lfanew);
+    if (IsBadReadPtr(nt, sizeof(*nt)) || nt->Signature != IMAGE_NT_SIGNATURE) {
+        return nullptr;
+    }
+
+    constexpr std::array profiles{
+        &EVERSPACE2_DEMO_PROFILE,
+        &EVERSPACE2_RETAIL_PROFILE,
+    };
+
+    for (const auto* profile : profiles) {
+        if (nt->OptionalHeader.SizeOfImage == profile->image_size) {
+            if (nt->FileHeader.TimeDateStamp != profile->image_timestamp) {
+                SPDLOG_WARN(
+                    "[Everspace2][PoolTrace] {} image timestamp differs "
+                    "(expected=0x{:x}, actual=0x{:x}); continuing with strict RVA signature validation",
+                    profile->name,
+                    profile->image_timestamp,
+                    nt->FileHeader.TimeDateStamp);
+            }
+
+            return profile;
+        }
+    }
+
+    return nullptr;
+}
+
+void record_everspace2_pool_trace(
+    Everspace2PoolTraceKind kind,
+    uintptr_t pooled_target,
+    uintptr_t targetable_texture,
+    uintptr_t shader_resource_texture,
+    uintptr_t owning_pool,
+    uint32_t ref_count,
+    const wchar_t* name,
+    uintptr_t direct_caller = 0,
+    uintptr_t owner_slot = 0,
+    uintptr_t replacement = 0,
+    bool capture_stack = true)
+{
+    const auto sequence = g_everspace2_pool_trace_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+    auto& event = g_everspace2_pool_trace[(sequence - 1) % g_everspace2_pool_trace.size()];
+    event.committed_sequence.store(0, std::memory_order_relaxed);
+    event.kind = kind;
+    event.pooled_target = pooled_target;
+    event.targetable_texture = targetable_texture;
+    event.shader_resource_texture = shader_resource_texture;
+    event.owning_pool = owning_pool;
+    event.owner_slot = owner_slot;
+    event.replacement = replacement;
+    event.ref_count = ref_count;
+    event.thread_id = GetCurrentThreadId();
+    event.stack.fill(0);
+    event.name.fill(L'\0');
+
+    uint16_t stack_offset{};
+    if (direct_caller != 0) {
+        event.stack[0] = direct_caller;
+        stack_offset = 1;
+    }
+
+    if (capture_stack) {
+        event.stack_depth = stack_offset + RtlCaptureStackBackTrace(
+            1,
+            static_cast<DWORD>(event.stack.size() - stack_offset),
+            reinterpret_cast<void**>(event.stack.data() + stack_offset),
+            nullptr);
+    } else {
+        event.stack_depth = stack_offset;
+    }
+
+    if (name != nullptr) {
+        wcsncpy_s(event.name.data(), event.name.size(), name, _TRUNCATE);
+    }
+
+    event.committed_sequence.store(sequence, std::memory_order_release);
+}
+
+void* everspace2_create_render_target_hook(
+    void* pool,
+    void* command_list,
+    const void* desc,
+    uint32_t desc_hash,
+    const wchar_t* name)
+{
+    auto* result = g_everspace2_create_render_target_hook.call<void*>(
+        pool,
+        command_list,
+        desc,
+        desc_hash,
+        name);
+
+    if (result != nullptr) {
+        record_everspace2_pool_trace(
+            Everspace2PoolTraceKind::CreateTracked,
+            reinterpret_cast<uintptr_t>(result),
+            *reinterpret_cast<const uintptr_t*>(reinterpret_cast<uintptr_t>(result) + 0x08),
+            *reinterpret_cast<const uintptr_t*>(reinterpret_cast<uintptr_t>(result) + 0x10),
+            *reinterpret_cast<const uintptr_t*>(reinterpret_cast<uintptr_t>(result) + 0x20),
+            *reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(result) + 0x68),
+            name);
+    }
+
+    return result;
+}
+
+void* everspace2_ref_assignment_hook(void* owner_slot_ptr, void* replacement_ptr) {
+    const auto direct_caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const auto* profile = g_everspace2_active_profile;
+    if (profile == nullptr) {
+        return g_everspace2_ref_assignment_hook.call<void*>(owner_slot_ptr, replacement_ptr);
+    }
+
+    const auto expected_caller =
+        reinterpret_cast<uintptr_t>(utility::get_executable()) +
+        profile->preshadow_depth_assignment_return_rva;
+
+    if (direct_caller != expected_caller) {
+        return g_everspace2_ref_assignment_hook.call<void*>(owner_slot_ptr, replacement_ptr);
+    }
+
+    // ES2 can execute overlapping shadow-depth setup during the cutscene
+    // transition. TRefCountPtr assignment itself is not safe when two callers
+    // replace the same slot concurrently: both can capture and Release the same
+    // old pointer, consuming the render-target pool's final reference.
+    std::scoped_lock lock{g_everspace2_preshadow_depth_assignment_mutex};
+
+    const auto owner_slot = reinterpret_cast<uintptr_t>(owner_slot_ptr);
+    if (owner_slot == 0) {
+        return g_everspace2_ref_assignment_hook.call<void*>(owner_slot_ptr, replacement_ptr);
+    }
+
+    // This is TRefCountPtr<IPooledRenderTarget>::operator=. At entry, RCX is
+    // the destination TRefCountPtr and RDX is its replacement raw pointer.
+    // The old pointer is still valid until operator= releases it.
+    const auto pooled_target = *reinterpret_cast<const uintptr_t*>(owner_slot);
+    if (pooled_target == 0) {
+        return g_everspace2_ref_assignment_hook.call<void*>(owner_slot_ptr, replacement_ptr);
+    }
+
+    const auto owning_pool = *reinterpret_cast<const uintptr_t*>(pooled_target + 0x20);
+    if (owning_pool != 0) {
+        record_everspace2_pool_trace(
+            Everspace2PoolTraceKind::RefAssignment,
+            pooled_target,
+            *reinterpret_cast<const uintptr_t*>(pooled_target + 0x08),
+            *reinterpret_cast<const uintptr_t*>(pooled_target + 0x10),
+            owning_pool,
+            *reinterpret_cast<const uint32_t*>(pooled_target + 0x68),
+            nullptr,
+            direct_caller,
+            owner_slot,
+            reinterpret_cast<uintptr_t>(replacement_ptr),
+            false);
+    }
+
+    return g_everspace2_ref_assignment_hook.call<void*>(owner_slot_ptr, replacement_ptr);
+}
+
+void everspace2_final_release_trace(safetyhook::Context& ctx) {
+    const auto pooled_target = static_cast<uintptr_t>(ctx.rbx);
+    if (pooled_target == 0) {
+        return;
+    }
+
+    // At this exact instruction Release has decremented NumRefs to zero but
+    // has not run the destructor. The original caller is 0x28 bytes above the
+    // current stack pointer after Release's prologue.
+    const auto direct_caller = *reinterpret_cast<const uintptr_t*>(ctx.rsp + 0x28);
+    record_everspace2_pool_trace(
+        Everspace2PoolTraceKind::FinalRelease,
+        pooled_target,
+        *reinterpret_cast<const uintptr_t*>(pooled_target + 0x08),
+        *reinterpret_cast<const uintptr_t*>(pooled_target + 0x10),
+        *reinterpret_cast<const uintptr_t*>(pooled_target + 0x20),
+        0,
+        nullptr,
+        direct_caller);
+}
+
+const char* everspace2_pool_trace_kind_name(Everspace2PoolTraceKind kind) {
+    switch (kind) {
+    case Everspace2PoolTraceKind::CreateTracked:
+        return "create-tracked";
+    case Everspace2PoolTraceKind::RefAssignment:
+        return "ref-assignment";
+    case Everspace2PoolTraceKind::FinalRelease:
+        return "final-release";
+    default:
+        return "unknown";
+    }
+}
+
+void log_everspace2_pool_owner_history(uintptr_t pooled_target) {
+    const auto module_base = reinterpret_cast<uintptr_t>(utility::get_executable());
+    size_t matching_events{};
+
+    for (const auto& event : g_everspace2_pool_trace) {
+        const auto sequence = event.committed_sequence.load(std::memory_order_acquire);
+        if (sequence == 0 || event.pooled_target != pooled_target) {
+            continue;
+        }
+
+        ++matching_events;
+        const auto name = event.name[0] != L'\0'
+            ? utility::narrow(std::wstring{event.name.data()})
+            : std::string{"<none>"};
+
+        SPDLOG_ERROR(
+            "[Everspace2][PoolOwner] sequence={} kind={} object={:x} targetable={:x} "
+            "shader_resource={:x} owning_pool={:x} owner_slot={:x} replacement={:x} "
+            "refs={} thread={} name={} "
+            "stack=[{:x},{:x},{:x},{:x},{:x},{:x},{:x},{:x},{:x},{:x},{:x},{:x}] "
+            "rvas=[{:x},{:x},{:x},{:x}]",
+            sequence,
+            everspace2_pool_trace_kind_name(event.kind),
+            event.pooled_target,
+            event.targetable_texture,
+            event.shader_resource_texture,
+            event.owning_pool,
+            event.owner_slot,
+            event.replacement,
+            event.ref_count,
+            event.thread_id,
+            name,
+            event.stack[0],
+            event.stack[1],
+            event.stack[2],
+            event.stack[3],
+            event.stack[4],
+            event.stack[5],
+            event.stack[6],
+            event.stack[7],
+            event.stack[8],
+            event.stack[9],
+            event.stack[10],
+            event.stack[11],
+            event.stack[0] >= module_base ? event.stack[0] - module_base : 0,
+            event.stack[1] >= module_base ? event.stack[1] - module_base : 0,
+            event.stack[2] >= module_base ? event.stack[2] - module_base : 0,
+            event.stack[3] >= module_base ? event.stack[3] - module_base : 0);
+    }
+
+    if (matching_events == 0) {
+        SPDLOG_ERROR(
+            "[Everspace2][PoolOwner] No tracked allocation or final-release event remained for object {:x}; "
+            "this points to an overwrite of a still-live pooled object or an allocation older than the bounded trace",
+            pooled_target);
+    }
+}
+
+void everspace2_compute_memory_size_trace(safetyhook::Context& ctx) {
+    const auto pooled_target = (uintptr_t)ctx.rcx;
+    if (pooled_target == 0) {
+        return;
+    }
+
+    // The engine immediately reads these fields at this callsite, so avoid
+    // expensive Win32 pointer probes in a render-thread hot path.
+    const auto targetable_texture = *(const uintptr_t*)(pooled_target + 0x08);
+    const auto shader_resource_texture = *(const uintptr_t*)(pooled_target + 0x10);
+    const auto is_probable_process_pointer = [](uintptr_t pointer) {
+        constexpr uintptr_t minimum_user_object = 0x0000010000000000ULL;
+        constexpr uintptr_t maximum_user_address = 0x00007FFFFFFFFFFFULL;
+        return pointer == 0 ||
+            (pointer >= minimum_user_object &&
+             pointer <= maximum_user_address &&
+             (pointer & (alignof(void*) - 1)) == 0);
+    };
+
+    const auto targetable_bad = !is_probable_process_pointer(targetable_texture);
+    const auto shader_resource_bad = !is_probable_process_pointer(shader_resource_texture);
+
+    if (!targetable_bad && !shader_resource_bad) {
+        return;
+    }
+
+    const auto bad_key = pooled_target ^ targetable_texture ^ std::rotl(shader_resource_texture, 17);
+    if (g_everspace2_last_bad_pool_entry.exchange(bad_key, std::memory_order_relaxed) == bad_key) {
+        return;
+    }
+
+    SPDLOG_ERROR(
+        "[Everspace2][PoolTrace] corrupt pooled target observed sequence={} pool={:x} "
+        "targetable={:x} shader_resource={:x} targetable_bad={} shader_bad={} thread={}",
+        g_everspace2_pool_trace_sequence.load(std::memory_order_relaxed),
+        pooled_target,
+        targetable_texture,
+        shader_resource_texture,
+        targetable_bad,
+        shader_resource_bad,
+        GetCurrentThreadId());
+
+    log_everspace2_pool_owner_history(pooled_target);
+
+    if (const auto logger = spdlog::default_logger(); logger != nullptr) {
+        logger->flush();
+    }
+}
+
+void attempt_everspace2_pool_trace() {
+    if (!everspace2_is_current_game() ||
+        g_everspace2_pool_trace_attempted.exchange(true, std::memory_order_acq_rel))
+    {
+        return;
+    }
+
+    const auto module = utility::get_executable();
+    const auto* profile = everspace2_find_executable_profile(module);
+    if (profile == nullptr) {
+        SPDLOG_WARN(
+            "[Everspace2][PoolTrace] Disabled because the executable fingerprint does not match "
+            "a supported demo or retail build");
+        return;
+    }
+
+    const auto hook_address = (uintptr_t)module + profile->compute_memory_size_rva;
+    constexpr std::array<uint8_t, 13> expected{
+        0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x8B, 0x41, 0x54,
+    };
+
+    if (IsBadReadPtr((void*)hook_address, expected.size()) ||
+        std::memcmp((void*)hook_address, expected.data(), expected.size()) != 0)
+    {
+        SPDLOG_WARN(
+            "[Everspace2][PoolTrace] Disabled because FPooledRenderTarget::ComputeMemorySize "
+            "signature did not match at {:x}",
+            hook_address);
+        return;
+    }
+
+    const auto create_render_target_address =
+        reinterpret_cast<uintptr_t>(module) + profile->create_render_target_rva;
+    constexpr std::array<uint8_t, 13> create_render_target_expected{
+        0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41,
+    };
+
+    if (IsBadReadPtr((void*)create_render_target_address, create_render_target_expected.size()) ||
+        std::memcmp(
+            (void*)create_render_target_address,
+            create_render_target_expected.data(),
+            create_render_target_expected.size()) != 0)
+    {
+        SPDLOG_ERROR(
+            "[Everspace2][PoolTrace] CreateRenderTarget signature did not match at {:x}",
+            create_render_target_address);
+        return;
+    }
+
+    const auto final_release_address =
+        reinterpret_cast<uintptr_t>(module) + profile->final_release_path_rva;
+
+    if (IsBadReadPtr((void*)final_release_address, profile->final_release_signature.size()) ||
+        std::memcmp(
+            (void*)final_release_address,
+            profile->final_release_signature.data(),
+            profile->final_release_signature.size()) != 0)
+    {
+        SPDLOG_ERROR(
+            "[Everspace2][PoolTrace] FPooledRenderTarget final-release signature did not match at {:x}",
+            final_release_address);
+        return;
+    }
+
+    const auto ref_assignment_address =
+        reinterpret_cast<uintptr_t>(module) + profile->ref_assignment_rva;
+    constexpr std::array<uint8_t, 13> ref_assignment_expected{
+        0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x19,
+    };
+
+    if (IsBadReadPtr((void*)ref_assignment_address, ref_assignment_expected.size()) ||
+        std::memcmp(
+            (void*)ref_assignment_address,
+            ref_assignment_expected.data(),
+            ref_assignment_expected.size()) != 0)
+    {
+        SPDLOG_ERROR(
+            "[Everspace2][PoolTrace] TRefCountPtr assignment signature did not match at {:x}",
+            ref_assignment_address);
+        return;
+    }
+
+    const auto preshadow_assignment_call_address =
+        reinterpret_cast<uintptr_t>(module) +
+        profile->preshadow_depth_assignment_return_rva -
+        profile->preshadow_assignment_call_signature.size();
+
+    if (IsBadReadPtr(
+            reinterpret_cast<void*>(preshadow_assignment_call_address),
+            profile->preshadow_assignment_call_signature.size()) ||
+        std::memcmp(
+            reinterpret_cast<void*>(preshadow_assignment_call_address),
+            profile->preshadow_assignment_call_signature.data(),
+            profile->preshadow_assignment_call_signature.size()) != 0)
+    {
+        SPDLOG_ERROR(
+            "[Everspace2][PoolTrace] PreshadowCache assignment call signature did not match at {:x}",
+            preshadow_assignment_call_address);
+        return;
+    }
+
+    int32_t preshadow_assignment_displacement{};
+    std::memcpy(
+        &preshadow_assignment_displacement,
+        reinterpret_cast<void*>(preshadow_assignment_call_address + 1),
+        sizeof(preshadow_assignment_displacement));
+
+    const auto preshadow_assignment_target =
+        preshadow_assignment_call_address +
+        profile->preshadow_assignment_call_signature.size() +
+        preshadow_assignment_displacement;
+
+    if (preshadow_assignment_target != ref_assignment_address) {
+        SPDLOG_ERROR(
+            "[Everspace2][PoolTrace] PreshadowCache assignment call target mismatch "
+            "expected={:x} actual={:x}",
+            ref_assignment_address,
+            preshadow_assignment_target);
+        return;
+    }
+
+    uintptr_t world_cleanup_address{};
+    if (profile->world_cleanup_rva != 0) {
+        world_cleanup_address =
+            reinterpret_cast<uintptr_t>(module) + profile->world_cleanup_rva;
+
+        if (IsBadReadPtr(
+                reinterpret_cast<void*>(world_cleanup_address),
+                profile->world_cleanup_signature.size()) ||
+            std::memcmp(
+                reinterpret_cast<void*>(world_cleanup_address),
+                profile->world_cleanup_signature.data(),
+                profile->world_cleanup_signature.size()) != 0)
+        {
+            SPDLOG_ERROR(
+                "[Everspace2][WorldCleanup] FScene::OnWorldCleanup signature did not match at {:x}",
+                world_cleanup_address);
+            return;
+        }
+    }
+
+    g_everspace2_active_profile = profile;
+    g_everspace2_pool_trace_hook =
+        safetyhook::create_mid((void*)hook_address, &everspace2_compute_memory_size_trace);
+    g_everspace2_create_render_target_hook = safetyhook::create_inline(
+        reinterpret_cast<void*>(create_render_target_address),
+        &everspace2_create_render_target_hook);
+    g_everspace2_ref_assignment_hook =
+        safetyhook::create_inline(reinterpret_cast<void*>(ref_assignment_address), &everspace2_ref_assignment_hook);
+    g_everspace2_final_release_hook =
+        safetyhook::create_mid(reinterpret_cast<void*>(final_release_address), &everspace2_final_release_trace);
+    if (world_cleanup_address != 0) {
+        g_everspace2_world_cleanup_hook = safetyhook::create_inline(
+            reinterpret_cast<void*>(world_cleanup_address),
+            &everspace2_world_cleanup_hook);
+    }
+
+    if (!g_everspace2_pool_trace_hook ||
+        !g_everspace2_create_render_target_hook ||
+        !g_everspace2_ref_assignment_hook ||
+        !g_everspace2_final_release_hook ||
+        (world_cleanup_address != 0 && !g_everspace2_world_cleanup_hook))
+    {
+        SPDLOG_ERROR(
+            "[Everspace2][PoolTrace] Failed to install provenance hooks "
+            "observer={} create={} assignment={} final_release={} world_cleanup={}",
+            static_cast<bool>(g_everspace2_pool_trace_hook),
+            static_cast<bool>(g_everspace2_create_render_target_hook),
+            static_cast<bool>(g_everspace2_ref_assignment_hook),
+            static_cast<bool>(g_everspace2_final_release_hook),
+            world_cleanup_address == 0 || static_cast<bool>(g_everspace2_world_cleanup_hook));
+        return;
+    }
+
+    SPDLOG_INFO(
+        "[Everspace2][PoolTrace] Installed {} passive bounded owner trace "
+        "observer={:x} create={:x} assignment={:x} final_release={:x} world_cleanup={:x}; "
+        "the exact PreshadowCache depth assignment at return RVA 0x{:x} is serialized",
+        profile->name,
+        hook_address,
+        create_render_target_address,
+        ref_assignment_address,
+        final_release_address,
+        world_cleanup_address,
+        profile->preshadow_depth_assignment_return_rva);
+}
+
+bool everspace2_set_dedicated_ui_root(sdk::UObjectBase* object, bool rooted) {
+    if (object == nullptr) {
+        return false;
+    }
+
+    auto* object_array = sdk::FUObjectArray::get();
+    auto* object_item = object_array != nullptr ? object_array->get_object(object->get_internal_index()) : nullptr;
+
+    if (object_item == nullptr || object_item->get_object() != object) {
+        return false;
+    }
+
+    constexpr uint32_t root_set_flag = 1u << 30;
+
+    for (;;) {
+        const auto current = object_item->get_flags();
+        const auto desired = rooted ? current | root_set_flag : current & ~root_set_flag;
+
+        if (current == desired || object_item->compare_exchange_flags(current, desired)) {
+            return true;
+        }
+    }
+}
+
+void root_dedicated_ui_texture(sdk::UTexture* texture) {
+    if (texture == nullptr) {
+        return;
+    }
+
+    if (everspace2_is_current_game()) {
+        if (!everspace2_set_dedicated_ui_root(texture, true)) {
+            SPDLOG_ERROR("[Everspace2][UE5.5][SlateUI] Failed to root the persistent dedicated UI texture");
+        }
+        return;
+    }
+
+    texture->add_to_root();
+}
+
+void unroot_dedicated_ui_texture(sdk::UTexture* texture) {
+    if (texture == nullptr) {
+        return;
+    }
+
+    if (everspace2_is_current_game()) {
+        everspace2_set_dedicated_ui_root(texture, false);
+        return;
+    }
+
+    texture->remove_from_root();
+}
+
+bool pitpanic_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        // Cover both the demo and future/full Pit Panic executable names.
+        return exe_path && exe_path->find(L"PitPanic") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+bool windrose_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && exe_path->find(L"Windrose-Win64-Shipping") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+bool windrose_contains_i(std::wstring_view value, std::wstring_view needle) {
+    if (needle.empty()) {
+        return true;
+    }
+
+    return std::search(
+        value.begin(),
+        value.end(),
+        needle.begin(),
+        needle.end(),
+        [](wchar_t a, wchar_t b) {
+            return std::towlower(a) == std::towlower(b);
+        }) != value.end();
+}
+
+std::wstring windrose_object_full_name(void* object) {
+    if (object == nullptr || IsBadReadPtr(object, sizeof(void*) * 4)) {
+        return {};
+    }
+
+    try {
+        return ((sdk::UObjectBase*)object)->get_full_name();
+    } catch (...) {
+        return {};
+    }
+}
+
+bool windrose_hfsm_name_is_interesting(std::wstring_view name) {
+    return windrose_contains_i(name, L"BP_HFSM_") ||
+           windrose_contains_i(name, L"NegativeSpace") ||
+           windrose_contains_i(name, L"UILayoutTemplate") ||
+           windrose_contains_i(name, L"R5WidgetPool");
+}
+
+std::wstring windrose_hfsm_self_name(std::wstring_view full_name) {
+    if (full_name.empty()) {
+        return {};
+    }
+
+    const auto space = full_name.find(L' ');
+    const auto class_name = full_name.substr(0, space == std::wstring_view::npos ? full_name.size() : space);
+    std::wstring result{class_name};
+
+    if (space != std::wstring_view::npos && space + 1 < full_name.size()) {
+        auto object_path = full_name.substr(space + 1);
+        const auto leaf_start = object_path.find_last_of(L".:");
+        const auto leaf = object_path.substr(leaf_start == std::wstring_view::npos ? 0 : leaf_start + 1);
+
+        if (!leaf.empty() && leaf != class_name) {
+            result += L" ";
+            result += leaf;
+        }
+    }
+
+    return result;
+}
+
+enum class WindroseMetaUiClass {
+    Ignored,
+    Transient,
+    HardMenu,
+};
+
+const char* windrose_meta_ui_class_label(WindroseMetaUiClass value) {
+    switch (value) {
+    case WindroseMetaUiClass::HardMenu:
+        return "hard_menu";
+    case WindroseMetaUiClass::Transient:
+        return "transient";
+    default:
+        return "ignored";
+    }
+}
+
+WindroseMetaUiClass windrose_classify_hfsm_meta_ui(std::wstring_view self_name) {
+    if (self_name.empty()) {
+        return WindroseMetaUiClass::Ignored;
+    }
+
+    if (windrose_contains_i(self_name, L"BP_HFSM_FullscreenMap") ||
+        windrose_contains_i(self_name, L"BP_FullscreenMap"))
+    {
+        return WindroseMetaUiClass::Ignored;
+    }
+
+    static constexpr std::wstring_view hard_menu_targets[] = {
+        L"BP_HFSM_InventoryAndEquipment",
+        L"BP_HFSM_Discovery",
+        L"BP_HFSM_Progression",
+        L"BP_HFSM_Talents",
+        L"BP_HFSM_PlayerFlagShip",
+        L"BP_HFSM_Rarities",
+        L"BP_HFSM_ShipInventory",
+        L"BP_HFSM_ShipManager",
+        L"BP_HFSM_ShipDock",
+        L"BP_HFSM_LootStorage",
+        L"BP_HFSM_WaterLootStorage",
+        L"BP_HFSM_PosthumousContainer",
+        L"BP_HFSM_Storage",
+        L"BP_HFSM_Craft_",
+        L"BP_CraftUIMounter_",
+    };
+
+    for (const auto target : hard_menu_targets) {
+        if (windrose_contains_i(self_name, target)) {
+            return WindroseMetaUiClass::HardMenu;
+        }
+    }
+
+    static constexpr std::wstring_view transient_targets[] = {
+        L"BP_HFSM_MetaUI",
+        L"BP_HFSM_MetaUIBuffer",
+        L"BP_HFSM_Adventure",
+        L"BP_HFSM_ShipInteraction",
+        L"BP_HFSM_MetaInteraction",
+        L"BP_NPC_ViewAll_SC",
+        L"WBP_NPCView_Screen",
+        L"WBP_NPCAssignment_",
+        L"Cutscene",
+        L"Cinematic",
+        L"Dialogue",
+        L"Dialog",
+        L"BP_HFSM_OverlayShow",
+    };
+
+    for (const auto target : transient_targets) {
+        if (windrose_contains_i(self_name, target)) {
+            return WindroseMetaUiClass::Transient;
+        }
+    }
+
+    return WindroseMetaUiClass::Ignored;
+}
+
+void windrose_note_hfsm_transition(void* object, bool entering, const char* source) {
+    if (!windrose_is_current_game()) {
+        return;
+    }
+
+    const auto name = windrose_object_full_name(object);
+    if (name.empty()) {
+        return;
+    }
+
+    const auto self_name = windrose_hfsm_self_name(name);
+    const bool interesting = windrose_hfsm_name_is_interesting(name);
+    const auto meta_ui_class = windrose_classify_hfsm_meta_ui(self_name);
+
+    if (interesting || meta_ui_class != WindroseMetaUiClass::Ignored) {
+        SPDLOG_INFO(
+            "[Windrose][HFSM] {} {} class={} self={} object={}",
+            source != nullptr ? source : "unknown",
+            entering ? "enter" : "exit",
+            windrose_meta_ui_class_label(meta_ui_class),
+            utility::narrow(self_name),
+            utility::narrow(name));
+    }
+
+    if (meta_ui_class == WindroseMetaUiClass::Ignored) {
+        return;
+    }
+
+    auto& vr = VR::get();
+    if (vr != nullptr) {
+        vr->set_windrose_meta_ui_2d_state_active(
+            utility::narrow(self_name.empty() ? name : self_name),
+            reinterpret_cast<uintptr_t>(object),
+            source != nullptr ? source : "unknown",
+            meta_ui_class == WindroseMetaUiClass::HardMenu,
+            entering);
+    }
+}
+
+std::optional<uintptr_t> windrose_resolve_hfsm_symbol(
+    const char* label,
+    uintptr_t expected_rva,
+    const char* pattern)
+{
+    const auto module = utility::get_executable();
+    const auto scanned = utility::scan(module, pattern);
+
+    if (scanned) {
+        SPDLOG_INFO("[Windrose][HFSM] Resolved {} by signature at {:x} (rva {:x})", label, *scanned, *scanned - (uintptr_t)module);
+        return scanned;
+    }
+
+    SPDLOG_WARN("[Windrose][HFSM] Failed to resolve {} by update-proof signature (expected old RVA {:x}, not hooking stale RVA)", label, expected_rva);
+    return std::nullopt;
+}
+
+void avowed_native_fix_gate_reset(const char* reason) {
+    if (!avowed_is_current_game()) {
+        return;
+    }
+
+    std::scoped_lock _{g_avowed_native_fix_gate_mutex};
+
+    if (g_avowed_native_fix_gate.has_baseline || g_avowed_native_fix_gate.ready || g_avowed_native_fix_gate.stable_frames != 0) {
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[Avowed][NativeStereoFix] Resetting render transition gate: {}",
+            reason != nullptr ? reason : "<unknown>");
+    }
+
+    g_avowed_native_fix_gate = {};
+}
+
+uintptr_t avowed_try_get_native_resource(FRHITexture2D* texture) {
+    if (!avowed_is_current_game() || texture == nullptr || IsBadReadPtr(texture, sizeof(void*))) {
+        return 0;
+    }
+
+    try {
+        const auto native = texture->get_native_resource();
+
+        if (native == nullptr || IsBadReadPtr(native, sizeof(void*))) {
+            return 0;
+        }
+
+        return (uintptr_t)native;
+    } catch (...) {
+        return 0;
+    }
+}
+
+bool avowed_native_fix_gate_update(
+    uintptr_t scene,
+    uintptr_t render_target,
+    uintptr_t scene_capture_render_target,
+    uintptr_t scene_capture_native,
+    bool prerequisites_ready,
+    uint32_t* out_stable_frames = nullptr,
+    uint32_t* out_required_stable_frames = nullptr)
+{
+    if (!avowed_is_current_game()) {
+        return true;
+    }
+
+    std::scoped_lock _{g_avowed_native_fix_gate_mutex};
+
+    if (out_stable_frames != nullptr) {
+        *out_stable_frames = g_avowed_native_fix_gate.stable_frames;
+    }
+
+    if (out_required_stable_frames != nullptr) {
+        *out_required_stable_frames = g_avowed_native_fix_gate.required_stable_frames != 0
+            ? g_avowed_native_fix_gate.required_stable_frames
+            : AVOWED_NATIVE_FIX_STABLE_FRAMES;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+
+    if (g_avowed_native_fix_gate.last_update.time_since_epoch().count() != 0) {
+        const auto render_gap = now - g_avowed_native_fix_gate.last_update;
+
+        if (render_gap > AVOWED_NATIVE_FIX_RENDER_GAP) {
+            const auto can_fast_reacquire = g_avowed_native_fix_gate.had_ready_baseline || g_avowed_native_fix_gate.ready;
+            g_avowed_native_fix_gate.ready = false;
+            g_avowed_native_fix_gate.stable_frames = 0;
+            g_avowed_native_fix_gate.required_stable_frames =
+                can_fast_reacquire ? AVOWED_NATIVE_FIX_FAST_REACQUIRE_STABLE_FRAMES : AVOWED_NATIVE_FIX_STABLE_FRAMES;
+            g_avowed_native_fix_gate.fast_reacquire = can_fast_reacquire;
+            const auto requested_hold_duration = can_fast_reacquire
+                ? std::chrono::steady_clock::duration{AVOWED_NATIVE_FIX_FAST_REACQUIRE_HOLD}
+                : std::chrono::steady_clock::duration{AVOWED_NATIVE_FIX_TRANSITION_HOLD};
+            g_avowed_native_fix_gate.hold_until = std::max(
+                g_avowed_native_fix_gate.hold_until,
+                now + requested_hold_duration);
+
+            SPDLOG_INFO_EVERY_N_SEC(
+                2,
+                "[Avowed][NativeStereoFix] Render gap {:.0f}ms detected; holding one view for transition safety fast_reacquire={}",
+                std::chrono::duration<double, std::milli>(render_gap).count(),
+                can_fast_reacquire);
+        }
+    }
+
+    g_avowed_native_fix_gate.last_update = now;
+
+    if (!prerequisites_ready || scene == 0 || render_target == 0 || scene_capture_render_target == 0) {
+        if (g_avowed_native_fix_gate.has_baseline || g_avowed_native_fix_gate.ready || g_avowed_native_fix_gate.stable_frames != 0) {
+            SPDLOG_INFO_EVERY_N_SEC(
+                2,
+                "[Avowed][NativeStereoFix] Holding one view while render targets are unavailable scene={:x} target={:x} capture_rt={:x} capture_native={:x} prereqs={}",
+                scene,
+                render_target,
+                scene_capture_render_target,
+                scene_capture_native,
+                prerequisites_ready);
+        }
+
+        if (g_avowed_native_fix_gate.had_ready_baseline || g_avowed_native_fix_gate.ready) {
+            if (!g_avowed_native_fix_gate.targets_missing) {
+                g_avowed_native_fix_gate.missing_since = now;
+            }
+
+            // Inventory/menu transitions briefly remove Avowed's capture target. Keep the last
+            // known-good gameplay baseline so reacquiring the same path can use a short gate.
+            g_avowed_native_fix_gate.targets_missing = true;
+            g_avowed_native_fix_gate.ready = false;
+            g_avowed_native_fix_gate.stable_frames = 0;
+            g_avowed_native_fix_gate.fast_reacquire = false;
+            g_avowed_native_fix_gate.required_stable_frames = AVOWED_NATIVE_FIX_STABLE_FRAMES;
+        } else {
+            g_avowed_native_fix_gate = {};
+        }
+
+        if (out_stable_frames != nullptr) {
+            *out_stable_frames = g_avowed_native_fix_gate.stable_frames;
+        }
+
+        if (out_required_stable_frames != nullptr) {
+            *out_required_stable_frames = g_avowed_native_fix_gate.required_stable_frames != 0
+                ? g_avowed_native_fix_gate.required_stable_frames
+                : AVOWED_NATIVE_FIX_STABLE_FRAMES;
+        }
+
+        return false;
+    }
+
+    const auto baseline_changed =
+        !g_avowed_native_fix_gate.has_baseline ||
+        g_avowed_native_fix_gate.scene != scene ||
+        g_avowed_native_fix_gate.render_target != render_target ||
+        g_avowed_native_fix_gate.scene_capture_render_target != scene_capture_render_target ||
+        g_avowed_native_fix_gate.scene_capture_native != scene_capture_native;
+
+    if (baseline_changed) {
+        const auto missing_duration = g_avowed_native_fix_gate.missing_since.time_since_epoch().count() != 0
+            ? now - g_avowed_native_fix_gate.missing_since
+            : std::chrono::steady_clock::duration{};
+        const auto matches_last_ready_path =
+            g_avowed_native_fix_gate.had_ready_baseline &&
+            g_avowed_native_fix_gate.last_ready_scene == scene &&
+            g_avowed_native_fix_gate.last_ready_render_target == render_target;
+        const auto can_fast_reacquire =
+            g_avowed_native_fix_gate.targets_missing &&
+            matches_last_ready_path &&
+            missing_duration <= AVOWED_NATIVE_FIX_FAST_REACQUIRE_MAX_MISSING;
+
+        g_avowed_native_fix_gate.scene = scene;
+        g_avowed_native_fix_gate.render_target = render_target;
+        g_avowed_native_fix_gate.scene_capture_render_target = scene_capture_render_target;
+        g_avowed_native_fix_gate.scene_capture_native = scene_capture_native;
+        const auto requested_hold_duration = can_fast_reacquire
+            ? std::chrono::steady_clock::duration{AVOWED_NATIVE_FIX_FAST_REACQUIRE_HOLD}
+            : std::chrono::steady_clock::duration{AVOWED_NATIVE_FIX_TRANSITION_HOLD};
+        const auto requested_hold_until = now + requested_hold_duration;
+        g_avowed_native_fix_gate.hold_until = can_fast_reacquire
+            ? requested_hold_until
+            : std::max(g_avowed_native_fix_gate.hold_until, requested_hold_until);
+        g_avowed_native_fix_gate.stable_frames = 0;
+        g_avowed_native_fix_gate.required_stable_frames =
+            can_fast_reacquire ? AVOWED_NATIVE_FIX_FAST_REACQUIRE_STABLE_FRAMES : AVOWED_NATIVE_FIX_STABLE_FRAMES;
+        g_avowed_native_fix_gate.ready = false;
+        g_avowed_native_fix_gate.has_baseline = true;
+        g_avowed_native_fix_gate.targets_missing = false;
+        g_avowed_native_fix_gate.missing_since = {};
+        g_avowed_native_fix_gate.fast_reacquire = can_fast_reacquire;
+
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[Avowed][NativeStereoFix] Render transition detected; holding one view scene={:x} target={:x} capture_rt={:x} capture_native={:x} fast_reacquire={} stable_required={}",
+            scene,
+            render_target,
+            scene_capture_render_target,
+            scene_capture_native,
+            can_fast_reacquire,
+            g_avowed_native_fix_gate.required_stable_frames);
+
+        if (out_required_stable_frames != nullptr) {
+            *out_required_stable_frames = g_avowed_native_fix_gate.required_stable_frames;
+        }
+
+        return false;
+    }
+
+    if (g_avowed_native_fix_gate.targets_missing) {
+        const auto missing_duration = g_avowed_native_fix_gate.missing_since.time_since_epoch().count() != 0
+            ? now - g_avowed_native_fix_gate.missing_since
+            : std::chrono::steady_clock::duration{};
+        const auto matches_last_ready_path =
+            g_avowed_native_fix_gate.had_ready_baseline &&
+            g_avowed_native_fix_gate.last_ready_scene == scene &&
+            g_avowed_native_fix_gate.last_ready_render_target == render_target;
+        const auto can_fast_reacquire =
+            matches_last_ready_path &&
+            missing_duration <= AVOWED_NATIVE_FIX_FAST_REACQUIRE_MAX_MISSING;
+
+        const auto requested_hold_duration = can_fast_reacquire
+            ? std::chrono::steady_clock::duration{AVOWED_NATIVE_FIX_FAST_REACQUIRE_HOLD}
+            : std::chrono::steady_clock::duration{AVOWED_NATIVE_FIX_TRANSITION_HOLD};
+        const auto requested_hold_until = now + requested_hold_duration;
+        g_avowed_native_fix_gate.hold_until = can_fast_reacquire
+            ? requested_hold_until
+            : std::max(g_avowed_native_fix_gate.hold_until, requested_hold_until);
+        g_avowed_native_fix_gate.ready = false;
+        g_avowed_native_fix_gate.stable_frames = 0;
+        g_avowed_native_fix_gate.required_stable_frames =
+            can_fast_reacquire ? AVOWED_NATIVE_FIX_FAST_REACQUIRE_STABLE_FRAMES : AVOWED_NATIVE_FIX_STABLE_FRAMES;
+        g_avowed_native_fix_gate.targets_missing = false;
+        g_avowed_native_fix_gate.missing_since = {};
+        g_avowed_native_fix_gate.fast_reacquire = can_fast_reacquire;
+
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[Avowed][NativeStereoFix] Render targets reacquired on existing baseline fast_reacquire={} stable_required={}",
+            can_fast_reacquire,
+            g_avowed_native_fix_gate.required_stable_frames);
+    }
+
+    if (g_avowed_native_fix_gate.hold_until > now) {
+        if (out_stable_frames != nullptr) {
+            *out_stable_frames = 0;
+        }
+
+        if (out_required_stable_frames != nullptr) {
+            *out_required_stable_frames = g_avowed_native_fix_gate.required_stable_frames;
+        }
+
+        g_avowed_native_fix_gate.ready = false;
+        g_avowed_native_fix_gate.stable_frames = 0;
+
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[Avowed][NativeStereoFix] Holding one view during transition grace window remaining={:.1f}s",
+            std::chrono::duration<double>(g_avowed_native_fix_gate.hold_until - now).count());
+
+        return false;
+    }
+
+    if (!g_avowed_native_fix_gate.ready) {
+        const auto required_stable_frames = g_avowed_native_fix_gate.required_stable_frames != 0
+            ? g_avowed_native_fix_gate.required_stable_frames
+            : AVOWED_NATIVE_FIX_STABLE_FRAMES;
+
+        if (g_avowed_native_fix_gate.stable_frames < required_stable_frames) {
+            ++g_avowed_native_fix_gate.stable_frames;
+        }
+
+        if (out_stable_frames != nullptr) {
+            *out_stable_frames = g_avowed_native_fix_gate.stable_frames;
+        }
+
+        if (out_required_stable_frames != nullptr) {
+            *out_required_stable_frames = required_stable_frames;
+        }
+
+        if (g_avowed_native_fix_gate.stable_frames >= required_stable_frames) {
+            g_avowed_native_fix_gate.ready = true;
+            g_avowed_native_fix_gate.had_ready_baseline = true;
+            g_avowed_native_fix_gate.last_ready_scene = scene;
+            g_avowed_native_fix_gate.last_ready_render_target = render_target;
+            SPDLOG_INFO(
+                "[Avowed][NativeStereoFix] Render transition stabilized after {} frames; enabling two-view native fix fast_reacquire={}",
+                g_avowed_native_fix_gate.stable_frames,
+                g_avowed_native_fix_gate.fast_reacquire);
+        }
+    }
+
+    return g_avowed_native_fix_gate.ready;
+}
+
+bool avowed_native_fix_gate_ready(uint32_t* out_stable_frames = nullptr, uint32_t* out_required_stable_frames = nullptr) {
+    if (!avowed_is_current_game()) {
+        return true;
+    }
+
+    std::scoped_lock _{g_avowed_native_fix_gate_mutex};
+
+    if (out_stable_frames != nullptr) {
+        *out_stable_frames = g_avowed_native_fix_gate.stable_frames;
+    }
+
+    if (out_required_stable_frames != nullptr) {
+        *out_required_stable_frames = g_avowed_native_fix_gate.required_stable_frames != 0
+            ? g_avowed_native_fix_gate.required_stable_frames
+            : AVOWED_NATIVE_FIX_STABLE_FRAMES;
+    }
+
+    return g_avowed_native_fix_gate.ready;
+}
+
+bool is_ue_5_7_or_newer() {
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+    if (str_version != "0.00") {
+        if (str_version.starts_with("5.7") || str_version.starts_with("5.8") || str_version.starts_with("5.9")) {
+            return true;
+        }
+    }
+
+    return disk_version.dwFileVersionMS >= 0x50007;
+}
+
+bool is_ue_4_27_runtime() {
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+    if (str_version != "0.00") {
+        return str_version.starts_with("4.27");
+    }
+
+    return HIWORD(disk_version.dwFileVersionMS) == 4 && LOWORD(disk_version.dwFileVersionMS) == 27;
+}
+
+bool prospi_is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+
+        if (!exe_path) {
+            return false;
+        }
+
+        auto lowered = *exe_path;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(std::towlower(ch));
+        });
+
+        return lowered.find(L"prospi-win64-shipping") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+bool is_ue_5_8_or_newer() {
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+    if (str_version != "0.00") {
+        if (str_version.starts_with("5.8") || str_version.starts_with("5.9")) {
+            return true;
+        }
+    }
+
+    return disk_version.dwFileVersionMS >= 0x50008;
+}
+
+bool is_ue_5_8() {
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+    if (str_version != "0.00") {
+        return str_version.starts_with("5.8");
+    }
+
+    return disk_version.dwFileVersionMS == 0x50008;
+}
+
+
+bool is_ue_5_6_or_newer() {
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+    if (str_version != "0.00") {
+        if (str_version.starts_with("5.6") || str_version.starts_with("5.7") || str_version.starts_with("5.8") || str_version.starts_with("5.9")) {
+            return true;
+        }
+    }
+
+    return disk_version.dwFileVersionMS >= 0x50006;
+}
+
+bool is_ue_5_1_dx12_backend() {
+    if (g_framework == nullptr || !g_framework->is_dx12()) {
+        return false;
+    }
+
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+    if (str_version != "0.00") {
+        return str_version.starts_with("5.1");
+    }
+
+    return disk_version.dwFileVersionMS >= 0x50001 && disk_version.dwFileVersionMS < 0x50002;
+}
+
+bool is_ue_5_1_dx_backend() {
+    if (g_framework == nullptr || (!g_framework->is_dx12() && !g_framework->is_dx11())) {
+        return false;
+    }
+
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+    if (str_version != "0.00") {
+        return str_version.starts_with("5.1");
+    }
+
+    return disk_version.dwFileVersionMS >= 0x50001 && disk_version.dwFileVersionMS < 0x50002;
+}
+
+bool is_ue_5_2_dx_backend() {
+    if (g_framework == nullptr || (!g_framework->is_dx12() && !g_framework->is_dx11())) {
+        return false;
+    }
+
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+    if (str_version != "0.00") {
+        return str_version.starts_with("5.2");
+    }
+
+    return disk_version.dwFileVersionMS >= 0x50002 && disk_version.dwFileVersionMS < 0x50003;
+}
+
+bool is_ue_5_3_dx_backend() {
+    if (g_framework == nullptr || (!g_framework->is_dx12() && !g_framework->is_dx11())) {
+        return false;
+    }
+
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+    if (str_version != "0.00") {
+        return str_version.starts_with("5.3");
+    }
+
+    return disk_version.dwFileVersionMS >= 0x50003 && disk_version.dwFileVersionMS < 0x50004;
+}
+
+bool is_ue_5_4_runtime() {
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+    if (str_version != "0.00") {
+        return str_version.starts_with("5.4");
+    }
+
+    return disk_version.dwFileVersionMS >= 0x50004 && disk_version.dwFileVersionMS < 0x50005;
+}
+
+bool is_ue_5_4_dx_backend() {
+    if (g_framework == nullptr || (!g_framework->is_dx12() && !g_framework->is_dx11())) {
+        return false;
+    }
+
+    return is_ue_5_4_runtime();
+}
+
+bool is_ue_5_5_runtime() {
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+    if (str_version != "0.00") {
+        return str_version.starts_with("5.5");
+    }
+
+    return disk_version.dwFileVersionMS >= 0x50005 && disk_version.dwFileVersionMS < 0x50006;
+}
+
+bool is_ue_5_5_dx_backend() {
+    if (g_framework == nullptr || (!g_framework->is_dx12() && !g_framework->is_dx11())) {
+        return false;
+    }
+
+    return is_ue_5_5_runtime();
+}
+
+bool is_ue_5_5_dx12_backend() {
+    if (g_framework == nullptr || !g_framework->is_dx12()) {
+        return false;
+    }
+
+    return is_ue_5_5_runtime();
+}
+
+bool is_ue_5_6_dx12_backend() {
+    if (g_framework == nullptr || !g_framework->is_dx12()) {
+        return false;
+    }
+
+    static const auto disk_version = sdk::get_file_version_info();
+    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+    if (str_version != "0.00") {
+        return str_version.starts_with("5.6");
+    }
+
+    return disk_version.dwFileVersionMS >= 0x50006 && disk_version.dwFileVersionMS < 0x50007;
+}
+
+bool ue56_dx12_try_get_native_resource(FRHITexture2D* texture, const char* source, ID3D12Resource** out_native = nullptr, D3D12_RESOURCE_DESC* out_desc = nullptr) {
+    if (out_native != nullptr) {
+        *out_native = nullptr;
+    }
+
+    if (out_desc != nullptr) {
+        *out_desc = {};
+    }
+
+    if (!is_ue_5_6_dx12_backend()) {
+        return true;
+    }
+
+    if (texture == nullptr || IsBadReadPtr(texture, sizeof(void*))) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.6][RT] {} candidate is not readable yet: tex={:x}",
+            source != nullptr ? source : "<unknown>", (uintptr_t)texture);
+        return false;
+    }
+
+    void* vtable = nullptr;
+
+    try {
+        vtable = *(void**)texture;
+    } catch (...) {
+        return false;
+    }
+
+    if (vtable == nullptr || IsBadReadPtr(vtable, sizeof(void*))) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.6][RT] {} candidate has no readable vtable: tex={:x} vtable={:x}",
+            source != nullptr ? source : "<unknown>", (uintptr_t)texture, (uintptr_t)vtable);
+        return false;
+    }
+
+    {
+        std::scoped_lock _{g_ue56_rt_probe_mutex};
+        if (const auto it = g_ue56_native_resource_probe_cache.find((uintptr_t)vtable);
+            it != g_ue56_native_resource_probe_cache.end() && !it->second)
+        {
+            return false;
+        }
+    }
+
+    // UE 5.6 can expose Slate/viewport FRHITexture candidates whose native-resource
+    // vtable discovery executes unsafe render-thread thunks. Do not probe them from
+    // the fallback path; let the D3D12 backbuffer/texture hooks discover the scene.
+    SPDLOG_WARNING_EVERY_N_SEC(2, "[UE5.6][RT] Refusing unsafe FRHITexture::GetNativeResource probing for {} candidate: tex={:x} vtable={:x}",
+        source != nullptr ? source : "<unknown>", (uintptr_t)texture, (uintptr_t)vtable);
+    {
+        std::scoped_lock _{g_ue56_rt_probe_mutex};
+        g_ue56_native_resource_probe_cache[(uintptr_t)vtable] = false;
+    }
+    return false;
+}
+
+bool is_ue57_dx11_backend() {
+    return is_ue_5_7_or_newer() && g_framework != nullptr && g_framework->is_dx11();
+}
+
+bool supports_ue57_dedicated_ui_target() {
+    if (!is_ue_5_7_or_newer() || g_framework == nullptr) {
+        return false;
+    }
+
+    return g_framework->is_dx12() || g_framework->is_dx11();
+}
+
+bool supports_ue55_dedicated_ui_target_for_current_game() {
+    // These UE5.5 titles expose a valid Slate UI texture but route Slate to the
+    // wrong target, leaving the HUD clipped in the upper-left/left-eye path.
+    // Keep this allowlisted and DX12-only until more UE5.5 games validate it.
+    return (aphelion_is_current_game() ||
+            ark_ascended_is_current_game() ||
+            mechwarrior_clans_is_current_game() ||
+            everspace2_is_current_game() ||
+            directive8020_is_current_game() ||
+            everwind_is_current_game() ||
+            is_deadzone_ue56_executable()) &&
+        g_framework != nullptr &&
+        g_framework->is_dx12() &&
+        !is_ue_5_7_or_newer();
+}
+
+bool supports_dedicated_ui_target_for_current_game() {
+    return supports_ue57_dedicated_ui_target() || supports_ue55_dedicated_ui_target_for_current_game();
+}
+
+bool should_preserve_promoted_ue55_slate_target() {
+    return mechwarrior_clans_is_current_game() || everwind_is_current_game() || is_deadzone_ue56_executable();
+}
+
+bool is_probable_ue57_dx11_texture_desc_prepare_function(uintptr_t fn) {
+    if (fn == 0 || IsBadReadPtr((void*)fn, 0x80)) {
+        return false;
+    }
+
+    try {
+        // D3D11 UE 5.7 can put a descriptor prepare/copy helper before the real
+        // create wrapper. Calling that helper with the create signature is unsafe.
+        return utility::scan(fn, 0x100, "0F B6 42 32").has_value()
+            && utility::scan(fn, 0x100, "48 83 C2 38").has_value()
+            && (utility::scan(fn, 0x100, "0F 10 42 08").has_value() ||
+                utility::scan(fn, 0x100, "48 8B 02").has_value() ||
+                utility::scan(fn, 0x100, "48 8B 42 24").has_value());
+    } catch (...) {
+        return false;
+    }
+}
+
+void log_engine_render_timing_if_needed() {
+    if (!is_ue_5_7_or_newer()) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+
+    if (g_engine_render_last_log.time_since_epoch().count() == 0) {
+        g_engine_render_last_log = now;
+        return;
+    }
+
+    if (now - g_engine_render_last_log < ENGINE_RENDER_TIMING_LOG_INTERVAL) {
+        return;
+    }
+
+    if (g_begin_render_viewfamily_real_timing.count == 0 &&
+        g_begin_render_viewfamily_timing.count == 0 &&
+        g_prerender_viewfamily_rt_timing.count == 0)
+    {
+        g_engine_render_last_log = now;
+        return;
+    }
+
+    auto vr = VR::get();
+    const auto hmd_active = vr != nullptr && vr->is_hmd_active();
+    const auto native_stereo = vr != nullptr && vr->is_native_stereo_fix_enabled();
+
+    spdlog::info(
+        "[UE57][engine-render-profiler] begin_render_viewfamily_real avg={:.2f}ms max={:.2f}ms n={} begin_render_viewfamily avg={:.2f}ms max={:.2f}ms n={} prerender_viewfamily_rt avg={:.2f}ms max={:.2f}ms n={} hmd={} native_stereo={}",
+        g_begin_render_viewfamily_real_timing.avg(),
+        g_begin_render_viewfamily_real_timing.max_ms,
+        g_begin_render_viewfamily_real_timing.count,
+        g_begin_render_viewfamily_timing.avg(),
+        g_begin_render_viewfamily_timing.max_ms,
+        g_begin_render_viewfamily_timing.count,
+        g_prerender_viewfamily_rt_timing.avg(),
+        g_prerender_viewfamily_rt_timing.max_ms,
+        g_prerender_viewfamily_rt_timing.count,
+        hmd_active,
+        native_stereo
+    );
+
+    g_engine_render_last_log = now;
+    g_begin_render_viewfamily_real_timing.reset();
+    g_begin_render_viewfamily_timing.reset();
+    g_prerender_viewfamily_rt_timing.reset();
+}
+
+bool should_profile_engine_render_timing() {
+    const auto vr = VR::get();
+    return is_ue_5_7_or_newer() && vr != nullptr && vr->is_hitch_diagnostics_enabled();
+}
+
+bool shf_is_valid_texture_with_vtable(FRHITexture2D* texture, void* required_vtable) {
+    if (texture == nullptr || required_vtable == nullptr || IsBadReadPtr(texture, sizeof(void*))) {
+        return false;
+    }
+
+    void* vtable{};
+
+    try {
+        vtable = *(void**)texture;
+    } catch (...) {
+        return false;
+    }
+
+    if (vtable != required_vtable) {
+        return false;
+    }
+
+    FRHITexture2D::set_vtable(vtable);
+    return true;
+}
+
+std::optional<D3D12_RESOURCE_DESC> shf_try_get_d3d12_desc(FRHITexture2D* texture) {
+    if (texture == nullptr) {
+        return std::nullopt;
+    }
+
+    try {
+        const auto native = (ID3D12Resource*)texture->get_native_resource();
+
+        if (native == nullptr || IsBadReadPtr(native, sizeof(void*))) {
+            return std::nullopt;
+        }
+
+        return native->GetDesc();
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+bool is_probable_d3d_native_resource(void* native) {
+    if (native == nullptr || IsBadReadPtr(native, sizeof(void*))) {
+        return false;
+    }
+
+    void* vtable{};
+
+    try {
+        vtable = *(void**)native;
+    } catch (...) {
+        return false;
+    }
+
+    if (vtable == nullptr || IsBadReadPtr(vtable, sizeof(void*))) {
+        return false;
+    }
+
+    const auto module = utility::get_module_within(vtable);
+    if (!module) {
+        return false;
+    }
+
+    const auto module_path = utility::get_module_path(*module);
+    if (!module_path) {
+        return false;
+    }
+
+    auto module_path_lower = std::string(*module_path);
+    std::transform(module_path_lower.begin(), module_path_lower.end(), module_path_lower.begin(), ::tolower);
+    return module_path_lower.ends_with("d3d12.dll") ||
+        module_path_lower.ends_with("d3d12core.dll") ||
+        module_path_lower.ends_with("dxgi.dll") ||
+        module_path_lower.ends_with("d3d12sdklayers.dll");
+}
+
+std::optional<uintptr_t> ue55_find_texture_desc_offset(FRHITexture2D* texture) {
+    if (texture == nullptr || IsBadReadPtr(texture, sizeof(void*))) {
+        return std::nullopt;
+    }
+
+    const auto texture_address = (uintptr_t)texture;
+    constexpr std::array<uintptr_t, 2> desc_offsets{0x20, 0xf0};
+
+    for (const auto desc_offset : desc_offsets) {
+        if (texture_address + desc_offset < texture_address ||
+            IsBadReadPtr((void*)(texture_address + desc_offset), 0x38)) {
+            continue;
+        }
+
+        const auto extent_x = *(const int32_t*)(texture_address + desc_offset + 0x24);
+        const auto extent_y = *(const int32_t*)(texture_address + desc_offset + 0x28);
+        const auto num_mips = *(const uint8_t*)(texture_address + desc_offset + 0x30);
+        const auto num_samples = *(const uint8_t*)(texture_address + desc_offset + 0x31);
+        const auto dimension = *(const uint8_t*)(texture_address + desc_offset + 0x32);
+        const auto format = *(const uint8_t*)(texture_address + desc_offset + 0x33);
+
+        if (extent_x <= 0 || extent_y <= 0 || extent_x > 65536 || extent_y > 65536) {
+            continue;
+        }
+
+        if (num_mips == 0 || num_mips > 32) {
+            continue;
+        }
+
+        if (!(num_samples == 1 || num_samples == 2 || num_samples == 4 || num_samples == 8 || num_samples == 16)) {
+            continue;
+        }
+
+        if (dimension > 8 || format == 0 || format > 128) {
+            continue;
+        }
+
+        return desc_offset;
+    }
+
+    return std::nullopt;
+}
+
+bool ue55_dx12_try_get_native_resource_direct(
+    FRHITexture2D* texture,
+    const char* source,
+    ID3D12Resource** out_native = nullptr,
+    D3D12_RESOURCE_DESC* out_desc = nullptr)
+{
+    if (out_native != nullptr) {
+        *out_native = nullptr;
+    }
+
+    if (out_desc != nullptr) {
+        *out_desc = {};
+    }
+
+    if (texture == nullptr || IsBadReadPtr(texture, sizeof(void*))) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.5][SlateUI] {} candidate is not readable: tex={:x}",
+            source != nullptr ? source : "<unknown>", (uintptr_t)texture);
+        return false;
+    }
+
+    void** vtable{};
+
+    try {
+        vtable = *(void***)texture;
+    } catch (...) {
+        return false;
+    }
+
+    if (vtable == nullptr || IsBadReadPtr(vtable, sizeof(void*) * 6)) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.5][SlateUI] {} candidate has no readable vtable: tex={:x} vtable={:x}",
+            source != nullptr ? source : "<unknown>", (uintptr_t)texture, (uintptr_t)vtable);
+        return false;
+    }
+
+    const auto desc_offset = ue55_find_texture_desc_offset(texture);
+    if (!desc_offset) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.5][SlateUI] refusing {} candidate without a UE5.5/5.6 FRHITextureDesc: tex={:x}",
+            source != nullptr ? source : "<unknown>", (uintptr_t)texture);
+        return false;
+    }
+
+    const std::array<size_t, 2> direct_slots = *desc_offset == 0xf0
+        ? std::array<size_t, 2>{5ull, 4ull}
+        : std::array<size_t, 2>{4ull, 5ull};
+
+    for (const auto slot : direct_slots) {
+        using GetNativeResourceFn = void* (*)(const FRHITexture2D*);
+        const auto fn = (GetNativeResourceFn)vtable[slot];
+
+        if (fn == nullptr || IsBadReadPtr((void*)fn, 1) || !utility::get_module_within((void*)fn).has_value()) {
+            continue;
+        }
+
+        void* native_raw = nullptr;
+
+        try {
+            native_raw = fn(texture);
+        } catch (...) {
+            continue;
+        }
+
+        if (!is_probable_d3d_native_resource(native_raw)) {
+            continue;
+        }
+
+        auto* native = (ID3D12Resource*)native_raw;
+        D3D12_RESOURCE_DESC desc{};
+
+        try {
+            desc = native->GetDesc();
+        } catch (...) {
+            continue;
+        }
+
+        if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+            desc.Width == 0 ||
+            desc.Height == 0 ||
+            desc.Width > 65536 ||
+            desc.Height > 65536)
+        {
+            continue;
+        }
+
+        FRHITexture2D::set_vtable(vtable);
+
+        if (out_native != nullptr) {
+            *out_native = native;
+        }
+
+        if (out_desc != nullptr) {
+            *out_desc = desc;
+        }
+
+        return true;
+    }
+
+    SPDLOG_INFO_EVERY_N_SEC(2,
+        "[UE5.5][SlateUI] direct GetNativeResource slots {} and {} did not produce a valid D3D12 texture for {} tex={:x}",
+        direct_slots[0],
+        direct_slots[1],
+        source != nullptr ? source : "<unknown>",
+        (uintptr_t)texture);
+
+    return false;
+}
+
+std::optional<D3D12_RESOURCE_DESC> ue55_try_get_d3d12_desc(FRHITexture2D* texture, const char* source) {
+    D3D12_RESOURCE_DESC desc{};
+
+    if (!ue55_dx12_try_get_native_resource_direct(texture, source, nullptr, &desc)) {
+        return std::nullopt;
+    }
+
+    return desc;
+}
+
+struct Everspace2ViewportTextureCandidate {
+    FRHITexture2D* texture{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> native_resource{};
+    D3D12_RESOURCE_DESC desc{};
+    const char* source{};
+};
+
+std::optional<Everspace2ViewportTextureCandidate> everspace2_get_scene_viewport_texture(sdk::FViewport* viewport) {
+    if (!everspace2_is_current_game() || !is_ue_5_5_dx12_backend() ||
+        viewport == nullptr || IsBadReadPtr(viewport, 0x2F0))
+    {
+        return std::nullopt;
+    }
+
+    // ES2's shipped 5.5.4 PDB places FViewport at complete-object +0x8.
+    // These offsets are therefore relative to the FViewport* passed to Draw.
+    constexpr uintptr_t base_render_target_texture_offset = 0x08;
+    constexpr uintptr_t buffered_render_targets_data_offset = 0x2B8;
+    constexpr uintptr_t buffered_render_targets_count_offset = 0x2C0;
+    constexpr uintptr_t render_thread_texture_offset = 0x2D8;
+    constexpr uintptr_t buffered_render_targets_index_offset = 0x2E8;
+
+    const auto viewport_address = (uintptr_t)viewport;
+    const auto validate = [](FRHITexture2D* texture, const char* source)
+        -> std::optional<Everspace2ViewportTextureCandidate>
+    {
+        ID3D12Resource* native_resource{};
+        D3D12_RESOURCE_DESC desc{};
+
+        if (!ue55_dx12_try_get_native_resource_direct(texture, source, &native_resource, &desc) ||
+            native_resource == nullptr)
+        {
+            return std::nullopt;
+        }
+
+        if ((desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0) {
+            SPDLOG_INFO_EVERY_N_SEC(
+                2,
+                "[Everspace2][ViewportRT] Rejected {} texture {:x}: not render-target capable flags=0x{:x}",
+                source,
+                (uintptr_t)texture,
+                (uint32_t)desc.Flags);
+            return std::nullopt;
+        }
+
+        return Everspace2ViewportTextureCandidate{
+            .texture = texture,
+            .native_resource = native_resource,
+            .desc = desc,
+            .source = source,
+        };
+    };
+
+    const auto render_thread_texture =
+        *(FRHITexture2D**)(viewport_address + render_thread_texture_offset);
+    if (const auto candidate = validate(render_thread_texture, "FSceneViewport render-thread target")) {
+        return candidate;
+    }
+
+    const auto base_render_target_texture =
+        *(FRHITexture2D**)(viewport_address + base_render_target_texture_offset);
+    if (const auto candidate = validate(base_render_target_texture, "FViewport render target")) {
+        return candidate;
+    }
+
+    const auto count = *(const int32_t*)(viewport_address + buffered_render_targets_count_offset);
+    const auto index = *(const int32_t*)(viewport_address + buffered_render_targets_index_offset);
+    const auto data = *(FRHITexture2D***)(viewport_address + buffered_render_targets_data_offset);
+
+    if (count <= 0 || count > 8 || index < 0 || index >= count ||
+        data == nullptr || IsBadReadPtr(data, sizeof(FRHITexture2D*) * count))
+    {
+        return std::nullopt;
+    }
+
+    return validate(data[index], "FSceneViewport buffered target");
+}
+
+void shf_log_rtm_candidate(VRRenderTargetManager_Base* rtm, FRHITexture2D* texture, const char* source) {
+    if (!shf_is_current_game() || !g_framework->is_dx12() || rtm == nullptr || texture == nullptr) {
+        return;
+    }
+
+    ID3D12Resource* native = nullptr;
+    std::optional<D3D12_RESOURCE_DESC> desc{};
+
+    try {
+        native = (ID3D12Resource*)texture->get_native_resource();
+
+        if (native != nullptr && !IsBadReadPtr(native, sizeof(void*))) {
+            desc = native->GetDesc();
+        }
+    } catch (...) {
+    }
+
+    bool log_unique = false;
+    uint64_t seen = 0;
+    uint64_t unique = 0;
+    uint64_t suppressed = 0;
+
+    {
+        std::scoped_lock _{g_shf_texture_probe_mutex};
+        ++g_shf_rtm_candidate_count;
+        seen = g_shf_rtm_candidate_count;
+
+        const auto key = (uintptr_t)(native != nullptr ? native : (ID3D12Resource*)texture);
+
+        if (!g_shf_logged_rtm_candidate_natives.contains(key)) {
+            g_shf_logged_rtm_candidate_natives.insert(key);
+            log_unique = g_shf_logged_rtm_candidate_natives.size() <= 64;
+        } else {
+            ++g_shf_rtm_candidate_suppressed;
+        }
+
+        unique = g_shf_logged_rtm_candidate_natives.size();
+        suppressed = g_shf_rtm_candidate_suppressed;
+    }
+
+    if (log_unique && desc) {
+        SPDLOG_WARN("[SHf][RTM] accepting unique texture candidate #{} source={} tex={:x} native={:x} [{}x{} fmt={} flags=0x{:x}] current_rt={:x}",
+            seen, source, (uintptr_t)texture, (uintptr_t)native, desc->Width, desc->Height, (uint32_t)desc->Format,
+            (uint32_t)desc->Flags, (uintptr_t)rtm->get_render_target());
+    } else if (log_unique) {
+        SPDLOG_WARN("[SHf][RTM] accepting unique texture candidate #{} source={} tex={:x} native={:x} desc=<unavailable> current_rt={:x}",
+            seen, source, (uintptr_t)texture, (uintptr_t)native, (uintptr_t)rtm->get_render_target());
+    } else {
+        SPDLOG_INFO_EVERY_N_SEC(2,
+            "[SHf][RTM] texture candidate summary seen={} unique_natives={} duplicate_suppressed={} last_source={} last_tex={:x} last_native={:x} current_rt={:x}",
+            seen, unique, suppressed, source, (uintptr_t)texture, (uintptr_t)native, (uintptr_t)rtm->get_render_target());
+    }
+}
+
+bool shf_can_reuse_current_ui_target(VRRenderTargetManager_Base* rtm, uint32_t expected_width, uint32_t expected_height) {
+    if (!shf_is_current_game() || !g_framework->is_dx12() || rtm == nullptr || expected_width == 0 || expected_height == 0) {
+        return false;
+    }
+
+    auto* ui_target = rtm->get_ui_target();
+
+    if (ui_target == nullptr || ui_target == rtm->get_render_target()) {
+        return false;
+    }
+
+    const auto desc = shf_try_get_d3d12_desc(ui_target);
+
+    if (!desc || desc->Width != expected_width || desc->Height != expected_height) {
+        return false;
+    }
+
+    SPDLOG_INFO_EVERY_N_SEC(2,
+        "[SHf] Reusing stable UI texture {:x} [{}x{} fmt={}]; skipping duplicate UI texture creation",
+        (uintptr_t)ui_target, desc->Width, desc->Height, (uint32_t)desc->Format);
+
+    return true;
+}
+
+void ue51_log_rt_churn_summary_locked(const char* reason) {
+    const auto now = std::chrono::steady_clock::now();
+
+    if (g_ue51_rt_churn.last_log.time_since_epoch().count() != 0 &&
+        now - g_ue51_rt_churn.last_log < std::chrono::seconds(30))
+    {
+        return;
+    }
+
+    g_ue51_rt_churn.last_log = now;
+
+    uint32_t current_width = 0;
+    uint32_t current_height = 0;
+
+    if (g_framework != nullptr) {
+        const auto size = g_framework->get_d3d12_rt_size();
+        current_width = (uint32_t)size.x;
+        current_height = (uint32_t)size.y;
+    }
+
+    SPDLOG_INFO(
+        "[UE5.1][RTChurn] summary reason={} alloc_seen={} ui_created={} ui_reused={} last_alloc={:x} last_create={:x} last_ui={:x} last_ui_size={}x{} current_rt_size={}x{}",
+        reason != nullptr ? reason : "<unknown>",
+        g_ue51_rt_churn.allocate_seen,
+        g_ue51_rt_churn.ui_created,
+        g_ue51_rt_churn.ui_reused,
+        g_ue51_rt_churn.last_allocate_return_address,
+        g_ue51_rt_churn.last_ui_create_return_address,
+        g_ue51_rt_churn.last_ui_texture,
+        g_ue51_rt_churn.last_ui_width,
+        g_ue51_rt_churn.last_ui_height,
+        current_width,
+        current_height);
+}
+
+void ue51_note_rt_allocation(uintptr_t relative_return_address) {
+    if (!is_ue_5_1_dx12_backend()) {
+        return;
+    }
+
+    std::scoped_lock _{g_ue51_rt_churn_mutex};
+    ++g_ue51_rt_churn.allocate_seen;
+    g_ue51_rt_churn.last_allocate_return_address = relative_return_address;
+    ue51_log_rt_churn_summary_locked("allocate");
+}
+
+void ue51_note_ui_created(FRHITexture2D* ui_texture, uint32_t width, uint32_t height) {
+    if (!is_ue_5_1_dx12_backend() || ui_texture == nullptr) {
+        return;
+    }
+
+    std::scoped_lock _{g_ue51_rt_churn_mutex};
+    ++g_ue51_rt_churn.ui_created;
+    g_ue51_rt_churn.last_ui_create_return_address = g_ue51_rt_churn.last_allocate_return_address;
+    g_ue51_rt_churn.last_ui_texture = (uintptr_t)ui_texture;
+    g_ue51_rt_churn.last_ui_width = width;
+    g_ue51_rt_churn.last_ui_height = height;
+    ue51_log_rt_churn_summary_locked("ui_created");
+}
+
+bool ue51_can_reuse_current_ui_target(VRRenderTargetManager_Base* rtm, uint32_t expected_width, uint32_t expected_height) {
+    if (!is_ue_5_1_dx12_backend() || rtm == nullptr || expected_width == 0 || expected_height == 0) {
+        return false;
+    }
+
+    const auto* ui_target = rtm->get_ui_target();
+
+    if (ui_target == nullptr || ui_target == rtm->get_render_target()) {
+        return false;
+    }
+
+    std::scoped_lock _{g_ue51_rt_churn_mutex};
+
+    if (g_ue51_rt_churn.ui_created == 0 ||
+        g_ue51_rt_churn.last_allocate_return_address == 0 ||
+        g_ue51_rt_churn.last_allocate_return_address != g_ue51_rt_churn.last_ui_create_return_address ||
+        g_ue51_rt_churn.last_ui_texture != (uintptr_t)ui_target ||
+        g_ue51_rt_churn.last_ui_width != expected_width ||
+        g_ue51_rt_churn.last_ui_height != expected_height)
+    {
+        return false;
+    }
+
+    ++g_ue51_rt_churn.ui_reused;
+    ue51_log_rt_churn_summary_locked("ui_reused");
+
+    return true;
+}
+
+void shf_log_texture_probe_candidate(
+    const char* source,
+    const char* base_name,
+    uintptr_t base,
+    uintptr_t offset,
+    int32_t array_index,
+    FRHITexture2D* texture,
+    const D3D12_RESOURCE_DESC& desc)
+{
+    const auto key = ((uintptr_t)texture >> 4) ^
+                     (base << 9) ^
+                     (offset << 21) ^
+                     ((uintptr_t)(array_index + 1) << 53);
+
+    {
+        std::scoped_lock _{g_shf_texture_probe_mutex};
+
+        if (g_shf_logged_texture_probe_keys.contains(key)) {
+            return;
+        }
+
+        g_shf_logged_texture_probe_keys.insert(key);
+    }
+
+    if (array_index >= 0) {
+        SPDLOG_WARN("[SHf] FSceneViewport probe {} {}+0x{:x}[{}] -> tex {:x} [{}x{} fmt={} flags=0x{:x}]",
+            source, base_name, offset, array_index, (uintptr_t)texture, desc.Width, desc.Height, (uint32_t)desc.Format, (uint32_t)desc.Flags);
+    } else {
+        SPDLOG_WARN("[SHf] FSceneViewport probe {} {}+0x{:x} -> tex {:x} [{}x{} fmt={} flags=0x{:x}]",
+            source, base_name, offset, (uintptr_t)texture, desc.Width, desc.Height, (uint32_t)desc.Format, (uint32_t)desc.Flags);
+    }
+}
+
+void shf_probe_scene_viewport_memory(sdk::FViewport* viewport, const char* source, FRHITexture2D* known_texture) {
+    if (viewport == nullptr || IsBadReadPtr(viewport, sizeof(void*))) {
+        return;
+    }
+
+    void* required_vtable = nullptr;
+
+    if (known_texture != nullptr && !IsBadReadPtr(known_texture, sizeof(void*))) {
+        required_vtable = *(void**)known_texture;
+    }
+
+    if (required_vtable == nullptr) {
+        required_vtable = FRHITexture2D::get_vtable();
+    }
+
+    if (required_vtable == nullptr) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto viewport_base = (uintptr_t)viewport;
+
+    {
+        std::scoped_lock _{g_shf_texture_probe_mutex};
+        auto& last_probe = g_shf_last_texture_probe_by_base[viewport_base];
+
+        if (last_probe.time_since_epoch().count() != 0 && now - last_probe < std::chrono::seconds(2)) {
+            return;
+        }
+
+        last_probe = now;
+    }
+
+    auto probe_base = [&](uintptr_t base, const char* base_name) {
+        if (base == 0 || IsBadReadPtr((void*)base, 0x340)) {
+            return;
+        }
+
+        for (uintptr_t offset = 0; offset <= 0x330; offset += sizeof(void*)) try {
+            const auto field = base + offset;
+
+            if (IsBadReadPtr((void*)field, sizeof(void*))) {
+                continue;
+            }
+
+            const auto texture = *(FRHITexture2D**)field;
+
+            if (shf_is_valid_texture_with_vtable(texture, required_vtable)) {
+                if (const auto desc = shf_try_get_d3d12_desc(texture)) {
+                    shf_log_texture_probe_candidate(source, base_name, base, offset, -1, texture, *desc);
+                }
+            }
+
+            if (IsBadReadPtr((void*)field, sizeof(void*) + sizeof(int32_t) * 2)) {
+                continue;
+            }
+
+            const auto array_data = *(FRHITexture2D***)field;
+            const auto array_count = *(int32_t*)(field + sizeof(void*));
+            const auto array_capacity = *(int32_t*)(field + sizeof(void*) + sizeof(int32_t));
+
+            if (array_data == nullptr || array_count <= 0 || array_count > 8 || array_capacity < array_count ||
+                IsBadReadPtr(array_data, sizeof(FRHITexture2D*) * array_count))
+            {
+                continue;
+            }
+
+            for (int32_t i = 0; i < array_count; ++i) {
+                const auto array_texture = array_data[i];
+
+                if (!shf_is_valid_texture_with_vtable(array_texture, required_vtable)) {
+                    continue;
+                }
+
+                if (const auto desc = shf_try_get_d3d12_desc(array_texture)) {
+                    shf_log_texture_probe_candidate(source, base_name, base, offset, i, array_texture, *desc);
+                }
+            }
+        } catch (...) {
+        }
+    };
+
+    probe_base(viewport_base, "FViewport");
+
+    if (viewport_base > 0x1000) {
+        probe_base(viewport_base - sizeof(void*), "FSceneViewport");
+    }
+}
+
+void shf_force_scene_viewport_separate_rt(const sdk::FViewport& viewport, const char* source) {
+    const bool should_force_scene_viewport_rt = shf_is_current_game() || dune_awakening_is_current_game();
+
+    if (!should_force_scene_viewport_rt || g_framework == nullptr || !g_framework->is_game_data_intialized()) {
+        return;
+    }
+
+    const auto vr = VR::get();
+
+    if (vr == nullptr || !vr->is_hmd_active() || vr->is_stereo_emulation_enabled() || vr->is_extreme_compatibility_mode_enabled()) {
+        return;
+    }
+
+    constexpr uintptr_t fviewport_base_offset = 0x08;
+    constexpr uintptr_t b_use_separate_rt_full_offset = 0x287;
+    constexpr uintptr_t b_force_separate_rt_full_offset = 0x288;
+    constexpr uintptr_t b_use_separate_rt_fviewport_offset = b_use_separate_rt_full_offset - fviewport_base_offset;
+    constexpr uintptr_t b_force_separate_rt_fviewport_offset = b_force_separate_rt_full_offset - fviewport_base_offset;
+
+    const auto viewport_base = reinterpret_cast<uintptr_t>(&viewport);
+
+    if (viewport_base <= fviewport_base_offset ||
+        IsBadReadPtr(reinterpret_cast<void*>(viewport_base - fviewport_base_offset), sizeof(void*)) ||
+        IsBadReadPtr(reinterpret_cast<void*>(viewport_base + b_force_separate_rt_fviewport_offset), sizeof(uint8_t)))
+    {
+        return;
+    }
+
+    const auto fscene_viewport_vtable = *reinterpret_cast<uintptr_t*>(viewport_base - fviewport_base_offset);
+
+    if (fscene_viewport_vtable == 0 || !utility::get_module_within(fscene_viewport_vtable).has_value()) {
+        return;
+    }
+
+    auto* use_separate_rt = reinterpret_cast<uint8_t*>(viewport_base + b_use_separate_rt_fviewport_offset);
+    auto* force_separate_rt = reinterpret_cast<uint8_t*>(viewport_base + b_force_separate_rt_fviewport_offset);
+
+    const bool is_dune = dune_awakening_is_current_game();
+    const char* log_prefix = is_dune ? "[Dune][RT]" : "[SHf]";
+
+    if (*use_separate_rt > 1 || *force_separate_rt > 1) {
+        SPDLOG_WARN_ONCE("{} Refusing to force separate RT from {}; unexpected FSceneViewport bool bytes use={} force={}",
+            log_prefix, source, *use_separate_rt, *force_separate_rt);
+        return;
+    }
+
+    if (is_dune && dune_should_preserve_native_viewport_target()) {
+        const bool was_separate = *use_separate_rt != 0 || *force_separate_rt != 0;
+        *use_separate_rt = 0;
+        *force_separate_rt = 0;
+
+        if (was_separate) {
+            SPDLOG_INFO_EVERY_N_SEC(
+                2,
+                "[Dune][CustomPresent] Restored Dune's native viewport target from {} mode={}",
+                source,
+                g_hook->is_dune_character_creation_active() ? "character_creation" : "gameplay");
+        }
+
+        return;
+    }
+
+    const bool was_missing_separate_rt = *use_separate_rt == 0 || *force_separate_rt == 0;
+
+    if (was_missing_separate_rt) {
+        SPDLOG_WARN_ONCE("{} Forcing FSceneViewport separate RT from {} at viewport {:x} use+0x{:x} force+0x{:x}",
+            log_prefix, source, viewport_base, b_use_separate_rt_fviewport_offset, b_force_separate_rt_fviewport_offset);
+    }
+
+    *use_separate_rt = 1;
+    *force_separate_rt = 1;
+
+    if (is_dune && was_missing_separate_rt && g_hook != nullptr) {
+        SPDLOG_WARN_ONCE("[Dune][RT] Requesting one viewport texture recreate after forcing separate RT");
+        g_dune_force_viewport_rhi_once.store(true);
+        g_hook->set_should_recreate_textures(true);
+    }
+}
+
+constexpr auto UE57_SLATE_THREAD_PREFERENCE_CACHE_KEY = "ue57_prefer_slate_thread";
+constexpr auto UE57_VIEW_EXTENSION_DISCOVERY_CACHE_KEY = "ue57_view_extension_discovery";
+
+bool load_ue57_slate_thread_preference() {
+    if (!is_ue_5_7_or_newer()) {
+        return false;
+    }
+
+    if (const auto cached = sdk::discovery_cache::load_entry(UE57_SLATE_THREAD_PREFERENCE_CACHE_KEY, utility::get_executable())) {
+        return cached->value("prefer_slate_thread", false);
+    }
+
+    return false;
+}
+
+void save_ue57_slate_thread_preference(bool prefer) {
+    if (!is_ue_5_7_or_newer()) {
+        return;
+    }
+
+    if (prefer) {
+        sdk::discovery_cache::save_entry(UE57_SLATE_THREAD_PREFERENCE_CACHE_KEY, utility::get_executable(), {
+            {"prefer_slate_thread", true}
+        });
+    } else {
+        sdk::discovery_cache::invalidate_entry(UE57_SLATE_THREAD_PREFERENCE_CACHE_KEY);
+    }
+}
+
+enum class UE57RenderTargetLoadAction : uint32_t {
+    NoAction = 0,
+    Load = 1,
+    Clear = 2,
+};
+
+struct UE57SlateDrawElementsPassInputsHead {
+    FRDGTexture* stencil_texture;
+    FRDGTexture* elements_texture;
+    FRDGTexture* scene_viewport_texture;
+    UE57RenderTargetLoadAction elements_load_action;
+};
+
+bool looks_like_ue57_slate_draw_elements_inputs(const UE57SlateDrawElementsPassInputsHead* inputs) {
+    if (inputs == nullptr || !is_readable_process_range((uintptr_t)inputs, sizeof(UE57SlateDrawElementsPassInputsHead))) {
+        return false;
+    }
+
+    const auto action = static_cast<uint32_t>(inputs->elements_load_action);
+
+    if (action > static_cast<uint32_t>(UE57RenderTargetLoadAction::Clear)) {
+        return false;
+    }
+
+    const auto scene_viewport_texture = inputs->scene_viewport_texture;
+    const auto elements_texture = inputs->elements_texture;
+
+    if (scene_viewport_texture == nullptr || elements_texture == nullptr) {
+        return false;
+    }
+
+    if (!is_readable_process_range((uintptr_t)scene_viewport_texture, sizeof(void*)) ||
+        !is_readable_process_range((uintptr_t)elements_texture, sizeof(void*))) {
+        return false;
+    }
+
+    return true;
+}
+
+using RegisterExternalTextureFromRHIFn = FRDGTexture* (*)(FRDGBuilder&, FRHITexture*, const wchar_t*);
+
+bool looks_like_nontrivial_virtual(uintptr_t fn) {
+    if (fn == 0 || IsBadReadPtr((void*)fn, 1) || !utility::get_module_within((void*)fn).has_value()) {
+        return false;
+    }
+
+    size_t decoded_bytes = 0;
+    size_t call_count = 0;
+    bool saw_terminator = false;
+
+    for (auto ip = (uint8_t*)fn; decoded_bytes < 512; ) {
+        const auto decoded = utility::decode_one(ip);
+
+        if (!decoded) {
+            break;
+        }
+
+        decoded_bytes += decoded->Length;
+
+        if (std::string_view{decoded->Mnemonic}.starts_with("CALL")) {
+            ++call_count;
+        }
+
+        if (std::string_view{decoded->Mnemonic}.starts_with("RET") || std::string_view{decoded->Mnemonic}.starts_with("INT3")) {
+            saw_terminator = true;
+            break;
+        }
+
+        ip += decoded->Length;
+    }
+
+    return saw_terminator && decoded_bytes >= 64 && call_count >= 1;
+}
+
+bool looks_like_callable_virtual(uintptr_t fn) {
+    if (fn == 0 || IsBadReadPtr((void*)fn, 1) || !utility::get_module_within((void*)fn).has_value()) {
+        return false;
+    }
+
+    size_t decoded_bytes = 0;
+
+    for (auto ip = (uint8_t*)fn; decoded_bytes < 256;) {
+        const auto decoded = utility::decode_one(ip);
+
+        if (!decoded || decoded->Length == 0) {
+            break;
+        }
+
+        decoded_bytes += decoded->Length;
+
+        const std::string_view mnemonic{decoded->Mnemonic};
+
+        if (mnemonic.starts_with("RET")) {
+            return decoded_bytes > 0;
+        }
+
+        if (mnemonic.starts_with("JMP")) {
+            return decoded_bytes <= 16;
+        }
+
+        if (mnemonic.starts_with("INT3")) {
+            return false;
+        }
+
+        ip += decoded->Length;
+    }
+
+    return false;
+}
+
+bool looks_like_post_init_properties_virtual(uintptr_t fn) {
+    if (fn == 0 || IsBadReadPtr((void*)fn, 1) || !utility::get_module_within((void*)fn).has_value()) {
+        return false;
+    }
+
+    size_t decoded_bytes = 0;
+    size_t call_count = 0;
+
+    for (auto ip = (uint8_t*)fn; decoded_bytes < 256;) {
+        const auto decoded = utility::decode_one(ip);
+
+        if (!decoded || decoded->Length == 0) {
+            break;
+        }
+
+        decoded_bytes += decoded->Length;
+        const std::string_view mnemonic{decoded->Mnemonic};
+
+        if (mnemonic.starts_with("CALL")) {
+            ++call_count;
+        }
+
+        if (mnemonic.starts_with("RET")) {
+            return decoded_bytes > 8 || call_count > 0;
+        }
+
+        if (mnemonic.starts_with("JMP")) {
+            return decoded_bytes > 8 || call_count > 0;
+        }
+
+        if (mnemonic.starts_with("INT3")) {
+            return false;
+        }
+
+        ip += decoded->Length;
+    }
+
+    return call_count > 0;
+}
+
+std::optional<uint32_t> validate_source_informed_post_init_slot(
+    uintptr_t* object_vtable,
+    uintptr_t* localplayer_vtable,
+    uint32_t slot,
+    const char* source_note,
+    bool require_inherited_uobject_slot,
+    bool allow_localplayer_callable_thunk = false)
+{
+    if (IsBadReadPtr(&object_vtable[slot], sizeof(uintptr_t)) ||
+        IsBadReadPtr(&localplayer_vtable[slot], sizeof(uintptr_t)))
+    {
+        SPDLOG_WARN("[PostInitProperties] {} slot {} is not readable", source_note, slot);
+        return std::nullopt;
+    }
+
+    const auto object_fn = object_vtable[slot];
+    const auto localplayer_fn = localplayer_vtable[slot];
+
+    const auto localplayer_looks_valid = allow_localplayer_callable_thunk
+        ? looks_like_callable_virtual(localplayer_fn)
+        : looks_like_post_init_properties_virtual(localplayer_fn);
+
+    if (!looks_like_post_init_properties_virtual(object_fn) || !localplayer_looks_valid)
+    {
+        SPDLOG_WARN("[PostInitProperties] {} slot {} did not look callable object_fn={:x} localplayer_fn={:x}",
+            source_note,
+            slot,
+            object_fn,
+            localplayer_fn);
+        return std::nullopt;
+    }
+
+    if (require_inherited_uobject_slot && object_fn != localplayer_fn) {
+        SPDLOG_WARN("[PostInitProperties] {} slot {} did not inherit UObject function object_fn={:x} localplayer_fn={:x}",
+            source_note,
+            slot,
+            object_fn,
+            localplayer_fn);
+        return std::nullopt;
+    }
+
+    SPDLOG_INFO("[PostInitProperties] Resolved {} slot {} object_fn={:x} localplayer_fn={:x}",
+        source_note,
+        slot,
+        object_fn,
+        localplayer_fn);
+    return slot;
+}
+
+std::optional<uint32_t> resolve_post_init_properties_index_from_uobject(uintptr_t localplayer) {
+    auto* object_class = sdk::UObject::static_class();
+
+    if (object_class == nullptr) {
+        SPDLOG_WARN("[PostInitProperties] UObject::static_class() is not ready");
+        return std::nullopt;
+    }
+
+    auto* object_cdo = object_class->get_class_default_object<sdk::UObject>();
+
+    if (object_cdo == nullptr || IsBadReadPtr(object_cdo, sizeof(void*))) {
+        SPDLOG_WARN("[PostInitProperties] UObject CDO is not ready");
+        return std::nullopt;
+    }
+
+    const auto object_vtable = *(uintptr_t**)object_cdo;
+    const auto localplayer_vtable = *(uintptr_t**)localplayer;
+
+    if (object_vtable == nullptr || localplayer_vtable == nullptr ||
+        IsBadReadPtr(object_vtable, sizeof(void*)) || IsBadReadPtr(localplayer_vtable, sizeof(void*)))
+    {
+        SPDLOG_WARN("[PostInitProperties] UObject or LocalPlayer vtable is invalid");
+        return std::nullopt;
+    }
+
+    // ProSpi 4.27.2 shipped layout validates at slot 8 in the live log/PDB path.
+    // Do not force the modern UE5 slot here; if slot 8 is not provably callable,
+    // fail closed instead of scanning broad/random LocalPlayer virtuals.
+    if (is_ue_4_27_runtime() && prospi_is_current_game()) {
+        constexpr uint32_t PROSPI_UE427_POST_INIT_PROPERTIES_SLOT = 8;
+
+        if (validate_source_informed_post_init_slot(
+                object_vtable,
+                localplayer_vtable,
+                PROSPI_UE427_POST_INIT_PROPERTIES_SLOT,
+                "ProSpi UE4.27 UObject::PostInitProperties",
+                false,
+                true))
+        {
+            return PROSPI_UE427_POST_INIT_PROPERTIES_SLOT;
+        }
+
+        SPDLOG_WARN("[PostInitProperties] ProSpi UE4.27 slot 8 did not validate; skipping Ghosting Fix bootstrap for safety");
+        return std::nullopt;
+    }
+
+    // UE5.1 source plus Stalker2/SOE PDBs place UObject::PostInitProperties at
+    // slot 10 for shipped game layouts. Some UE5.1 games put a LocalPlayer
+    // override/thunk at the same slot, so validate UObject strictly and only
+    // require the LocalPlayer target to be callable.
+    if (is_ue_5_1_dx_backend()) {
+        constexpr uint32_t UE51_POST_INIT_PROPERTIES_SLOT = 10;
+
+        if (validate_source_informed_post_init_slot(
+                object_vtable,
+                localplayer_vtable,
+                UE51_POST_INIT_PROPERTIES_SLOT,
+                "UE5.1 UObject::PostInitProperties",
+                false,
+                true))
+        {
+            return UE51_POST_INIT_PROPERTIES_SLOT;
+        }
+
+        SPDLOG_WARN("[PostInitProperties] UE5.1 slot 10 did not validate; skipping LocalPlayer bootstrap");
+        return std::nullopt;
+    }
+
+    // UE5.2.1/5.3.2 source plus The Complex Expedition PDB place
+    // UObject::PostInitProperties at slot 9 in shipped layouts. The older
+    // legacy body scan sees the function but cannot identify it because this
+    // implementation does not reference GEngine.
+    if (is_ue_5_2_dx_backend() || is_ue_5_3_dx_backend()) {
+        constexpr uint32_t UE52_53_POST_INIT_PROPERTIES_SLOT = 9;
+
+        if (validate_source_informed_post_init_slot(
+                object_vtable,
+                localplayer_vtable,
+                UE52_53_POST_INIT_PROPERTIES_SLOT,
+                is_ue_5_3_dx_backend() ? "UE5.3 UObject::PostInitProperties" : "UE5.2 UObject::PostInitProperties",
+                false,
+                true))
+        {
+            return UE52_53_POST_INIT_PROPERTIES_SLOT;
+        }
+
+        SPDLOG_WARN("[PostInitProperties] UE5.2/5.3 slot 9 did not validate; skipping LocalPlayer bootstrap");
+        return std::nullopt;
+    }
+
+    // UE 5.4.4, 5.5.4 and 5.6.1 source/PDB put UObject::PostInitProperties at slot 10
+    // for shipped game layouts:
+    // UObjectBase has 4 virtuals, UObjectBaseUtility has 5, then UObject adds
+    // GetDetailedInfoInternal at 9 and PostInitProperties at 10.
+    if (is_ue_5_4_dx_backend() || is_ue_5_5_dx_backend() || is_ue_5_6_dx12_backend() || is_ue_5_7_or_newer()) {
+        constexpr uint32_t UE54_PLUS_POST_INIT_PROPERTIES_SLOT = 10;
+
+        if (validate_source_informed_post_init_slot(
+                object_vtable,
+                localplayer_vtable,
+                UE54_PLUS_POST_INIT_PROPERTIES_SLOT,
+                "UE5.4+ UObject::PostInitProperties",
+                false,
+                is_ue_5_4_dx_backend()))
+        {
+            return UE54_PLUS_POST_INIT_PROPERTIES_SLOT;
+        }
+    }
+
+    // Keep the nearby slots as a fail-closed fallback for unusual/custom layouts.
+    constexpr std::array<uint32_t, 4> candidate_slots{10, 9, 8, 11};
+
+    for (const auto slot : candidate_slots) {
+        if (IsBadReadPtr(&object_vtable[slot], sizeof(uintptr_t)) ||
+            IsBadReadPtr(&localplayer_vtable[slot], sizeof(uintptr_t)))
+        {
+            continue;
+        }
+
+        const auto object_fn = object_vtable[slot];
+        const auto localplayer_fn = localplayer_vtable[slot];
+
+        if (object_fn == 0 || localplayer_fn == 0) {
+            continue;
+        }
+
+        if (!looks_like_post_init_properties_virtual(object_fn) ||
+            !looks_like_post_init_properties_virtual(localplayer_fn))
+        {
+            continue;
+        }
+
+        SPDLOG_INFO("[PostInitProperties] Resolved UObject::PostInitProperties through nearby fallback slot {} object_fn={:x} localplayer_fn={:x}",
+            slot,
+            object_fn,
+            localplayer_fn);
+        return slot;
+    }
+
+    SPDLOG_WARN("[PostInitProperties] Could not validate the expected UObject::PostInitProperties slots on this build");
+    return std::nullopt;
+}
+}
+
+namespace {
+bool is_writable_process_range(uintptr_t address, size_t size) {
+    if (address == 0 || size == 0 || address + size < address) {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) {
+        return false;
+    }
+
+    const auto base = (uintptr_t)mbi.BaseAddress;
+    if (address + size > base + mbi.RegionSize) {
+        return false;
+    }
+
+    if ((mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+
+    const auto protect = mbi.Protect & 0xff;
+    return protect == PAGE_READWRITE ||
+           protect == PAGE_WRITECOPY ||
+           protect == PAGE_EXECUTE_READWRITE ||
+           protect == PAGE_EXECUTE_WRITECOPY;
+}
+
+bool is_readable_process_range(uintptr_t address, size_t size) {
+    if (address == 0 || size == 0 || address + size < address) {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) {
+        return false;
+    }
+
+    const auto base = (uintptr_t)mbi.BaseAddress;
+    if (address + size > base + mbi.RegionSize) {
+        return false;
+    }
+
+    if ((mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+
+    const auto protect = mbi.Protect & 0xff;
+    return protect == PAGE_READONLY ||
+           protect == PAGE_READWRITE ||
+           protect == PAGE_WRITECOPY ||
+           protect == PAGE_EXECUTE_READ ||
+           protect == PAGE_EXECUTE_READWRITE ||
+           protect == PAGE_EXECUTE_WRITECOPY;
+}
+
+bool is_executable_process_range(uintptr_t address, size_t size) {
+    if (address == 0 || size == 0 || address + size < address) {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) {
+        return false;
+    }
+
+    const auto base = (uintptr_t)mbi.BaseAddress;
+    if (address + size > base + mbi.RegionSize) {
+        return false;
+    }
+
+    if ((mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+
+    const auto protect = mbi.Protect & 0xff;
+    return protect == PAGE_EXECUTE ||
+           protect == PAGE_EXECUTE_READ ||
+           protect == PAGE_EXECUTE_READWRITE ||
+           protect == PAGE_EXECUTE_WRITECOPY;
+}
+
+struct RuntimeFunctionRange {
+    uintptr_t begin{};
+    uintptr_t end{};
+    uintptr_t image_base{};
+
+    size_t size() const {
+        return end - begin;
+    }
+};
+
+std::optional<RuntimeFunctionRange> get_runtime_function_range(uintptr_t address) {
+    DWORD64 image_base{};
+    const auto runtime_function = RtlLookupFunctionEntry(
+        static_cast<DWORD64>(address),
+        &image_base,
+        nullptr);
+
+    if (runtime_function == nullptr || image_base == 0) {
+        return std::nullopt;
+    }
+
+    const auto begin = static_cast<uintptr_t>(image_base + runtime_function->BeginAddress);
+    const auto end = static_cast<uintptr_t>(image_base + runtime_function->EndAddress);
+
+    if (begin == 0 || end <= begin || address < begin || address >= end ||
+        !is_executable_process_range(begin, std::min<size_t>(end - begin, 16)))
+    {
+        return std::nullopt;
+    }
+
+    return RuntimeFunctionRange{
+        .begin = begin,
+        .end = end,
+        .image_base = static_cast<uintptr_t>(image_base),
+    };
+}
+
+bool direct_call_returns_to(uintptr_t return_address, uintptr_t expected_target) {
+    constexpr size_t direct_call_size = 5;
+
+    if (return_address < direct_call_size ||
+        !is_readable_process_range(return_address - direct_call_size, direct_call_size))
+    {
+        return false;
+    }
+
+    const auto call = reinterpret_cast<const uint8_t*>(return_address - direct_call_size);
+    if (call[0] != 0xE8) {
+        return false;
+    }
+
+    int32_t displacement{};
+    std::memcpy(&displacement, call + 1, sizeof(displacement));
+    return static_cast<uintptr_t>(return_address + displacement) == expected_target;
+}
+
+bool has_begin_rendering_viewfamily_wrapper_shape(const RuntimeFunctionRange& wrapper) {
+    // UE5's singular wrapper builds a one-element TArrayView on the stack. Keep
+    // this as corroborating evidence rather than the sole resolver condition.
+    constexpr std::array<uint8_t, 4> store_r8_to_stack{0x4C, 0x89, 0x44, 0x24};
+    constexpr std::array<uint8_t, 4> load_r8_from_stack{0x4C, 0x8D, 0x44, 0x24};
+
+    if (wrapper.size() > 0x180 || !is_readable_process_range(wrapper.begin, wrapper.size())) {
+        return false;
+    }
+
+    const auto bytes = reinterpret_cast<const uint8_t*>(wrapper.begin);
+    const auto contains = [&](const auto& pattern) {
+        return std::search(bytes, bytes + wrapper.size(), pattern.begin(), pattern.end()) !=
+               bytes + wrapper.size();
+    };
+
+    return contains(store_r8_to_stack) && contains(load_r8_from_stack);
+}
+
+std::optional<uintptr_t> resolve_begin_rendering_viewfamilies_from_stack() {
+    constexpr uint32_t max_stack_depth = 32;
+    std::array<uintptr_t, max_stack_depth> stack{};
+    const auto depth = RtlCaptureStackBackTrace(
+        0,
+        max_stack_depth,
+        reinterpret_cast<void**>(stack.data()),
+        nullptr);
+
+    const auto game_module = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    std::optional<uintptr_t> best_candidate{};
+    int best_score = std::numeric_limits<int>::min();
+
+    // The view-extension callback runs inside CreateSceneRenderers. The next
+    // frames are BeginRenderingViewFamilies and its small singular wrapper.
+    // Validate that wrapper's exact direct CALL instead of guessing from the
+    // first captured frame.
+    for (uint32_t i = 1; i + 1 < depth; ++i) {
+        const auto callee = get_runtime_function_range(stack[i]);
+        const auto caller = get_runtime_function_range(stack[i + 1]);
+
+        if (!callee || !caller || callee->begin == caller->begin ||
+            callee->image_base != game_module || caller->image_base != game_module ||
+            caller->size() > 0x180 || callee->size() < 0x200 ||
+            !direct_call_returns_to(stack[i + 1], callee->begin))
+        {
+            continue;
+        }
+
+        auto score = 0;
+        score += static_cast<int>(std::min<size_t>(callee->size() / 0x100, 32));
+        score += static_cast<int>((0x180 - caller->size()) / 8);
+
+        if (has_begin_rendering_viewfamily_wrapper_shape(*caller)) {
+            score += 100;
+        }
+
+        if (score > best_score) {
+            best_score = score;
+            best_candidate = callee->begin;
+            SPDLOG_INFO(
+                "[NativeStereoFix] BeginRenderingViewFamilies candidate target={:x} size={:x} "
+                "wrapper={:x} wrapper_size={:x} return={:x} stack_index={} score={}",
+                callee->begin,
+                callee->size(),
+                caller->begin,
+                caller->size(),
+                stack[i + 1],
+                i,
+                score);
+        }
+    }
+
+    return best_candidate;
+}
+
+bool looks_like_virtual_function_table(uintptr_t table) {
+    if (!is_readable_process_range(table, sizeof(uintptr_t) * 12)) {
+        return false;
+    }
+
+    auto executable_entries = 0;
+
+    for (auto i = 0; i < 12; ++i) {
+        const auto fn = ((uintptr_t*)table)[i];
+
+        if (fn == 0 || !is_executable_process_range(fn, 1)) {
+            continue;
+        }
+
+        ++executable_entries;
+    }
+
+    return executable_entries >= 6;
+}
+
+template <typename T>
+bool safe_read_value(uintptr_t address, T& out) {
+    if (!is_readable_process_range(address, sizeof(T))) {
+        return false;
+    }
+
+    memcpy(&out, (void*)address, sizeof(T));
+    return true;
+}
+
+bool avowed_is_live_uobject(uintptr_t object, uintptr_t* out_vtable = nullptr, uintptr_t* out_class = nullptr) {
+    if (!avowed_is_current_game() || object == 0) {
+        return false;
+    }
+
+    uintptr_t vtable{};
+    if (!safe_read_value(object, vtable) || !looks_like_virtual_function_table(vtable)) {
+        return false;
+    }
+
+    uintptr_t cls{};
+    if (!safe_read_value(object + sdk::UObjectBase::get_class_private_offset(), cls) || cls == 0) {
+        return false;
+    }
+
+    uint32_t internal_index{};
+    if (!safe_read_value(object + sdk::UObjectBase::get_internal_index_offset(), internal_index)) {
+        return false;
+    }
+
+    auto object_array = sdk::FUObjectArray::get();
+    if (object_array == nullptr) {
+        return false;
+    }
+
+    const auto object_count = object_array->get_object_count();
+    if (object_count <= 0 || internal_index >= (uint32_t)object_count) {
+        return false;
+    }
+
+    auto item = object_array->get_object((int32_t)internal_index);
+    if (item == nullptr || !is_readable_process_range((uintptr_t)item, sizeof(sdk::FUObjectItem))) {
+        return false;
+    }
+
+    uintptr_t item_object{};
+    if (!safe_read_value((uintptr_t)item + sdk::FUObjectArray::get_item_object_offset(), item_object) || item_object != object) {
+        return false;
+    }
+
+    if (out_vtable != nullptr) {
+        *out_vtable = vtable;
+    }
+
+    if (out_class != nullptr) {
+        *out_class = cls;
+    }
+
+    return true;
+}
+
+bool dune_is_live_uobject(uintptr_t object, uintptr_t* out_class = nullptr) {
+    if (!dune_awakening_is_current_game() || object == 0) {
+        return false;
+    }
+
+    uintptr_t vtable{};
+    if (!safe_read_value(object, vtable) || !looks_like_virtual_function_table(vtable)) {
+        return false;
+    }
+
+    uintptr_t cls{};
+    if (!safe_read_value(object + sdk::UObjectBase::get_class_private_offset(), cls) || cls == 0) {
+        return false;
+    }
+
+    uint32_t internal_index{};
+    if (!safe_read_value(object + sdk::UObjectBase::get_internal_index_offset(), internal_index)) {
+        return false;
+    }
+
+    auto* object_array = sdk::FUObjectArray::get();
+    if (object_array == nullptr) {
+        return false;
+    }
+
+    const auto object_count = object_array->get_object_count();
+    if (object_count <= 0 || internal_index >= (uint32_t)object_count) {
+        return false;
+    }
+
+    auto* item = object_array->get_object((int32_t)internal_index);
+    if (item == nullptr || !is_readable_process_range((uintptr_t)item, sizeof(sdk::FUObjectItem))) {
+        return false;
+    }
+
+    uintptr_t item_object{};
+    if (!safe_read_value((uintptr_t)item + sdk::FUObjectArray::get_item_object_offset(), item_object) || item_object != object) {
+        return false;
+    }
+
+    if (out_class != nullptr) {
+        *out_class = cls;
+    }
+
+    return true;
+}
+
+struct DunePlayerState {
+    sdk::UObjectBase* object{};
+    sdk::UClass* object_class{};
+    bool character_creation{};
+    bool playable_world{};
+    bool from_tracked_objects{};
+    std::string full_name{};
+};
+
+DunePlayerState classify_dune_player_object(
+    sdk::UObjectBase* object,
+    sdk::UClass* player_character_class,
+    sdk::UClass* character_creation_class,
+    bool from_tracked_objects)
+{
+    DunePlayerState result{};
+    uintptr_t object_class{};
+
+    if (object == nullptr ||
+        !dune_is_live_uobject(reinterpret_cast<uintptr_t>(object), &object_class) ||
+        object_class == 0)
+    {
+        return result;
+    }
+
+    auto* const uclass = reinterpret_cast<sdk::UClass*>(object_class);
+    if (player_character_class != nullptr && !uclass->is_a(player_character_class)) {
+        return result;
+    }
+
+    try {
+        result.full_name = utility::narrow(object->get_full_name());
+    } catch (...) {
+        return {};
+    }
+
+    if (result.full_name.empty() ||
+        result.full_name.find("Default__") != std::string::npos)
+    {
+        return {};
+    }
+
+    result.object = object;
+    result.object_class = uclass;
+    result.from_tracked_objects = from_tracked_objects;
+    result.character_creation =
+        character_creation_class != nullptr &&
+        uclass->is_a(character_creation_class);
+
+    // Runtime actors include a map/level path. This excludes class defaults,
+    // preview assets, and other persistent metadata tracked under the same
+    // native DunePlayerCharacter base class.
+    const bool is_runtime_actor =
+        result.full_name.find("PersistentLevel.") != std::string::npos ||
+        result.full_name.find("/Game/Dune/Maps/") != std::string::npos;
+    result.playable_world = is_runtime_actor && !result.character_creation;
+    return result;
+}
+
+DunePlayerState detect_dune_player_state() {
+    static sdk::UClass* player_character_class = nullptr;
+    static sdk::UClass* character_creation_class = nullptr;
+
+    if (player_character_class == nullptr) {
+        player_character_class =
+            sdk::find_uobject<sdk::UClass>(L"Class /Script/DuneSandbox.DunePlayerCharacter", false);
+    }
+
+    if (character_creation_class == nullptr) {
+        character_creation_class =
+            sdk::find_uobject<sdk::UClass>(L"Class /Script/DuneSandbox.DuneCharacterCreationCharacter", false);
+    }
+
+    auto* const engine = sdk::UEngine::get();
+    auto* const local_pawn = engine != nullptr ? engine->get_localpawn(0) : nullptr;
+    auto state = classify_dune_player_object(
+        reinterpret_cast<sdk::UObjectBase*>(local_pawn),
+        player_character_class,
+        character_creation_class,
+        false);
+
+    if (state.character_creation || state.playable_world) {
+        return state;
+    }
+
+    // Dune keeps a Cartography showroom world visible to UEngine while the
+    // actual NPE/gameplay pawn lives in another world. UObjectHook already
+    // tracks derived instances by every superclass, so use that authoritative
+    // set instead of sweeping GUObjectArray on the game thread.
+    auto& object_hook = UObjectHook::get();
+    if (object_hook == nullptr || object_hook->is_disabled() || player_character_class == nullptr) {
+        return {};
+    }
+
+    DunePlayerState character_creation_state{};
+    for (auto* const object : object_hook->get_objects_by_class(player_character_class)) {
+        auto candidate = classify_dune_player_object(
+            object,
+            player_character_class,
+            character_creation_class,
+            true);
+
+        if (candidate.playable_world) {
+            return candidate;
+        }
+
+        if (candidate.character_creation && character_creation_state.object == nullptr) {
+            character_creation_state = std::move(candidate);
+        }
+    }
+
+    return character_creation_state;
+}
+
+std::optional<uintptr_t> locate_vtable_from_constructor_rip_references(uintptr_t constructor) {
+    constexpr auto MAX_CONSTRUCTOR_SCAN_BYTES = 0x800;
+    auto best_candidate = std::optional<uintptr_t>{};
+
+    for (auto ip = constructor; ip < constructor + MAX_CONSTRUCTOR_SCAN_BYTES;) {
+        const auto decoded = utility::decode_one((uint8_t*)ip);
+
+        if (!decoded || decoded->Length == 0) {
+            break;
+        }
+
+        if (decoded->OperandsCount >= 2 &&
+            decoded->IsRipRelative &&
+            (decoded->Instruction == ND_INS_LEA || decoded->Instruction == ND_INS_MOV) &&
+            decoded->Operands[0].Type == ND_OP_REG &&
+            decoded->Operands[1].Type == ND_OP_MEM)
+        {
+            const auto referenced_addr = utility::resolve_displacement(ip);
+
+            if (referenced_addr && looks_like_virtual_function_table(*referenced_addr)) {
+                SPDLOG_INFO("Found FFakeStereoRendering vtable candidate via constructor RIP reference at {:x} -> {:x}",
+                            ip, *referenced_addr);
+                best_candidate = *referenced_addr;
+                break;
+            }
+        }
+
+        if (std::string_view{decoded->Mnemonic}.starts_with("RET")) {
+            break;
+        }
+
+        ip += decoded->Length;
+    }
+
+    return best_candidate;
+}
+}
 
 // Scan through function instructions to detect usage of double
 // floating point precision instructions.
@@ -98,11 +3741,13 @@ bool is_using_double_precision(uintptr_t addr) {
 
 FFakeStereoRenderingHook::FFakeStereoRenderingHook() {
     g_hook = this;
+    m_prefer_slate_thread_for_session = load_ue57_slate_thread_preference();
     setup_options();
 }
 
 void FFakeStereoRenderingHook::on_frame() {
-    // Engine tick hook is always installed â€” plugins (including dumper-mode
+    attempt_everspace2_pool_trace();
+    // Engine tick hook is always installed ¡ª plugins (including dumper-mode
     // clients) need on_pre_engine_tick callbacks to submit game-thread work.
     attempt_hook_game_engine_tick();
 
@@ -117,6 +3762,10 @@ void FFakeStereoRenderingHook::on_frame() {
 
     attempt_hook_slate_thread();
     attempt_hook_fsceneview_constructor();
+    attempt_hook_daysgone_slate_intermediate_buffer();
+    attempt_hook_daysgone_bend_taa_composite();
+    update_daysgone_ui_telemetry();
+    update_daysgone_bend_ui_placement_fix();
 
     // Ideally we want to do all hooking
     // from game engine tick. if it fails
@@ -136,6 +3785,7 @@ void FFakeStereoRenderingHook::on_draw_ui() {
         m_recreate_textures_on_reset->draw("Recreate Textures on Reset");
         m_frame_delay_compensation->draw("Frame Delay Compensation");
         m_use_fmalloc_scene_view_extensions->draw("Use FMalloc for ISceneViewExtensions");
+        m_safe_tick_hook->draw("Use Safe Tick Hooking");
 
         if (m_tracking_system_hook != nullptr) {
             m_tracking_system_hook->on_draw_ui();
@@ -233,7 +3883,312 @@ void FFakeStereoRenderingHook::on_draw_ui() {
         ImGui::TreePop();
     }
 
+    if (daysgone_is_current_game()) {
+        draw_daysgone_bend_ui_controls();
+    }
+
     ImGui::Separator();
+}
+
+void FFakeStereoRenderingHook::draw_daysgone_bend_ui_controls() {
+    if (!daysgone_is_current_game()) {
+        ImGui::TextWrapped("Days Gone UI tuning is only available in DaysGone.exe.");
+        return;
+    }
+
+    ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+    if (!ImGui::TreeNode("Days Gone Bend UI Placement")) {
+        return;
+    }
+
+    auto vr = VR::get();
+    const bool active = vr != nullptr && vr->is_daysgone_bend_ui_placement_fix_enabled();
+    ImGui::TextWrapped("Status: %s | menu=%llx widget=%llx applies=%llu restores=%llu",
+        active ? "enabled" : "disabled",
+        (unsigned long long)m_daysgone_bend_ui_last_menu3d.load(),
+        (unsigned long long)m_daysgone_bend_ui_last_widget_main.load(),
+        (unsigned long long)m_daysgone_bend_ui_apply_count.load(),
+        (unsigned long long)m_daysgone_bend_ui_restore_count.load());
+    ImGui::TextWrapped("Use Root Viewport Slot controls for the visible MainMenu/HUD/subtitle roots.");
+    ImGui::TextWrapped("Composite seen=%llu crop_suppressed=%llu extent_overrides=%llu shader_overrides=%llu",
+        (unsigned long long)m_daysgone_bend_taa_composite_seen.load(),
+        (unsigned long long)m_daysgone_bend_taa_composite_crop_suppressed.load(),
+        (unsigned long long)m_daysgone_bend_taa_composite_extent_overrides.load(),
+        (unsigned long long)m_daysgone_bend_taa_shader_param_overrides.load());
+    ImGui::TextWrapped("Captured Slate UI native=%llx size=%ux%u",
+        (unsigned long long)m_daysgone_slate_native_ui_target.load(),
+        m_daysgone_slate_native_ui_width.load(),
+        m_daysgone_slate_native_ui_height.load());
+
+    if (ImGui::Button("Recommended Stable UMG Mode")) {
+        m_daysgone_bend_ui_mode->value() = 2;
+        m_daysgone_bend_ui_force_player_camera->value() = false;
+        m_daysgone_bend_ui_override_widget_transform->value() = true;
+        m_daysgone_bend_ui_override_root_transform->value() = false;
+        m_daysgone_bend_ui_force_widget_refresh->value() = true;
+        m_daysgone_bend_ui_viewport_slot_fix->value() = true;
+        m_daysgone_bend_ui_live_watchdog->value() = false;
+        m_daysgone_bend_ui_apply_child_render_transform->value() = false;
+        m_daysgone_bend_ui_use_slate_overlay->value() = false;
+        m_daysgone_bend_ui_suppress_in_scene_composite->value() = false;
+        m_daysgone_bend_ui_split_overlay->value() = false;
+        m_daysgone_bend_ui_disable_taa_crop->value() = true;
+        m_daysgone_bend_ui_viewport_slot_offset_x->value() = -240.0f;
+        m_daysgone_bend_ui_viewport_slot_offset_y->value() = 0.0f;
+        m_daysgone_bend_ui_viewport_slot_scale->value() = 0.85f;
+        m_daysgone_bend_ui_viewport_slot_opacity->value() = 1.0f;
+        m_daysgone_bend_ui_distance_from_camera->value() = -1371.022f;
+        m_daysgone_bend_ui_camera_fov->value() = 70.0f;
+        m_daysgone_bend_ui_widget_loc_x->value() = 0.0f;
+        m_daysgone_bend_ui_widget_loc_y->value() = 0.0f;
+        m_daysgone_bend_ui_widget_loc_z->value() = -1371.022f;
+        m_daysgone_bend_ui_widget_rot_pitch->value() = 90.0f;
+        m_daysgone_bend_ui_widget_rot_yaw->value() = 90.0f;
+        m_daysgone_bend_ui_widget_rot_roll->value() = 0.0f;
+        m_daysgone_bend_ui_widget_scale->value() = 1.0f;
+        m_daysgone_bend_ui_screen_offset_x->value() = 0.0f;
+        m_daysgone_bend_ui_screen_offset_y->value() = 0.0f;
+        m_daysgone_bend_ui_screen_scale->value() = 1.0f;
+        m_daysgone_bend_ui_draw_scale->value() = 1.0f;
+        m_daysgone_bend_ui_key_opacity->value() = 0.0f;
+        m_daysgone_bend_ui_manual_apply_generation.fetch_add(1);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Extracted Overlay Diagnostic Mode")) {
+        m_daysgone_bend_ui_use_slate_overlay->value() = true;
+        m_daysgone_bend_ui_suppress_in_scene_composite->value() = false;
+        m_daysgone_bend_ui_split_overlay->value() = true;
+        m_daysgone_bend_ui_key_threshold->value() = 0.025f;
+        m_daysgone_bend_ui_key_softness->value() = 0.045f;
+        m_daysgone_bend_ui_key_opacity->value() = 1.0f;
+        m_daysgone_bend_ui_screen_offset_x->value() = 0.0f;
+        m_daysgone_bend_ui_screen_offset_y->value() = 0.0f;
+        m_daysgone_bend_ui_screen_scale->value() = 1.0f;
+        m_daysgone_bend_ui_draw_scale->value() = 1.0f;
+    }
+    ImGui::TextWrapped("Stable UMG mode is the current useful path. The extracted overlay is diagnostic; only enable suppression if you want to hide the live game UI and use the copied overlay only.");
+
+    ImGui::SeparatorText("Extracted Slate UI Overlay");
+    m_daysgone_bend_ui_use_slate_overlay->draw("Use Extracted Slate UI Overlay");
+    ImGui::TextWrapped("Copies the captured Bend SlateIntermediateBuffer into UEVR's OpenXR UI layer. This keeps the scene in the normal synced/native path and does not force global 2D mode.");
+    m_daysgone_bend_ui_suppress_in_scene_composite->draw("Suppress Bend In-Scene Slate Composite");
+    ImGui::TextWrapped("Leave suppression off first. Enable it only if the extracted overlay works but the original glued/duplicated game UI still remains visible.");
+    m_daysgone_bend_ui_split_overlay->draw("Split Menu/Footer Extracted Overlay");
+    ImGui::TextWrapped("Draws the footer/bottom band and the upper-right menu as separate crops. This lets the main menu move/scale independently from the footer.");
+    m_daysgone_bend_ui_key_threshold->draw_drag("Overlay Key Threshold", 0.001f, "%.3f");
+    m_daysgone_bend_ui_key_softness->draw_drag("Overlay Key Softness", 0.001f, "%.3f");
+    m_daysgone_bend_ui_key_opacity->draw_drag("Overlay Opacity", 0.01f, "%.3f");
+    m_daysgone_bend_ui_screen_offset_x->draw_drag("Overlay Offset X", 1.0f, "%.1f");
+    m_daysgone_bend_ui_screen_offset_y->draw_drag("Overlay Offset Y", 1.0f, "%.1f");
+    m_daysgone_bend_ui_screen_scale->draw_drag("Overlay Scale", 0.01f, "%.3f");
+    m_daysgone_bend_ui_draw_scale->draw_drag("Overlay Fine Scale", 0.01f, "%.3f");
+    m_daysgone_bend_ui_menu_offset_x->draw_drag("Upper Menu Offset X", 1.0f, "%.1f");
+    m_daysgone_bend_ui_menu_offset_y->draw_drag("Upper Menu Offset Y", 1.0f, "%.1f");
+    m_daysgone_bend_ui_menu_scale->draw_drag("Upper Menu Scale", 0.01f, "%.3f");
+
+    if (ImGui::TreeNode("Extracted overlay crop tuning")) {
+        m_daysgone_bend_ui_menu_src_x->draw_drag("Upper Menu Source X", 0.001f, "%.3f");
+        m_daysgone_bend_ui_menu_src_y->draw_drag("Upper Menu Source Y", 0.001f, "%.3f");
+        m_daysgone_bend_ui_menu_src_w->draw_drag("Upper Menu Source W", 0.001f, "%.3f");
+        m_daysgone_bend_ui_menu_src_h->draw_drag("Upper Menu Source H", 0.001f, "%.3f");
+        m_daysgone_bend_ui_footer_src_y->draw_drag("Footer Source Y", 0.001f, "%.3f");
+        m_daysgone_bend_ui_footer_src_h->draw_drag("Footer Source H", 0.001f, "%.3f");
+        ImGui::TreePop();
+    }
+
+    ImGui::SeparatorText("Active SlateHUD / UMG Root Viewport Slot");
+    m_daysgone_bend_ui_viewport_slot_fix->draw("Root UUserWidget Viewport Slot Fix");
+    m_daysgone_bend_ui_viewport_slot_offset_x->draw_drag("Root Slot Offset X", 1.0f, "%.1f");
+    m_daysgone_bend_ui_viewport_slot_offset_y->draw_drag("Root Slot Offset Y", 1.0f, "%.1f");
+    m_daysgone_bend_ui_viewport_slot_scale->draw_drag("Root Render Scale", 0.01f, "%.3f");
+    m_daysgone_bend_ui_viewport_slot_opacity->draw_drag("Root Opacity", 0.01f, "%.3f");
+    if (ImGui::Button("Apply Current UI Tuning Once")) {
+        m_daysgone_bend_ui_manual_apply_generation.fetch_add(1);
+    }
+    ImGui::SameLine();
+    m_daysgone_bend_ui_live_watchdog->draw("Live Reapply Watchdog");
+    ImGui::TextWrapped("Targets UI_MainMenuWidget, OptionsMenuWidget, OptionsTopMenuWidget, UI_HudWidget, UI_SubtitleWidget, and UI_MegaMenu roots. The slot stays 1920x1080; scale is applied as a render transform to avoid clipping/cropping.");
+    m_daysgone_bend_ui_disable_taa_crop->draw("Disable Bend TAA Slate Crop");
+    ImGui::TextWrapped("Only active when the extracted Slate overlay is enabled and the in-scene composite is suppressed. This avoids touching Bend TAA crops during normal gameplay.");
+    ImGui::TextWrapped("This now applies only when settings change or when Apply Current UI Tuning Once is pressed. The watchdog is off by default; only enable it if the game recreates the menu widgets and you need periodic reapplication.");
+
+    if (ImGui::TreeNode("Advanced legacy BP_Menu3D/widget controls")) {
+        int mode = std::clamp(m_daysgone_bend_ui_mode->value(), 0, 2);
+        constexpr const char* kModeItems = "Player-camera fields only\0Widget transform only\0Player-camera + widget transform\0";
+        if (ImGui::Combo("Placement Mode", &mode, kModeItems)) {
+            m_daysgone_bend_ui_mode->value() = mode;
+        }
+
+        m_daysgone_bend_ui_force_player_camera->draw("Force BP_Menu3D UsePlayerCamera");
+        m_daysgone_bend_ui_distance_from_camera->draw_drag("Distance From Camera", 5.0f, "%.1f");
+        m_daysgone_bend_ui_camera_fov->draw_drag("Camera FOV", 0.25f, "%.2f");
+
+        ImGui::SeparatorText("BendWidgetMain");
+        m_daysgone_bend_ui_override_widget_transform->draw("Override Widget Transform");
+        m_daysgone_bend_ui_widget_loc_x->draw_drag("Widget Loc X", 5.0f, "%.1f");
+        m_daysgone_bend_ui_widget_loc_y->draw_drag("Widget Loc Y", 5.0f, "%.1f");
+        m_daysgone_bend_ui_widget_loc_z->draw_drag("Widget Loc Z", 5.0f, "%.1f");
+        m_daysgone_bend_ui_widget_rot_pitch->draw_drag("Widget Rot Pitch", 0.25f, "%.2f");
+        m_daysgone_bend_ui_widget_rot_yaw->draw_drag("Widget Rot Yaw", 0.25f, "%.2f");
+        m_daysgone_bend_ui_widget_rot_roll->draw_drag("Widget Rot Roll", 0.25f, "%.2f");
+        m_daysgone_bend_ui_widget_scale->draw_drag("Widget Uniform Scale", 0.01f, "%.3f");
+
+        ImGui::SeparatorText("Child Render Transform");
+        m_daysgone_bend_ui_apply_child_render_transform->draw("Experimental Child Render Transform");
+        m_daysgone_bend_ui_screen_offset_x->draw_drag("Child Render Offset X", 1.0f, "%.1f");
+        m_daysgone_bend_ui_screen_offset_y->draw_drag("Child Render Offset Y", 1.0f, "%.1f");
+        m_daysgone_bend_ui_screen_scale->draw_drag("Child Render Scale", 0.01f, "%.3f");
+        m_daysgone_bend_ui_draw_scale->draw_drag("Child Draw Scale", 0.01f, "%.3f");
+        m_daysgone_bend_ui_force_widget_refresh->draw("Force Redraw / Offscreen Safe Flags");
+
+        ImGui::SeparatorText("DefaultSceneRoot1");
+        m_daysgone_bend_ui_override_root_transform->draw("Override Root Location");
+        m_daysgone_bend_ui_root_loc_x->draw_drag("Root Loc X", 5.0f, "%.1f");
+        m_daysgone_bend_ui_root_loc_y->draw_drag("Root Loc Y", 5.0f, "%.1f");
+        m_daysgone_bend_ui_root_loc_z->draw_drag("Root Loc Z", 5.0f, "%.1f");
+        ImGui::TreePop();
+    }
+
+    if (ImGui::Button("Observed Defaults")) {
+        m_daysgone_bend_ui_mode->value() = 2;
+        m_daysgone_bend_ui_force_player_camera->value() = false;
+        m_daysgone_bend_ui_override_widget_transform->value() = true;
+        m_daysgone_bend_ui_override_root_transform->value() = false;
+        m_daysgone_bend_ui_use_slate_overlay->value() = false;
+        m_daysgone_bend_ui_suppress_in_scene_composite->value() = false;
+        m_daysgone_bend_ui_split_overlay->value() = true;
+        m_daysgone_bend_ui_menu_src_x->value() = 0.52f;
+        m_daysgone_bend_ui_menu_src_y->value() = 0.0f;
+        m_daysgone_bend_ui_menu_src_w->value() = 0.48f;
+        m_daysgone_bend_ui_menu_src_h->value() = 0.48f;
+        m_daysgone_bend_ui_menu_offset_x->value() = -450.0f;
+        m_daysgone_bend_ui_menu_offset_y->value() = -650.0f;
+        m_daysgone_bend_ui_menu_scale->value() = 1.0f;
+        m_daysgone_bend_ui_footer_src_y->value() = 0.68f;
+        m_daysgone_bend_ui_footer_src_h->value() = 0.32f;
+        m_daysgone_bend_ui_key_threshold->value() = 0.025f;
+        m_daysgone_bend_ui_key_softness->value() = 0.045f;
+        m_daysgone_bend_ui_key_opacity->value() = 1.0f;
+        m_daysgone_bend_ui_disable_taa_crop->value() = true;
+        m_daysgone_bend_ui_distance_from_camera->value() = -1371.022f;
+        m_daysgone_bend_ui_camera_fov->value() = 70.0f;
+        m_daysgone_bend_ui_widget_loc_x->value() = 0.0f;
+        m_daysgone_bend_ui_widget_loc_y->value() = 0.0f;
+        m_daysgone_bend_ui_widget_loc_z->value() = -1371.022f;
+        m_daysgone_bend_ui_widget_rot_pitch->value() = 90.0f;
+        m_daysgone_bend_ui_widget_rot_yaw->value() = 90.0f;
+        m_daysgone_bend_ui_widget_rot_roll->value() = 0.0f;
+        m_daysgone_bend_ui_widget_scale->value() = 1.0f;
+        m_daysgone_bend_ui_viewport_slot_fix->value() = true;
+        m_daysgone_bend_ui_live_watchdog->value() = false;
+        m_daysgone_bend_ui_apply_child_render_transform->value() = false;
+        m_daysgone_bend_ui_viewport_slot_offset_x->value() = -240.0f;
+        m_daysgone_bend_ui_viewport_slot_offset_y->value() = 0.0f;
+        m_daysgone_bend_ui_viewport_slot_scale->value() = 0.85f;
+        m_daysgone_bend_ui_viewport_slot_opacity->value() = 1.0f;
+        m_daysgone_bend_ui_screen_offset_x->value() = 0.0f;
+        m_daysgone_bend_ui_screen_offset_y->value() = 0.0f;
+        m_daysgone_bend_ui_screen_scale->value() = 1.0f;
+        m_daysgone_bend_ui_draw_scale->value() = 1.0f;
+        m_daysgone_bend_ui_override_composite_extent->value() = false;
+        m_daysgone_bend_ui_composite_width->value() = 1920.0f;
+        m_daysgone_bend_ui_composite_height->value() = 1080.0f;
+        m_daysgone_bend_ui_override_shader_params->value() = false;
+        m_daysgone_bend_ui_shader_param_target->value() = 3;
+        m_daysgone_bend_ui_shader_offset_x->value() = 0.0f;
+        m_daysgone_bend_ui_shader_offset_y->value() = 0.0f;
+        m_daysgone_bend_ui_shader_scale_x->value() = 1.0f;
+        m_daysgone_bend_ui_shader_scale_y->value() = 1.0f;
+        m_daysgone_bend_ui_root_loc_x->value() = 0.0f;
+        m_daysgone_bend_ui_root_loc_y->value() = 0.0f;
+        m_daysgone_bend_ui_root_loc_z->value() = -1200.0f;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Recenter Test Preset")) {
+        m_daysgone_bend_ui_mode->value() = 2;
+        m_daysgone_bend_ui_force_player_camera->value() = true;
+        m_daysgone_bend_ui_override_widget_transform->value() = true;
+        m_daysgone_bend_ui_use_slate_overlay->value() = false;
+        m_daysgone_bend_ui_suppress_in_scene_composite->value() = false;
+        m_daysgone_bend_ui_split_overlay->value() = true;
+        m_daysgone_bend_ui_menu_src_x->value() = 0.52f;
+        m_daysgone_bend_ui_menu_src_y->value() = 0.0f;
+        m_daysgone_bend_ui_menu_src_w->value() = 0.48f;
+        m_daysgone_bend_ui_menu_src_h->value() = 0.48f;
+        m_daysgone_bend_ui_menu_offset_x->value() = -450.0f;
+        m_daysgone_bend_ui_menu_offset_y->value() = -650.0f;
+        m_daysgone_bend_ui_menu_scale->value() = 1.0f;
+        m_daysgone_bend_ui_footer_src_y->value() = 0.68f;
+        m_daysgone_bend_ui_footer_src_h->value() = 0.32f;
+        m_daysgone_bend_ui_key_threshold->value() = 0.025f;
+        m_daysgone_bend_ui_key_softness->value() = 0.045f;
+        m_daysgone_bend_ui_key_opacity->value() = 1.0f;
+        m_daysgone_bend_ui_disable_taa_crop->value() = true;
+        m_daysgone_bend_ui_distance_from_camera->value() = -1200.0f;
+        m_daysgone_bend_ui_camera_fov->value() = 70.0f;
+        m_daysgone_bend_ui_widget_loc_x->value() = 0.0f;
+        m_daysgone_bend_ui_widget_loc_y->value() = 0.0f;
+        m_daysgone_bend_ui_widget_loc_z->value() = -1200.0f;
+        m_daysgone_bend_ui_widget_rot_pitch->value() = 90.0f;
+        m_daysgone_bend_ui_widget_rot_yaw->value() = 90.0f;
+        m_daysgone_bend_ui_widget_rot_roll->value() = 0.0f;
+        m_daysgone_bend_ui_widget_scale->value() = 1.0f;
+        m_daysgone_bend_ui_viewport_slot_fix->value() = true;
+        m_daysgone_bend_ui_live_watchdog->value() = false;
+        m_daysgone_bend_ui_apply_child_render_transform->value() = false;
+        m_daysgone_bend_ui_viewport_slot_offset_x->value() = -240.0f;
+        m_daysgone_bend_ui_viewport_slot_offset_y->value() = 0.0f;
+        m_daysgone_bend_ui_viewport_slot_scale->value() = 0.85f;
+        m_daysgone_bend_ui_viewport_slot_opacity->value() = 1.0f;
+        m_daysgone_bend_ui_screen_offset_x->value() = 0.0f;
+        m_daysgone_bend_ui_screen_offset_y->value() = 0.0f;
+        m_daysgone_bend_ui_screen_scale->value() = 1.0f;
+        m_daysgone_bend_ui_draw_scale->value() = 1.0f;
+        m_daysgone_bend_ui_override_composite_extent->value() = false;
+        m_daysgone_bend_ui_composite_width->value() = 1920.0f;
+        m_daysgone_bend_ui_composite_height->value() = 1080.0f;
+        m_daysgone_bend_ui_override_shader_params->value() = false;
+        m_daysgone_bend_ui_shader_param_target->value() = 3;
+        m_daysgone_bend_ui_shader_offset_x->value() = 0.0f;
+        m_daysgone_bend_ui_shader_offset_y->value() = 0.0f;
+        m_daysgone_bend_ui_shader_scale_x->value() = 1.0f;
+        m_daysgone_bend_ui_shader_scale_y->value() = 1.0f;
+    }
+
+    ImGui::TreePop();
+}
+
+bool FFakeStereoRenderingHook::invalidate_ue57_resolution_dependent_state(
+    uint32_t old_width,
+    uint32_t old_height,
+    uint32_t new_width,
+    uint32_t new_height) {
+    if (!is_ue_5_7_or_newer()) {
+        return false;
+    }
+
+    SPDLOG_INFO(
+        "[UE5.7][OpenXR] Resolution changed [{}x{}]->[{}x{}]; invalidating Slate/UI render targets",
+        old_width,
+        old_height,
+        new_width,
+        new_height);
+
+    m_wants_texture_recreation = true;
+    m_skip_next_adjust_view_rect = true;
+
+    // Force the UE5.7 Slate/UI path to observe fresh post-resize DrawWindow and
+    // PreRenderViewFamily traffic instead of reusing candidates captured at the
+    // previous OpenXR scale.
+    m_has_seen_stable_slate_draw = false;
+    m_has_seen_prerender_viewfamily = false;
+    m_first_stable_slate_draw_at = {};
+
+    m_rtm.invalidate_resolution_dependent_targets();
+    m_rtm_418.invalidate_resolution_dependent_targets();
+    m_rtm_special.invalidate_resolution_dependent_targets();
+
+    return true;
 }
 
 void FFakeStereoRenderingHook::attempt_hooking() {
@@ -252,8 +4207,122 @@ void FFakeStereoRenderingHook::attempt_hooking() {
         attempt_runtime_inject_stereo();
         m_injected_stereo_at_runtime = true;
     }
+
+    attempt_hook_windrose_hfsm_ui();
     
     m_hooked = hook();
+}
+
+bool FFakeStereoRenderingHook::attempt_hook_windrose_hfsm_ui() {
+    if (m_attempted_hook_windrose_hfsm_ui || !windrose_is_current_game()) {
+        return false;
+    }
+
+    m_attempted_hook_windrose_hfsm_ui = true;
+
+    struct Target {
+        const char* label;
+        uintptr_t old_rva;
+        const char* pattern;
+        safetyhook::InlineHook FFakeStereoRenderingHook::* hook;
+        void* destination;
+    };
+
+    const Target targets[] = {
+        {
+            "UHFSMState::Enter",
+            0x4A087C0,
+            "48 89 5C 24 20 56 48 83 EC 30 80 B9 B0 00 00 00 00 48 8B F1 48 89 6C 24 48 48 89 7C 24 50 74 58 48 8B 01 FF 90 80 01 00 00 48 8B C8 E8 ? ? ? ? 48 8B F8 48 85 C0",
+            &FFakeStereoRenderingHook::m_windrose_hfsm_state_enter_hook,
+            (void*)&FFakeStereoRenderingHook::windrose_hfsm_state_enter_hook,
+        },
+        {
+            "UHFSMState::Exit",
+            0x4A08970,
+            "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 20 33 C0 48 8B F1 48 89 44 24 30 32 C9 48 3B 54 24 30 B8 01 00 00 00 0F B6 E9 48 8B DA 0F 44 E8",
+            &FFakeStereoRenderingHook::m_windrose_hfsm_state_exit_hook,
+            (void*)&FFakeStereoRenderingHook::windrose_hfsm_state_exit_hook,
+        },
+        {
+            "UHFSMStateComponent::Enter",
+            0x4A08D20,
+            "40 57 48 83 EC 20 80 79 31 00 48 8B F9 74 72 48 83 C1 34 E8 ? ? ? ? 84 C0 74 65 48 83 7F 28 00 74 5E 48 8B 07 48 8B CF FF 90 80 01 00 00 48 8B C8 E8 ? ? ? ? 48 85 C0 74 45",
+            &FFakeStereoRenderingHook::m_windrose_hfsm_component_enter_hook,
+            (void*)&FFakeStereoRenderingHook::windrose_hfsm_component_enter_hook,
+        },
+        {
+            "UHFSMStateComponent::Exit",
+            0x4A08DB0,
+            "48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 80 79 31 00 41 0F B6 E8 48 8B FA 48 8B F1 74 63 48 83 C1 34 E8 ? ? ? ? 84 C0 74 56 48 83 7E 28 00 74 4F",
+            &FFakeStereoRenderingHook::m_windrose_hfsm_component_exit_hook,
+            (void*)&FFakeStereoRenderingHook::windrose_hfsm_component_exit_hook,
+        },
+        {
+            "UUILayoutTemplate::Enter",
+            0x4A0A570,
+            "48 89 5C 24 18 48 89 74 24 20 57 48 83 EC 30 48 8B 01 48 8B F9 C6 41 30 01 FF 90 80 01 00 00 48 8B C8 33 D2 E8 ? ? ? ? 0F B6 0D ? ? ? ? 48 8B F0 48 8B 5F 50",
+            &FFakeStereoRenderingHook::m_windrose_layout_template_enter_hook,
+            (void*)&FFakeStereoRenderingHook::windrose_layout_template_enter_hook,
+        },
+        {
+            "UUILayoutTemplate::Exit",
+            0x4A0A6B0,
+            "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 48 8B E9 45 0F B6 F0 48 8B 49 28 48 8B DA E8 ? ? ? ? 48 85 C0 74 0B 48 8B D5",
+            &FFakeStereoRenderingHook::m_windrose_layout_template_exit_hook,
+            (void*)&FFakeStereoRenderingHook::windrose_layout_template_exit_hook,
+        },
+    };
+
+    uint32_t hooked_count = 0;
+    for (const auto& target : targets) {
+        const auto address = windrose_resolve_hfsm_symbol(target.label, target.old_rva, target.pattern);
+        if (!address) {
+            continue;
+        }
+
+        auto& hook = this->*target.hook;
+        hook = safetyhook::create_inline((void*)*address, target.destination);
+        if (!hook) {
+            SPDLOG_ERROR("[Windrose][HFSM] Failed to hook {}", target.label);
+            continue;
+        }
+
+        ++hooked_count;
+        SPDLOG_INFO("[Windrose][HFSM] Hooked {}", target.label);
+    }
+
+    SPDLOG_INFO("[Windrose][HFSM] Transition hook setup complete hooked={}/{}", hooked_count, sizeof(targets) / sizeof(targets[0]));
+    return hooked_count != 0;
+}
+
+void FFakeStereoRenderingHook::windrose_hfsm_state_enter_hook(void* state) {
+    windrose_note_hfsm_transition(state, true, "UHFSMState");
+    g_hook->m_windrose_hfsm_state_enter_hook.call<void>(state);
+}
+
+void FFakeStereoRenderingHook::windrose_hfsm_state_exit_hook(void* state, uintptr_t destination_name) {
+    g_hook->m_windrose_hfsm_state_exit_hook.call<void>(state, destination_name);
+    windrose_note_hfsm_transition(state, false, "UHFSMState");
+}
+
+void FFakeStereoRenderingHook::windrose_hfsm_component_enter_hook(void* component) {
+    windrose_note_hfsm_transition(component, true, "UHFSMStateComponent");
+    g_hook->m_windrose_hfsm_component_enter_hook.call<void>(component);
+}
+
+void FFakeStereoRenderingHook::windrose_hfsm_component_exit_hook(void* component, uintptr_t destination_name, int32_t reason) {
+    g_hook->m_windrose_hfsm_component_exit_hook.call<void>(component, destination_name, reason);
+    windrose_note_hfsm_transition(component, false, "UHFSMStateComponent");
+}
+
+void FFakeStereoRenderingHook::windrose_layout_template_enter_hook(void* layout) {
+    windrose_note_hfsm_transition(layout, true, "UUILayoutTemplate");
+    g_hook->m_windrose_layout_template_enter_hook.call<void>(layout);
+}
+
+void FFakeStereoRenderingHook::windrose_layout_template_exit_hook(void* layout, uintptr_t destination_name, int32_t reason) {
+    g_hook->m_windrose_layout_template_exit_hook.call<void>(layout, destination_name, reason);
+    windrose_note_hfsm_transition(layout, false, "UUILayoutTemplate");
 }
 
 namespace detail{
@@ -375,6 +4444,8 @@ void* FFakeStereoRenderingHook::engine_tick_hook(sdk::UGameEngine* engine, float
     ZoneScopedN("UGameEngine::Tick Hook");
     FrameMarkStart("UGameEngine::Tick");
 
+    sdk::UEngine::set_runtime_engine(engine);
+
     auto hook = g_hook;
     
     hook->m_in_engine_tick = true;
@@ -392,6 +4463,10 @@ void* FFakeStereoRenderingHook::engine_tick_hook(sdk::UGameEngine* engine, float
     }
 
     if (!g_framework->is_game_data_intialized()) {
+        if (hook->m_safe_tick_hook->value()) {
+            return hook->m_tick_hook.call<void*>(engine, delta, idle);
+        }
+
         // This allocates memory on the stack.
         static bool check_canary_once = true;
         volatile uint64_t shadow_space[64]{};
@@ -464,39 +4539,47 @@ void* FFakeStereoRenderingHook::engine_tick_hook(sdk::UGameEngine* engine, float
     void* result = nullptr;
 
     {
-        // This allocates memory on the stack.
-        static bool check_canary_once = true;
-        volatile uint64_t shadow_space[64]{};
+        if (hook->m_safe_tick_hook->value()) {
+            result = hook->m_tick_hook.call<void*>(engine, delta, idle);
+        } else {
+            // This allocates memory on the stack.
+            static bool check_canary_once = true;
+            volatile uint64_t shadow_space[64]{};
 
 #ifdef NDEBUG
-        if (check_canary_once) {
+            if (check_canary_once) {
 #endif
-            std::memset((void*)shadow_space, 0, 64 * sizeof(uint64_t));
+                std::memset((void*)shadow_space, 0, 64 * sizeof(uint64_t));
 #ifdef NDEBUG
-        }
-#endif
-        // We're using original here instead of call_unsafe to make sure the canaries are the first thing on the stack.
-        result = hook->m_tick_hook.original<void* (*)(sdk::UGameEngine*, float, bool)>()(engine, delta, idle);
-
-        // At least do some logic with the shadow space so it doesn't get optimized out for some reason.
-        // But only do it once in release builds.
-#ifdef NDEBUG
-        if (check_canary_once) {
-#endif
-            for (size_t i = 0; i < 64; ++i) {
-                if (shadow_space[i] != 0) {
-                    SPDLOG_ERROR("[UGameEngine::Tick] Shadow space was overwritten! {:x} @ {}", shadow_space[i], i);
-                }
             }
+#endif
+            // We're using original here instead of call_unsafe to make sure the canaries are the first thing on the stack.
+            result = hook->m_tick_hook.original<void* (*)(sdk::UGameEngine*, float, bool)>()(engine, delta, idle);
+
+            // At least do some logic with the shadow space so it doesn't get optimized out for some reason.
+            // But only do it once in release builds.
+#ifdef NDEBUG
+            if (check_canary_once) {
+#endif
+                for (size_t i = 0; i < 64; ++i) {
+                    if (shadow_space[i] != 0) {
+                        SPDLOG_ERROR("[UGameEngine::Tick] Shadow space was overwritten! {:x} @ {}", shadow_space[i], i);
+                    }
+                }
 
 #ifdef NDEBUG
-            check_canary_once = false;
-        }
+                check_canary_once = false;
+            }
 #endif
+        }
     }
 
     for (auto& mod : mods) {
         mod->on_post_engine_tick(engine, delta);
+    }
+
+    if (hook->m_tracking_system_hook != nullptr) {
+        hook->m_tracking_system_hook->on_post_engine_tick(engine, delta);
     }
 
     return result;
@@ -542,6 +4625,15 @@ void FFakeStereoRenderingHook::attempt_hook_slate_thread(uintptr_t return_addres
     }
 
     auto func = alternate ? sdk::slate::locate_draw_window_renderthread_fn_alternate() : sdk::slate::locate_draw_window_renderthread_fn();
+
+    if (!func && !alternate) {
+        func = sdk::slate::locate_draw_window_renderthread_fn_alternate();
+
+        if (func) {
+            SPDLOG_INFO("Using alternate SlateRHIRenderer::DrawWindow_RenderThread scan result after primary scan failed");
+            m_attempted_hook_slate_thread_alternate = true;
+        }
+    }
 
     if (!func && return_address == 0) {
         SPDLOG_ERROR("Cannot hook FSlateRHIRenderer::DrawWindow_RenderThread");
@@ -595,6 +4687,467 @@ void FFakeStereoRenderingHook::attempt_hook_slate_thread(uintptr_t return_addres
     }
 
     SPDLOG_INFO("Hooked FSlateRHIRenderer::DrawWindow_RenderThread @ 0x{:x}!", *func);
+
+    if (is_ue_5_8() && g_framework->is_dx12()) {
+        attempt_hook_ue58_slate_output_texture_register();
+    }
+
+    // UE5.7 elements-pass inspection is a fallback only. Let the DrawWindow path
+    // try the dedicated UI target first before probing extra callsites.
+}
+
+void FFakeStereoRenderingHook::attempt_hook_ue57_slate_elements_pass() {
+    if (!is_ue_5_7_or_newer() || !g_framework->is_dx12()) {
+        return;
+    }
+
+    if (m_attempted_hook_ue57_slate_elements_pass) {
+        return;
+    }
+
+    if (const auto rtm = get_render_target_manager(); rtm != nullptr && rtm->has_dedicated_ui_target()) {
+        SPDLOG_INFO_ONCE("Skipping UE 5.7 Slate elements-pass fallback because the dedicated UI target is active");
+        return;
+    }
+
+    m_attempted_hook_ue57_slate_elements_pass = true;
+
+    const auto draw_window = g_hook->m_slate_thread_hook.target_address();
+
+    if (draw_window == 0) {
+        SPDLOG_ERROR("Cannot scan UE 5.7 DrawWindow_RenderThread for Slate callsites because the Slate hook has no target address");
+        return;
+    }
+
+    const auto module_within = utility::get_module_within(draw_window);
+
+    if (!module_within.has_value()) {
+        SPDLOG_ERROR("Cannot scan UE 5.7 DrawWindow_RenderThread for Slate callsites because the module was not resolved");
+        return;
+    }
+
+    const auto& slate_symbols = vrmod::get_ue57_slate_symbols();
+
+    if (slate_symbols.add_slate_draw_elements_pass != 0 &&
+        is_executable_process_range(slate_symbols.add_slate_draw_elements_pass, 1)) {
+        const auto symbol_module = utility::get_module_within(reinterpret_cast<void*>(slate_symbols.add_slate_draw_elements_pass));
+
+        if (symbol_module.has_value()) {
+            auto hook_result = safetyhook::create_mid(
+                reinterpret_cast<void*>(slate_symbols.add_slate_draw_elements_pass),
+                &FFakeStereoRenderingHook::ue57_add_slate_draw_elements_pass_hook);
+
+            if (hook_result) {
+                m_ue57_slate_elements_hooks.emplace_back(std::move(hook_result));
+                m_hooked_ue57_slate_elements_pass = true;
+                SPDLOG_INFO("Hooked UE 5.7 AddSlateDrawElementsPass by symbol at {:x}", slate_symbols.add_slate_draw_elements_pass);
+                return;
+            }
+
+            SPDLOG_WARN("Failed to hook UE 5.7 AddSlateDrawElementsPass symbol at {:x}", slate_symbols.add_slate_draw_elements_pass);
+        } else {
+            SPDLOG_INFO("Ignoring UE 5.7 AddSlateDrawElementsPass symbol {:x} because its module could not be resolved",
+                slate_symbols.add_slate_draw_elements_pass);
+        }
+    }
+
+    struct DirectCall {
+        uintptr_t callsite{};
+        uintptr_t target{};
+        uint8_t length{};
+    };
+
+    std::vector<DirectCall> direct_calls{};
+
+    utility::exhaustive_decode((uint8_t*)draw_window, 0x1200, [&](utility::ExhaustionContext& ctx) -> utility::ExhaustionResult {
+        const auto mnemonic = std::string_view{ctx.instrux.Mnemonic};
+
+        if (!mnemonic.starts_with("CALL")) {
+            return utility::ExhaustionResult::CONTINUE;
+        }
+
+        const auto target = utility::resolve_displacement(ctx.addr);
+
+        if (!target.has_value()) {
+            return utility::ExhaustionResult::CONTINUE;
+        }
+
+        const auto called_module = utility::get_module_within((void*)*target);
+
+        if (!called_module.has_value() || *called_module != *module_within) {
+            return utility::ExhaustionResult::CONTINUE;
+        }
+
+        direct_calls.push_back({ctx.addr, *target, (uint8_t)ctx.instrux.Length});
+        return utility::ExhaustionResult::CONTINUE;
+    });
+
+    std::unordered_map<uintptr_t, std::vector<DirectCall>> grouped_calls{};
+
+    for (const auto& call : direct_calls) {
+        grouped_calls[call.target].push_back(call);
+    }
+
+    std::vector<DirectCall> candidate_calls{};
+    std::unordered_set<uintptr_t> candidate_calls_seen{};
+
+    for (const auto& [target, calls] : grouped_calls) {
+        if (calls.size() >= 2) {
+            for (const auto& call : calls) {
+                if (candidate_calls_seen.insert(call.callsite).second) {
+                    candidate_calls.push_back(call);
+                }
+            }
+        }
+    }
+
+    // UE5.7.3 may only emit one direct call to AddSlateDrawElementsPass in optimized shipping builds.
+    // Hook a capped set of single-call candidates and let the hook validate the r8 input shape at runtime.
+    for (const auto& call : direct_calls) {
+        if (candidate_calls_seen.insert(call.callsite).second) {
+            candidate_calls.push_back(call);
+        }
+    }
+
+    if (candidate_calls.empty()) {
+        const auto rtm = get_render_target_manager();
+
+        if (rtm != nullptr && rtm->has_dedicated_ui_target()) {
+            SPDLOG_INFO("No direct-call candidates inside UE 5.7 DrawWindow_RenderThread; dedicated UI target is already active");
+        } else {
+            SPDLOG_WARN("Could not find direct-call candidates inside UE 5.7 DrawWindow_RenderThread for ElementsTexture inspection");
+        }
+
+        return;
+    }
+
+    size_t hooked_count{};
+    constexpr size_t max_ue57_slate_callsite_hooks = 32;
+
+    for (const auto& call : candidate_calls) {
+        if (hooked_count >= max_ue57_slate_callsite_hooks) {
+            break;
+        }
+
+        auto hook_result = safetyhook::create_mid(
+            reinterpret_cast<void*>(call.callsite),
+            &FFakeStereoRenderingHook::ue57_add_slate_draw_elements_pass_hook);
+
+        if (!hook_result) {
+            SPDLOG_WARN("Failed to hook UE 5.7 DrawWindow_RenderThread callsite {:x} -> {:x}", call.callsite, call.target);
+            continue;
+        }
+
+        m_ue57_slate_elements_hooks.emplace_back(std::move(hook_result));
+        ++hooked_count;
+    }
+
+    if (hooked_count == 0) {
+        SPDLOG_WARN("Failed to hook any UE 5.7 DrawWindow_RenderThread callsites for ElementsTexture inspection");
+        return;
+    }
+
+    m_hooked_ue57_slate_elements_pass = true;
+    SPDLOG_INFO(
+        "Hooked {} UE 5.7 DrawWindow_RenderThread callsites for validated ElementsTexture inspection ({} same-module calls found)",
+        hooked_count,
+        direct_calls.size());
+}
+
+void FFakeStereoRenderingHook::attempt_hook_ue55_slate_output_texture_register() {
+    if (!supports_ue55_dedicated_ui_target_for_current_game()) {
+        return;
+    }
+
+    if (m_attempted_hook_ue55_slate_output_texture_register) {
+        return;
+    }
+
+    m_attempted_hook_ue55_slate_output_texture_register = true;
+
+    const auto draw_window = g_hook != nullptr ? g_hook->m_slate_thread_hook.target_address() : 0;
+
+    if (draw_window == 0) {
+        SPDLOG_ERROR("[UE5.5][SlateUI] Cannot scan DrawWindow_RenderThread because the Slate hook has no target address");
+        return;
+    }
+
+    uintptr_t slate_output_ref_ip{};
+    uintptr_t register_callsite{};
+    uintptr_t register_target{};
+    bool after_slate_output_ref = false;
+
+    // Decode linearly here. exhaustive_decode follows early CALL branches in this
+    // function and can miss the straight-line RegisterExternalTexture callsite.
+    for (auto* ip = (uint8_t*)draw_window; (uintptr_t)ip < draw_window + 0x3000;) {
+        const auto decoded = utility::decode_one(ip);
+
+        if (!decoded) {
+            break;
+        }
+
+        if (!after_slate_output_ref) {
+            const auto referenced = utility::resolve_displacement((uintptr_t)ip);
+
+            if (referenced &&
+                is_readable_process_range(*referenced, sizeof(wchar_t) * 19) &&
+                std::wstring_view{(const wchar_t*)*referenced, 18}.starts_with(L"SlateOutputTexture"))
+            {
+                slate_output_ref_ip = (uintptr_t)ip;
+                after_slate_output_ref = true;
+                SPDLOG_INFO("[UE5.5][SlateUI] found SlateOutputTexture reference at {:x}", slate_output_ref_ip);
+            }
+
+            ip += decoded->Length;
+            continue;
+        }
+
+        const auto mnemonic = std::string_view{decoded->Mnemonic};
+
+        if (mnemonic.starts_with("CALL")) {
+            const auto target = utility::resolve_displacement((uintptr_t)ip);
+
+            if (target.has_value()) {
+                register_callsite = (uintptr_t)ip;
+                register_target = *target;
+                break;
+            }
+        }
+
+        if (decoded->Instruction == ND_INS_RETN || decoded->Instruction == ND_INS_INT3) {
+            break;
+        }
+
+        ip += decoded->Length;
+    }
+
+    if (slate_output_ref_ip == 0 || register_callsite == 0) {
+        SPDLOG_ERROR("[UE5.5][SlateUI] Failed to find SlateOutputTexture RegisterExternalTexture callsite in DrawWindow_RenderThread");
+        return;
+    }
+
+    auto hook_result = safetyhook::create_mid(
+        reinterpret_cast<void*>(register_callsite),
+        &FFakeStereoRenderingHook::ue55_slate_output_texture_register_hook);
+
+    if (!hook_result) {
+        SPDLOG_ERROR("[UE5.5][SlateUI] Failed to hook SlateOutputTexture RegisterExternalTexture callsite {:x}", register_callsite);
+        return;
+    }
+
+    m_ue55_slate_output_texture_register_hook = std::move(hook_result);
+    m_hooked_ue55_slate_output_texture_register = true;
+
+    SPDLOG_WARN("[UE5.5][SlateUI] Hooked SlateOutputTexture RegisterExternalTexture callsite {:x} -> {:x}", register_callsite, register_target);
+}
+
+void FFakeStereoRenderingHook::attempt_hook_ue58_slate_output_texture_register() {
+    if (!is_ue_5_8() || !supports_ue57_dedicated_ui_target() || g_framework == nullptr || !g_framework->is_dx12()) {
+        return;
+    }
+
+    if (m_attempted_hook_ue58_slate_output_texture_register) {
+        return;
+    }
+
+    const auto draw_window = g_hook != nullptr ? g_hook->m_slate_thread_hook.target_address() : 0;
+
+    if (draw_window == 0) {
+        SPDLOG_ERROR("[UE5.8][SlateUI] Cannot scan SlateRHIRenderer because the Slate hook has no target address");
+        return;
+    }
+
+    const auto module_within = utility::get_module_within(draw_window);
+
+    if (!module_within.has_value()) {
+        SPDLOG_ERROR("[UE5.8][SlateUI] Cannot scan SlateRHIRenderer because the DrawWindow module was not resolved");
+        return;
+    }
+
+    m_attempted_hook_ue58_slate_output_texture_register = true;
+
+    const auto draw_function = utility::find_function_start(draw_window).value_or(draw_window);
+
+    struct SlateOutputFunctionRefs {
+        std::vector<uintptr_t> base_refs{};
+        std::vector<uintptr_t> layered_refs{};
+    };
+
+    std::unordered_map<uintptr_t, SlateOutputFunctionRefs> refs_by_function{};
+
+    const auto collect_refs = [&](std::wstring_view label, const std::vector<uintptr_t>& strings, bool layered) {
+        if (strings.empty()) {
+            SPDLOG_WARN("[UE5.8][SlateUI] Could not find {} string in SlateRHIRenderer", utility::narrow(label));
+            return;
+        }
+
+        for (const auto string_addr : strings) {
+            const auto refs = utility::scan_displacement_references(*module_within, string_addr);
+
+            for (const auto ref : refs) {
+                const auto function_start = utility::find_function_start_with_call(ref);
+
+                if (!function_start.has_value() || *function_start != draw_function) {
+                    continue;
+                }
+
+                auto& function_refs = refs_by_function[*function_start];
+
+                if (layered) {
+                    function_refs.layered_refs.push_back(ref);
+                } else {
+                    function_refs.base_refs.push_back(ref);
+                }
+            }
+        }
+    };
+
+    std::vector<uintptr_t> spectator_refs{};
+
+    try {
+        collect_refs(L"SlateOutputTexture", utility::scan_strings(*module_within, L"SlateOutputTexture", true), false);
+        collect_refs(L"SlateOutputTexture-%d", utility::scan_strings(*module_within, L"SlateOutputTexture-%d", true), true);
+
+        for (const auto string_addr : utility::scan_strings(*module_within, L"StereoSpectatorSwapChainTexture", true)) {
+            for (const auto ref : utility::scan_displacement_references(*module_within, string_addr)) {
+                const auto function_start = utility::find_function_start_with_call(ref);
+
+                if (function_start.has_value() && *function_start == draw_function) {
+                    spectator_refs.push_back(ref);
+                }
+            }
+        }
+    } catch (...) {
+        SPDLOG_ERROR("[UE5.8][SlateUI] Exception while scanning SlateRHIRenderer for SlateOutputTexture strings");
+        return;
+    }
+
+    std::vector<uintptr_t> proven_functions{};
+
+    for (const auto& [function_start, refs] : refs_by_function) {
+        if (!refs.base_refs.empty() && !refs.layered_refs.empty()) {
+            proven_functions.push_back(function_start);
+        }
+    }
+
+    if (proven_functions.size() != 1) {
+        SPDLOG_ERROR(
+            "[UE5.8][SlateUI] Refusing SlateOutputTexture hook because validated DrawWindow functions={} (expected exactly 1)",
+            proven_functions.size());
+        return;
+    }
+
+    if (spectator_refs.empty()) {
+        SPDLOG_ERROR("[UE5.8][SlateUI] Refusing SlateOutputTexture hook because DrawWindow lacks the StereoSpectatorSwapChainTexture validation anchor");
+        return;
+    }
+
+    struct RegisterCallsite {
+        uintptr_t callsite{};
+        uintptr_t target{};
+    };
+
+    const auto collect_internal_calls_after_ref = [&](uintptr_t ref, uintptr_t max_bytes) {
+        std::vector<RegisterCallsite> calls{};
+
+        for (auto* ip = reinterpret_cast<uint8_t*>(ref); (uintptr_t)ip < ref + max_bytes;) {
+            const auto decoded = utility::decode_one(ip);
+
+            if (!decoded) {
+                break;
+            }
+
+            const auto mnemonic = std::string_view{decoded->Mnemonic};
+
+            if (mnemonic.starts_with("CALL")) {
+                const auto target = utility::resolve_displacement((uintptr_t)ip);
+
+                if (target.has_value()) {
+                    const auto target_module = utility::get_module_within((void*)*target);
+
+                    if (target_module.has_value() && *target_module == *module_within) {
+                        calls.push_back({(uintptr_t)ip, *target});
+                    }
+                }
+            }
+
+            if (decoded->Instruction == ND_INS_RETN || decoded->Instruction == ND_INS_INT3) {
+                break;
+            }
+
+            ip += decoded->Length;
+        }
+
+        return calls;
+    };
+
+    const auto function_start = proven_functions.front();
+    const auto& refs = refs_by_function[function_start];
+    const auto latest_base_ref = *std::max_element(refs.base_refs.begin(), refs.base_refs.end());
+    const auto latest_layered_ref = *std::max_element(refs.layered_refs.begin(), refs.layered_refs.end());
+    const auto latest_ref = std::max(latest_base_ref, latest_layered_ref);
+
+    uintptr_t register_callsite{};
+    uintptr_t register_target{};
+    constexpr uintptr_t MAX_BYTES_AFTER_NAME_REF = 0x200;
+    const auto slate_candidates = collect_internal_calls_after_ref(latest_ref, MAX_BYTES_AFTER_NAME_REF);
+    std::vector<RegisterCallsite> proven_candidates{};
+    std::unordered_set<uintptr_t> proven_callsites{};
+
+    for (const auto& candidate : slate_candidates) {
+        bool target_is_reused_for_swapchain_register = false;
+
+        for (const auto spectator_ref : spectator_refs) {
+            for (const auto& spectator_call : collect_internal_calls_after_ref(spectator_ref, MAX_BYTES_AFTER_NAME_REF)) {
+                if (spectator_call.target == candidate.target) {
+                    target_is_reused_for_swapchain_register = true;
+                    break;
+                }
+            }
+
+            if (target_is_reused_for_swapchain_register) {
+                break;
+            }
+        }
+
+        if (target_is_reused_for_swapchain_register && !proven_callsites.contains(candidate.callsite)) {
+            proven_callsites.insert(candidate.callsite);
+            proven_candidates.push_back(candidate);
+        }
+    }
+
+    if (proven_candidates.size() == 1) {
+        register_callsite = proven_candidates.front().callsite;
+        register_target = proven_candidates.front().target;
+    }
+
+    if (register_callsite == 0 || register_target == 0) {
+        SPDLOG_ERROR(
+            "[UE5.8][SlateUI] Failed to prove a unique SlateOutputTexture RegisterExternalTexture callsite near refs base={:x} layered={:x}; slate_calls={} proven={}",
+            latest_base_ref,
+            latest_layered_ref,
+            slate_candidates.size(),
+            proven_candidates.size());
+        return;
+    }
+
+    auto hook_result = safetyhook::create_mid(
+        reinterpret_cast<void*>(register_callsite),
+        &FFakeStereoRenderingHook::ue58_slate_output_texture_register_hook);
+
+    if (!hook_result) {
+        SPDLOG_ERROR("[UE5.8][SlateUI] Failed to hook proven SlateOutputTexture callsite {:x} -> {:x}", register_callsite, register_target);
+        return;
+    }
+
+    m_ue58_slate_output_texture_register_hooks.emplace_back(std::move(hook_result));
+    m_hooked_ue58_slate_output_texture_register = true;
+
+    SPDLOG_WARN(
+        "[UE5.8][SlateUI] Hooked proven SlateOutputTexture RegisterExternalTexture callsite {:x} -> {:x} in DrawWindow {:x}",
+        register_callsite,
+        register_target,
+        function_start);
 }
 
 namespace detail{
@@ -654,6 +5207,58 @@ void FFakeStereoRenderingHook::attempt_hook_fsceneview_constructor() {
     SPDLOG_INFO("Hooked FSceneView::FSceneView constructor!");
 }
 
+bool FFakeStereoRenderingHook::hook_ue418_oculus_pixel_density_sink() {
+    if (m_ue418_oculus_pixel_density_hook) {
+        return true;
+    }
+
+    const auto engine_version = sdk::search_for_version(utility::get_executable()).value_or(L"");
+    if (!engine_version.starts_with(L"4.18")) {
+        return false;
+    }
+
+    // UE4.18 OculusHMD registers a CVar sink that can be called with stale
+    // settings after UEVR redirects stereo rendering. Guard the exact old sink
+    // before it writes through an invalid FSettings pointer.
+    const auto update_pixel_density = utility::scan(
+        utility::get_executable(),
+        "40 53 48 83 EC 20 80 B9 44 02 00 00 00 48 8B D9 75 ? 65 48 8B 04 25 58 00 00 00");
+
+    if (!update_pixel_density) {
+        return false;
+    }
+
+    SPDLOG_INFO("[UE4.18 Oculus] Hooking FSettings::UpdatePixelDensityFromScreenPercentage at {:x}", *update_pixel_density);
+    m_ue418_oculus_pixel_density_hook = safetyhook::create_inline((void*)*update_pixel_density, &ue418_oculus_update_pixel_density_hook);
+
+    if (!m_ue418_oculus_pixel_density_hook) {
+        SPDLOG_WARN("[UE4.18 Oculus] Failed to hook FSettings::UpdatePixelDensityFromScreenPercentage");
+        return false;
+    }
+
+    return true;
+}
+
+bool FFakeStereoRenderingHook::ue418_oculus_update_pixel_density_hook(void* settings) {
+    const auto settings_addr = (uintptr_t)settings;
+
+    // The CTTS crash passed a UEVRBackend code/shadow-vtable address as
+    // FSettings*. The original function writes floats at +0x238/+0x23c/+0x240.
+    if (!is_writable_process_range(settings_addr + 0x238, 0x10)) {
+        static std::atomic<uint32_t> suppressed_invalid_calls{};
+        const auto count = ++suppressed_invalid_calls;
+
+        if (count == 1 || (count % 120) == 0) {
+            SPDLOG_WARN("[UE4.18 Oculus] Suppressed invalid pixel-density sink call settings={:x} count={}",
+                        settings_addr, count);
+        }
+
+        return true;
+    }
+
+    return g_hook->m_ue418_oculus_pixel_density_hook.call<bool>(settings);
+}
+
 bool FFakeStereoRenderingHook::hook() {
     SPDLOG_INFO("Entering FFakeStereoRenderingHook::hook");
 
@@ -662,6 +5267,8 @@ bool FFakeStereoRenderingHook::hook() {
     // Locking the hook monitor mutex stops our code from trying to re-hook DX11 and 12 after
     // Long pauses in code execution, due to us doing massive scans for code in this function.
     std::scoped_lock _{g_framework->get_hook_monitor_mutex()};
+
+    hook_ue418_oculus_pixel_density_sink();
 
     const auto vtable = locate_fake_stereo_rendering_vtable();
 
@@ -1039,6 +5646,11 @@ bool FFakeStereoRenderingHook::standard_fake_stereo_hook(uintptr_t vtable) {
 
     m_has_double_precision = is_using_double_precision(stereo_view_offset_func) || is_using_double_precision(calculate_stereo_projection_matrix_func);
 
+    if (!m_has_double_precision && windrose_is_current_game() && is_ue_5_6_or_newer()) {
+        m_has_double_precision = true;
+        SPDLOG_WARN("[Windrose][R5] Forcing UE5.6 double-precision view math because function-scan detection missed it");
+    }
+
     {
         m_adjust_view_rect_hook = safetyhook::create_inline((void*)adjust_view_rect_func, adjust_view_rect);
         m_calculate_stereo_view_offset_hook_inline = safetyhook::create_inline((void*)stereo_view_offset_func, calculate_stereo_view_offset);
@@ -1206,18 +5818,22 @@ bool FFakeStereoRenderingHook::standard_fake_stereo_hook(uintptr_t vtable) {
                 return g_hook->get_render_target_manager()->allocate_render_target_texture((uintptr_t)_ReturnAddress(), &out_texture, &out_shader_resource);
             }
         );
-    
-        m_embedded_rtm.should_use_separate_render_target_hook = 
+
+        m_embedded_rtm.should_use_separate_render_target_hook =
             std::make_unique<PointerHook>((void**)should_use_separate_render_target_func_ptr, +[](void* self) -> bool {
             #ifdef FFAKE_STEREO_RENDERING_LOG_ALL_CALLS
                 SPDLOG_INFO("ShouldUseSeparateRenderTarget (embedded): {:x}", (uintptr_t)_ReturnAddress());
             #else
                 SPDLOG_INFO_ONCE("ShouldUseSeparateRenderTarget (embedded): {:x}", (uintptr_t)_ReturnAddress());
             #endif
-            
+
                 auto vr = VR::get();
 
                 if (vr->is_extreme_compatibility_mode_enabled()) {
+                    return false;
+                }
+
+                if (dune_should_preserve_native_viewport_target()) {
                     return false;
                 }
 
@@ -1231,7 +5847,7 @@ bool FFakeStereoRenderingHook::standard_fake_stereo_hook(uintptr_t vtable) {
         );
 
         if (!need_reallocate_viewport_render_target_is_bad) {
-            m_embedded_rtm.need_reallocate_viewport_render_target_hook = 
+            m_embedded_rtm.need_reallocate_viewport_render_target_hook =
                 std::make_unique<PointerHook>((void**)need_reallocate_viewport_render_target_func_ptr, +[](void* self, sdk::FViewport* viewport) -> bool {
                 #ifdef FFAKE_STEREO_RENDERING_LOG_ALL_CALLS
                     SPDLOG_INFO("NeedReallocateViewportRenderTarget (embedded): {:x}", (uintptr_t)_ReturnAddress());
@@ -1268,7 +5884,8 @@ bool FFakeStereoRenderingHook::standard_fake_stereo_hook(uintptr_t vtable) {
         // pretty consistent patterns
         if (sdk::is_vfunc_pattern(*func_ptr, "0F B6 C2 FF C0 C3") ||
             sdk::is_vfunc_pattern(*func_ptr, "33 C0 84 D2 0F 95 C0 FF C0 C3") || 
-            sdk::is_vfunc_pattern(*func_ptr, "84 D2 74 04 8B 41 ? C3 B8 01"))
+            sdk::is_vfunc_pattern(*func_ptr, "84 D2 74 04 8B 41 ? C3 B8 01") ||
+            sdk::is_vfunc_pattern(*func_ptr, "B8 01 00 00 00 84 D2 74 03 8B 41 ? C3"))
         {
             SPDLOG_INFO("Found GetDesiredNumberOfViews function at index: {}", i);
             get_desired_number_of_views_index = i;
@@ -1324,7 +5941,36 @@ bool FFakeStereoRenderingHook::standard_fake_stereo_hook(uintptr_t vtable) {
     // It is very rare that this should need to be done.
     if (!active_stereo_device) {
         SPDLOG_INFO("Attempting to create a stereo device without InitializeHMDDevice...");
-        const auto device_offset = sdk::UEngine::get_stereo_rendering_device_offset();
+        const auto discovered_device_offset = sdk::UEngine::get_stereo_rendering_device_offset();
+        auto device_offset = discovered_device_offset;
+
+        if (strikers_club_is_current_game()) {
+            const auto engine = reinterpret_cast<uintptr_t>(sdk::UGameEngine::get());
+            const auto scanned_device_offset = s_stereo_rendering_device_offset;
+            const auto discovered_layout_valid =
+                discovered_device_offset &&
+                strikers_club_has_valid_engine_stereo_layout(engine, *discovered_device_offset);
+            const auto scanned_layout_valid =
+                scanned_device_offset != 0 &&
+                strikers_club_has_valid_engine_stereo_layout(engine, scanned_device_offset);
+
+            if (discovered_layout_valid) {
+                device_offset = discovered_device_offset;
+            } else if (scanned_layout_valid) {
+                device_offset = scanned_device_offset;
+            } else {
+                device_offset.reset();
+            }
+
+            SPDLOG_INFO(
+                "[StrikersClub] Stereo layout selection scanned_offset={:x} scanned_valid={} discovered_offset={:x} "
+                "discovered_valid={} selected_offset={:x}",
+                scanned_device_offset,
+                scanned_layout_valid,
+                discovered_device_offset.value_or(0),
+                discovered_layout_valid,
+                device_offset.value_or(0));
+        }
 
         if (device_offset) {
             auto engine = sdk::UGameEngine::get();
@@ -1345,14 +5991,24 @@ bool FFakeStereoRenderingHook::standard_fake_stereo_hook(uintptr_t vtable) {
         SPDLOG_INFO("Found active stereo device: {:x}", (uintptr_t)*active_stereo_device);
         SPDLOG_INFO("Overwriting vtable...");
 
-        static std::vector<uintptr_t> shadow_vtable{};
-        auto& vtable = *(uintptr_t**)*active_stereo_device;
+        if (strikers_club_is_current_game()) {
+            if (install_strikers_club_shadow_vtable(*active_stereo_device)) {
+                SPDLOG_INFO("[StrikersClub] Installed bounded UE 5.7.1 stereo shadow vtable (21 entries)");
+            } else {
+                // The original vtable hooks are already installed. Fail closed
+                // instead of crashing while cloning a transient startup object.
+                SPDLOG_WARN("[StrikersClub] Stereo shadow vtable was not safely writable; keeping original vtable");
+            }
+        } else {
+            static std::vector<uintptr_t> shadow_vtable{};
+            auto& vtable = *(uintptr_t**)*active_stereo_device;
 
-        for (auto i = 0; i < 100; i++) {
-            shadow_vtable.push_back(vtable[i]);
+            for (auto i = 0; i < 100; i++) {
+                shadow_vtable.push_back(vtable[i]);
+            }
+
+            vtable = shadow_vtable.data();
         }
-
-        vtable = shadow_vtable.data();
     } else {
         SPDLOG_INFO("Current stereo device is null, cannot overwrite vtable");
         patch_vtable_checks(); // fallback to patching vtable checks
@@ -1479,6 +6135,11 @@ bool FFakeStereoRenderingHook::nonstandard_create_stereo_device_hook() {
 
     auto stereo_rendering_device_offset = sdk::UEngine::get_stereo_rendering_device_offset();
     if (!stereo_rendering_device_offset) {
+        if (avowed_is_current_game()) {
+            SPDLOG_ERROR("[Avowed] StereoRenderingDevice offset discovery failed; refusing legacy 0xAC8 nonstandard fallback");
+            return false;
+        }
+
         stereo_rendering_device_offset = 0xAC8; // fallback for the engine this was originally made for.
     }
 
@@ -2249,7 +6910,7 @@ FRHITexture2D** FFakeStereoRenderingHook::viewport_get_render_target_texture_hoo
     }
 
     // Finally redirect the call to the UI render target.
-    auto& ui_target = g_hook->get_render_target_manager()->get_ui_target();
+    auto& ui_target = g_hook->get_render_target_manager()->get_effective_ui_target_ref();
 
     if (ui_target != nullptr) {
         return &ui_target;
@@ -2258,8 +6919,278 @@ FRHITexture2D** FFakeStereoRenderingHook::viewport_get_render_target_texture_hoo
     return og(viewport);
 }
 
+void FFakeStereoRenderingHook::try_adopt_scene_viewport_render_target(sdk::FViewport* viewport, const char* source) {
+    if (g_framework == nullptr || is_ue_5_7_or_newer() || !g_framework->is_dx12()) {
+        return;
+    }
+
+    const auto allow_scene_viewport_rt_adoption = dune_awakening_is_current_game();
+    const auto log_prefix = allow_scene_viewport_rt_adoption ? "[Dune][RT]" : "[SHf]";
+    const bool everspace2_direct_observation =
+        everspace2_is_current_game() && is_ue_5_5_dx12_backend();
+
+    if (allow_scene_viewport_rt_adoption && dune_should_preserve_native_viewport_target()) {
+        SPDLOG_INFO_EVERY_N_SEC(
+            5,
+            "[Dune][CustomPresent] Ignoring rotating FSceneViewport RT from {}; final AMD swapchain output owns the visible scene",
+            source != nullptr ? source : "<unknown>");
+        return;
+    }
+
+    auto vr = VR::get();
+
+    if (vr == nullptr || !vr->is_hmd_active() || viewport == nullptr || IsBadReadPtr(viewport, sizeof(void*))) {
+        return;
+    }
+
+    auto rtm = get_render_target_manager();
+
+    if (rtm == nullptr) {
+        return;
+    }
+
+    auto current_target = rtm->get_render_target();
+    const bool is_dune_viewport_refresh =
+        allow_scene_viewport_rt_adoption &&
+        current_target != nullptr &&
+        source != nullptr &&
+        std::strcmp(source, "UGameViewportClient::Draw viewport") == 0;
+
+    if (!everspace2_direct_observation &&
+        current_target != nullptr &&
+        !is_dune_viewport_refresh)
+    {
+        return;
+    }
+
+    std::optional<Everspace2ViewportTextureCandidate> everspace2_candidate{};
+    auto candidate = (FRHITexture2D*)nullptr;
+
+    if (everspace2_direct_observation) {
+        everspace2_candidate = everspace2_get_scene_viewport_texture(viewport);
+        candidate = everspace2_candidate ? everspace2_candidate->texture : nullptr;
+    } else {
+        candidate = viewport->get_scene_viewport_render_target_texture_direct();
+    }
+
+    if (candidate == nullptr) {
+        if (everspace2_direct_observation) {
+            SPDLOG_INFO_EVERY_N_SEC(
+                2,
+                "[Everspace2][ViewportRT] No valid engine-owned scene target available from {}",
+                source);
+            return;
+        }
+
+        shf_probe_scene_viewport_memory(viewport, source, nullptr);
+        SPDLOG_INFO_EVERY_N_SEC(2, "{} FSceneViewport render target is not available yet from {}", log_prefix, source);
+        return;
+    }
+
+    ID3D12Resource* native_resource = nullptr;
+    D3D12_RESOURCE_DESC desc{};
+
+    if (everspace2_candidate) {
+        desc = everspace2_candidate->desc;
+    } else if (is_ue_5_6_dx12_backend()) {
+        if (!ue56_dx12_try_get_native_resource(candidate, source, &native_resource, &desc)) {
+            SPDLOG_WARNING_EVERY_N_SEC(2, "[UE5.6][RT] Failing closed for FSceneViewport render target from {}; waiting for D3D12 texture/backbuffer hooks", source);
+            return;
+        }
+    } else {
+        try {
+            native_resource = (ID3D12Resource*)candidate->get_native_resource();
+        } catch (const std::exception& e) {
+            SPDLOG_WARNING_EVERY_N_SEC(2, "{} Rejected FSceneViewport render target from {} because GetNativeResource failed: {}", log_prefix, source, e.what());
+            return;
+        } catch (...) {
+            SPDLOG_WARNING_EVERY_N_SEC(2, "{} Rejected FSceneViewport render target from {} because GetNativeResource threw", log_prefix, source);
+            return;
+        }
+
+        if (native_resource != nullptr && !IsBadReadPtr(native_resource, sizeof(void*))) {
+            desc = native_resource->GetDesc();
+        }
+    }
+
+    if (!everspace2_candidate && (native_resource == nullptr || IsBadReadPtr(native_resource, sizeof(void*)))) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "{} FSceneViewport render target from {} has no native D3D12 resource yet", log_prefix, source);
+        return;
+    }
+
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.Width == 0 || desc.Height == 0) {
+        SPDLOG_WARNING_EVERY_N_SEC(2,
+            "{} Rejected FSceneViewport render target from {} because desc is invalid: dim={} size={}x{} fmt={}",
+            log_prefix, source, (uint32_t)desc.Dimension, desc.Width, desc.Height, (uint32_t)desc.Format);
+        return;
+    }
+
+    if (everspace2_direct_observation) {
+        if (candidate == rtm->get_dedicated_ui_target()) {
+            SPDLOG_WARNING_EVERY_N_SEC(
+                2,
+                "[Everspace2][ViewportRT] Rejected dedicated UI texture returned by {}",
+                everspace2_candidate->source);
+            return;
+        }
+
+        if (!rtm->publish_everspace2_scene_target_snapshot(
+                candidate,
+                everspace2_candidate->native_resource.Get(),
+                desc,
+                everspace2_candidate->source))
+        {
+            SPDLOG_WARNING_EVERY_N_SEC(
+                2,
+                "[Everspace2][ViewportRT] Failed to publish native scene-target snapshot from {}",
+                everspace2_candidate->source);
+            return;
+        }
+
+        // Retain the raw address only for existing identity comparisons. ES2's
+        // D3D12 consumers use the COM-owned native snapshot and never call back
+        // through this FRHI wrapper after the render-thread observation.
+        rtm->set_render_target(candidate);
+
+        return;
+    }
+
+    if (allow_scene_viewport_rt_adoption) {
+        const auto expected_width = (uint64_t)vr->get_hmd_width() * (vr->is_using_afr() ? 1ull : 2ull);
+        const auto expected_height = (uint64_t)vr->get_hmd_height();
+        const auto is_flat_desktop_rt =
+            expected_width != 0 &&
+            expected_height != 0 &&
+            (desc.Width < expected_width || desc.Height < expected_height);
+        const auto allow_native_custom_present_rt =
+            is_flat_desktop_rt &&
+            dune_should_preserve_native_viewport_target();
+
+        if (is_flat_desktop_rt && !allow_native_custom_present_rt) {
+            const auto rejected = g_dune_rejected_flat_viewport_rts.fetch_add(1) + 1;
+
+            SPDLOG_WARNING_EVERY_N_SEC(
+                2,
+                "{} Rejected desktop-sized FSceneViewport RT from {} at {:x} [{}x{} fmt={}] while waiting for stereo RT [{}x{}]; rejected_count={}",
+                log_prefix,
+                source,
+                (uintptr_t)candidate,
+                desc.Width,
+                desc.Height,
+                (uint32_t)desc.Format,
+                expected_width,
+                expected_height,
+                rejected);
+
+            if (g_hook != nullptr && (rejected <= 3 || rejected % 120 == 0)) {
+                SPDLOG_WARN(
+                    "[Dune][RT] Requesting viewport RHI recreate after rejecting flat viewport RT [{}x{}]",
+                    desc.Width,
+                    desc.Height);
+                g_dune_force_viewport_rhi_once.store(true);
+                g_hook->set_should_recreate_textures(true);
+            }
+
+            return;
+        }
+
+        if (allow_native_custom_present_rt) {
+            SPDLOG_INFO_EVERY_N_SEC(
+                2,
+                "[Dune][CustomPresent] Accepting native desktop FSceneViewport RT from {} at {:x} [{}x{} fmt={}]; "
+                "Synced can consume alternating frames and Native will use guarded HMD expansion",
+                source,
+                (uintptr_t)candidate,
+                desc.Width,
+                desc.Height,
+                (uint32_t)desc.Format);
+        }
+    }
+
+    if (candidate == current_target) {
+        SPDLOG_INFO_EVERY_N_SEC(
+            5,
+            "[Dune][RT] Verified current FSceneViewport RT from {} at {:x} [{}x{} fmt={}]",
+            source,
+            (uintptr_t)candidate,
+            desc.Width,
+            desc.Height,
+            (uint32_t)desc.Format);
+        return;
+    }
+
+    if (!allow_scene_viewport_rt_adoption) {
+        shf_probe_scene_viewport_memory(viewport, source, candidate);
+        SPDLOG_WARNING_EVERY_N_SEC(2,
+            "{} Found FSceneViewport render target candidate from {} at {:x} [{}x{} fmt={}] but not adopting it yet",
+            log_prefix, source, (uintptr_t)candidate, desc.Width, desc.Height, (uint32_t)desc.Format);
+        return;
+    }
+
+    rtm->set_render_target(candidate);
+
+    if (current_target != nullptr) {
+        SPDLOG_WARN(
+            "[Dune][RT] Re-adopted changed FSceneViewport RT after viewport/world transition from {:x} to {:x} [{}x{} fmt={}]",
+            (uintptr_t)current_target,
+            (uintptr_t)candidate,
+            desc.Width,
+            desc.Height,
+            (uint32_t)desc.Format);
+    } else {
+        SPDLOG_WARN_ONCE("{} Adopted real FSceneViewport render target from {} at {:x} [{}x{} fmt={}]",
+            log_prefix, source, (uintptr_t)candidate, desc.Width, desc.Height, (uint32_t)desc.Format);
+    }
+}
+
 void FFakeStereoRenderingHook::game_viewport_client_draw_hook(sdk::UGameViewportClient* viewport_client, sdk::FViewport* viewport, sdk::FCanvas* canvas, void* a4) {
     ZoneScopedN(__FUNCTION__);
+
+    if (dune_awakening_is_current_game() && g_framework->is_game_data_intialized()) {
+        static auto last_playable_pawn_seen = std::chrono::steady_clock::time_point{};
+        static bool saw_playable_pawn = false;
+
+        const auto state = detect_dune_player_state();
+        const auto now = std::chrono::steady_clock::now();
+        bool has_live_pawn = state.playable_world;
+
+        if (state.playable_world) {
+            last_playable_pawn_seen = now;
+            saw_playable_pawn = true;
+        } else if (!state.character_creation &&
+                   saw_playable_pawn &&
+                   now - last_playable_pawn_seen < std::chrono::seconds(10))
+        {
+            has_live_pawn = true;
+        }
+
+        const auto previous_live_pawn = g_hook->dune_has_live_pawn();
+        g_hook->set_dune_has_live_pawn(has_live_pawn);
+        const auto previous_character_creation =
+            g_hook->set_dune_character_creation_active(state.character_creation);
+
+        if (previous_live_pawn != has_live_pawn) {
+            SPDLOG_WARN(
+                "[Dune][World] Playable-world classification {} object={:x} class={:x} source={} name='{}'",
+                has_live_pawn ? "enabled" : "disabled",
+                reinterpret_cast<uintptr_t>(state.object),
+                reinterpret_cast<uintptr_t>(state.object_class),
+                state.from_tracked_objects ? "UObjectHook" : "UEngine",
+                state.full_name.empty() ? "<none>" : state.full_name);
+            g_dune_force_viewport_rhi_once.store(true);
+            g_hook->set_should_recreate_textures(true);
+        }
+
+        if (previous_character_creation != state.character_creation) {
+            SPDLOG_WARN(
+                "[Dune][CharacterCreation] Validated mode {} pawn={:x} class={:x}; requesting viewport recreation",
+                state.character_creation ? "enabled" : "disabled",
+                reinterpret_cast<uintptr_t>(state.object),
+                reinterpret_cast<uintptr_t>(state.object_class));
+            g_dune_force_viewport_rhi_once.store(true);
+            g_hook->set_should_recreate_textures(true);
+        }
+    }
 
     // UI compatibility mode
     // Tries to redirect calls to GetRenderTargetTexture to point towards our UI
@@ -2278,6 +7209,15 @@ void FFakeStereoRenderingHook::game_viewport_client_draw_hook(sdk::UGameViewport
     auto call_orig = [=]() {
         ZoneScopedN("UGameViewportClient::Draw");
         g_hook->m_gameviewportclient_draw_hook.call(viewport_client, viewport, canvas, a4);
+
+        // ES2 can replace the viewport texture during a Draw when a cinematic
+        // reallocates pooled targets. Observe the engine-owned pointer again
+        // immediately after Draw rather than retaining the allocation-time ref.
+        if (everspace2_is_current_game()) {
+            g_hook->try_adopt_scene_viewport_render_target(
+                viewport,
+                "UGameViewportClient::Draw post");
+        }
     };
 
     SPDLOG_INFO_ONCE("UGameViewportClient::Draw called for the first time.");
@@ -2290,6 +7230,10 @@ void FFakeStereoRenderingHook::game_viewport_client_draw_hook(sdk::UGameViewport
     g_hook->m_in_viewport_client_draw = true;
     g_hook->m_was_in_viewport_client_draw = false;
     g_hook->get_render_target_manager()->set_viewport(viewport);
+    if (viewport != nullptr) {
+        shf_force_scene_viewport_separate_rt(*viewport, "UGameViewportClient::Draw");
+    }
+    g_hook->try_adopt_scene_viewport_render_target(viewport, "UGameViewportClient::Draw viewport");
 
     utility::ScopeGuard _{ 
         []() { 
@@ -2491,6 +7435,10 @@ struct SceneViewExtensionAnalyzer {
     static inline uint32_t pre_render_viewfamily_renderthread_index{0};
     static inline uint32_t frame_count_offset{0};
 
+    static bool validate_cached_discovery(void** original_vtable, const nlohmann::json& cached);
+    static bool try_apply_cached_discovery(void** original_vtable);
+    static void save_cached_discovery();
+
     template<int N>
     static bool analysis_dummy_stage1(ISceneViewExtension* extension, uintptr_t a2, uintptr_t a3, uintptr_t a4) {
         if (N == 0) {
@@ -2573,7 +7521,7 @@ struct SceneViewExtensionAnalyzer {
 
                     if (b == a + 1 && a >= 10) { // rule out really low frame counts (this could be something else)
                         if (func.frame_count_a2 + 1 == b) {
-                            SPDLOG_INFO("[A2] Function index {} Found frame count offset at {:x}, ({})", N, i, b);
+                            SPDLOG_DEBUG("[A2] Function index {} Found frame count offset at {:x}, ({})", N, i, b);
 
                             func.frame_count_offset_a2 = i;
                             ++func.times_frame_count_correct_a2;
@@ -2609,6 +7557,7 @@ struct SceneViewExtensionAnalyzer {
 
                                     frame_count_offset = i;
                                     sdk::FSceneViewFamily::set_frame_count_offset(frame_count_offset);
+                                    save_cached_discovery();
 
                                     setup_view_extension_hook();
                                     return false;
@@ -2632,7 +7581,7 @@ struct SceneViewExtensionAnalyzer {
 
                     if (b == a + 1 && a >= 10) { // rule out really low frame counts (this could be something else)
                         if (func.frame_count_a3 + 1 == b) {
-                            SPDLOG_INFO("[A3] Function index {} Found frame count offset at {:x} ({})", N, i, b);
+                            SPDLOG_DEBUG("[A3] Function index {} Found frame count offset at {:x} ({})", N, i, b);
                             ++func.times_frame_count_correct_a3;
                         }
 
@@ -2674,6 +7623,24 @@ struct SceneViewExtensionAnalyzer {
             g_view_extension_vtable[setup_view_family_index + 2] = (uintptr_t)&FFakeStereoRenderingHook::setup_viewpoint;
         }
 
+        if (dune_awakening_is_current_game() && !index_0_called) {
+            if ((setup_view_family_index + 1) != begin_render_viewfamily_index) {
+                g_view_extension_vtable[setup_view_family_index + 1] =
+                    (uintptr_t)&FFakeStereoRenderingHook::setup_view;
+            }
+
+            if ((setup_view_family_index + 3) != begin_render_viewfamily_index) {
+                g_view_extension_vtable[setup_view_family_index + 3] =
+                    (uintptr_t)&FFakeStereoRenderingHook::setup_view_projection_matrix;
+            }
+
+            SPDLOG_INFO(
+                "[Dune][ViewTrace] Installed read-only callbacks SetupView={} SetupViewPoint={} SetupViewProjectionMatrix={}",
+                setup_view_family_index + 1,
+                setup_view_family_index + 2,
+                setup_view_family_index + 3);
+        }
+
         // PreRenderViewFamily_RenderThread
         g_view_extension_vtable[pre_render_viewfamily_renderthread_index] = (uintptr_t)&FFakeStereoRenderingHook::pre_render_viewfamily_renderthread;
 
@@ -2693,6 +7660,10 @@ struct SceneViewExtensionAnalyzer {
 
         if (once) {
             SPDLOG_INFO("[ISceneViewExtension] Successfully hijacked command list! {}", N);
+        }
+
+        if (g_hook != nullptr) {
+            g_hook->note_successful_command_list_hijack();
         }
 
         const auto original_vtable = original_vtables[cmd];
@@ -2747,16 +7718,16 @@ struct SceneViewExtensionAnalyzer {
         if (vr->get_synchronize_stage() == VR::SynchronizeStage::EARLY) {
             if (runtime->is_openxr()) {
                 if (g_framework->get_renderer_type() == Framework::RendererType::D3D11) {
-                    if (!runtime->got_first_sync || runtime->synchronize_frame(frame_count) != VRRuntime::Error::SUCCESS) {
+                    if (!runtime->got_first_sync || runtime->synchronize_frame(frame_count, VRRuntime::SyncFrameCallsite::VREarlyRHICommand) != VRRuntime::Error::SUCCESS) {
                         return call_orig();
                     }  
-                } else if (runtime->synchronize_frame(frame_count) != VRRuntime::Error::SUCCESS) {
+                } else if (runtime->synchronize_frame(frame_count, VRRuntime::SyncFrameCallsite::VREarlyRHICommand) != VRRuntime::Error::SUCCESS) {
                     return call_orig();
                 }
 
                 vr->get_openxr_runtime()->begin_frame();
             } else {
-                if (runtime->synchronize_frame(frame_count) != VRRuntime::Error::SUCCESS) {
+                if (runtime->synchronize_frame(frame_count, VRRuntime::SyncFrameCallsite::VREarlyRHICommand) != VRRuntime::Error::SUCCESS) {
                     return call_orig();
                 }
             }
@@ -2792,11 +7763,20 @@ struct SceneViewExtensionAnalyzer {
 
         if (original_vtables.contains(last_command) || *(void**)last_command == new_vtable.data()) {
             static auto last_log_time = std::chrono::high_resolution_clock::time_point{};
+            static uint64_t suppressed_count = 0;
             const auto now = std::chrono::high_resolution_clock::now();
+            ++suppressed_count;
             
-            if (now - last_log_time > std::chrono::seconds(1)) {
-                SPDLOG_WARN("Something strange is going on, the vtable is already hooked, maybe previous frame was not rendered?");
+            if (last_log_time.time_since_epoch().count() == 0 || now - last_log_time > std::chrono::seconds(30)) {
+                SPDLOG_WARN(
+                    "Something strange is going on, the vtable is already hooked, maybe previous frame was not rendered? suppressed={}",
+                    suppressed_count);
+                suppressed_count = 0;
                 last_log_time = now;
+            }
+
+            if (auto vr = VR::get(); vr != nullptr) {
+                vr->note_stalker2_transition_stress("duplicate_rhi_command");
             }
 
             return;
@@ -2820,11 +7800,20 @@ struct SceneViewExtensionAnalyzer {
 
         if (original_funcs.contains(last_command)) {
             static auto last_log_time = std::chrono::high_resolution_clock::time_point{};
+            static uint64_t suppressed_count = 0;
             const auto now = std::chrono::high_resolution_clock::now();
+            ++suppressed_count;
             
-            if (now - last_log_time > std::chrono::seconds(1)) {
-                SPDLOG_WARN("Something strange is going on, the function is already hooked, maybe previous frame was not rendered?");
+            if (last_log_time.time_since_epoch().count() == 0 || now - last_log_time > std::chrono::seconds(30)) {
+                SPDLOG_WARN(
+                    "Something strange is going on, the function is already hooked, maybe previous frame was not rendered? suppressed={}",
+                    suppressed_count);
+                suppressed_count = 0;
                 last_log_time = now;
+            }
+
+            if (auto vr = VR::get(); vr != nullptr) {
+                vr->note_stalker2_transition_stress("duplicate_old_rhi_command");
             }
 
             return;
@@ -2839,6 +7828,10 @@ struct SceneViewExtensionAnalyzer {
             if (once) {
                 SPDLOG_INFO("[ISceneViewExtension] Successfully hijacked command list!");
                 once = false;
+            }
+
+            if (g_hook != nullptr) {
+                g_hook->note_successful_command_list_hijack();
             }
 
             auto& vr = VR::get();
@@ -2863,16 +7856,16 @@ struct SceneViewExtensionAnalyzer {
             if (vr->get_synchronize_stage() == VR::SynchronizeStage::EARLY) {
                 if (runtime->is_openxr()) {
                     if (g_framework->get_renderer_type() == Framework::RendererType::D3D11) {
-                        if (!runtime->got_first_sync || runtime->synchronize_frame() != VRRuntime::Error::SUCCESS) {
+                        if (!runtime->got_first_sync || runtime->synchronize_frame(std::nullopt, VRRuntime::SyncFrameCallsite::VREarlyRHICommand) != VRRuntime::Error::SUCCESS) {
                             return call_orig();
                         }  
-                    } else if (runtime->synchronize_frame() != VRRuntime::Error::SUCCESS) {
+                    } else if (runtime->synchronize_frame(std::nullopt, VRRuntime::SyncFrameCallsite::VREarlyRHICommand) != VRRuntime::Error::SUCCESS) {
                         return call_orig();
                     }
 
                     vr->get_openxr_runtime()->begin_frame();
                 } else {
-                    if (runtime->synchronize_frame() != VRRuntime::Error::SUCCESS) {
+                    if (runtime->synchronize_frame(std::nullopt, VRRuntime::SyncFrameCallsite::VREarlyRHICommand) != VRRuntime::Error::SUCCESS) {
                         return call_orig();
                     }
                 }
@@ -2898,6 +7891,94 @@ void SceneViewExtensionAnalyzer::FillVtable<N>::fill2(std::array<uintptr_t, 50>&
     FillVtable<N - 1>::fill2(table);
 }
 
+bool SceneViewExtensionAnalyzer::validate_cached_discovery(void** original_vtable, const nlohmann::json& cached) {
+    if (!cached.is_object() || original_vtable == nullptr) {
+        return false;
+    }
+
+    const auto cached_is_active = cached.value("is_active_this_frame_index", UINT32_MAX);
+    const auto cached_begin = cached.value("begin_render_viewfamily_index", UINT32_MAX);
+    const auto cached_pre_render = cached.value("pre_render_viewfamily_renderthread_index", UINT32_MAX);
+    const auto cached_frame_count_offset = cached.value("frame_count_offset", UINT32_MAX);
+
+    constexpr auto max_index = g_view_extension_vtable.size();
+
+    if (cached_is_active >= max_index || cached_begin >= max_index || cached_pre_render >= max_index ||
+        cached_begin == cached_pre_render || cached_frame_count_offset == 0 || cached_frame_count_offset > 0x4000)
+    {
+        return false;
+    }
+
+    const auto base_module = utility::get_module_within((void*)original_vtable[0]).value_or(nullptr);
+
+    for (const auto index : {cached_is_active, cached_begin, cached_pre_render}) {
+        const auto fn = original_vtable[index];
+
+        if (fn == nullptr || IsBadReadPtr(fn, sizeof(void*))) {
+            return false;
+        }
+
+        const auto fn_module = utility::get_module_within((void*)fn).value_or(nullptr);
+
+        if (base_module != nullptr && fn_module != base_module) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool SceneViewExtensionAnalyzer::try_apply_cached_discovery(void** original_vtable) {
+    if (!is_ue_5_7_or_newer()) {
+        return false;
+    }
+
+    const auto cached = sdk::discovery_cache::load_entry(UE57_VIEW_EXTENSION_DISCOVERY_CACHE_KEY, utility::get_executable());
+
+    if (!cached) {
+        return false;
+    }
+
+    if (!validate_cached_discovery(original_vtable, *cached)) {
+        sdk::discovery_cache::invalidate_entry(UE57_VIEW_EXTENSION_DISCOVERY_CACHE_KEY);
+        return false;
+    }
+
+    functions.clear();
+    total_call_count = 0;
+    has_found_is_active_this_frame_index = true;
+    has_found_begin_render_viewfamily = true;
+    index_0_called = cached->value("index_0_called", false);
+    is_active_this_frame_index = cached->value("is_active_this_frame_index", 0u);
+    begin_render_viewfamily_index = cached->value("begin_render_viewfamily_index", 0u);
+    pre_render_viewfamily_renderthread_index = cached->value("pre_render_viewfamily_renderthread_index", 0u);
+    frame_count_offset = cached->value("frame_count_offset", 0u);
+    sdk::FSceneViewFamily::set_frame_count_offset(frame_count_offset);
+
+    FillVtable<g_view_extension_vtable.size() - 1>::fill2(g_view_extension_vtable);
+    g_view_extension_vtable[is_active_this_frame_index] = (uintptr_t)+[](ISceneViewExtension* ext) -> bool {
+        return true;
+    };
+
+    SPDLOG_INFO("[UE 5.7] Reused cached SceneViewExtension discovery");
+    setup_view_extension_hook();
+    return true;
+}
+
+void SceneViewExtensionAnalyzer::save_cached_discovery() {
+    if (!is_ue_5_7_or_newer() || !has_found_is_active_this_frame_index || !has_found_begin_render_viewfamily || frame_count_offset == 0) {
+        return;
+    }
+
+    sdk::discovery_cache::save_entry(UE57_VIEW_EXTENSION_DISCOVERY_CACHE_KEY, utility::get_executable(), {
+        {"index_0_called", index_0_called},
+        {"is_active_this_frame_index", is_active_this_frame_index},
+        {"begin_render_viewfamily_index", begin_render_viewfamily_index},
+        {"pre_render_viewfamily_renderthread_index", pre_render_viewfamily_renderthread_index},
+        {"frame_count_offset", frame_count_offset}
+    });
+}
+
 // 4.25something to 4.27
 // TODO: Add support for all versions via PDB dumps
 constexpr auto INIT_OPTIONS_OFFSET = 0x50;
@@ -2912,13 +7993,42 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
 
     auto& vr = VR::get();
 
+    if (dune_awakening_is_current_game() && g_hook->is_dune_character_creation_active()) {
+        return g_hook->m_sceneview_data.constructor_hook.unsafe_call<sdk::FSceneView*>(view, init_options, a3, a4);
+    }
+
     if (!g_hook->is_in_viewport_client_draw() || !vr->is_hmd_active()) {
         return g_hook->m_sceneview_data.constructor_hook.unsafe_call<sdk::FSceneView*>(view, init_options, a3, a4);
     }
 
-    if (g_hook->m_analyzing_view_extensions || !g_hook->m_has_view_extensions_installed) {
+    const auto dune_manual_custom_present_pose =
+        dune_awakening_is_current_game() &&
+        g_hook->dune_has_live_pawn();
+
+    if ((g_hook->m_analyzing_view_extensions || !g_hook->m_has_view_extensions_installed) &&
+        !dune_manual_custom_present_pose) {
         SPDLOG_INFO_ONCE("FSceneView constructor was called before view extensions were installed, aborting");
         return g_hook->m_sceneview_data.constructor_hook.unsafe_call<sdk::FSceneView*>(view, init_options, a3, a4);
+    }
+
+    // Dune renders showroom/menu characters through independent scene-capture
+    // families during UGameViewportClient::Draw. Those views must retain the
+    // game's own projection, frame state, and cached render-target lifetime.
+    if (dune_awakening_is_current_game()) {
+        sdk::FSceneViewInitOptionsBase::update_offsets(init_options);
+
+        if (auto* view_family = init_options->get_view_family(); view_family != nullptr) {
+            if (sdk::FSceneViewFamily::update_offsets(
+                    view_family,
+                    g_hook->get_render_target_manager()->get_viewport()))
+            {
+                g_hook->note_scene_view_family_offsets_ready();
+            }
+
+            if (dune_is_auxiliary_view_family(view_family, "FSceneView constructor")) {
+                return g_hook->m_sceneview_data.constructor_hook.unsafe_call<sdk::FSceneView*>(view, init_options, a3, a4);
+            }
+        }
     }
 
     std::scoped_lock ___{g_hook->m_sceneview_data.mtx};
@@ -2932,14 +8042,33 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
 
     sdk::FSceneViewInitOptionsBase::update_offsets(init_options);
 
-    if (auto view_family = init_options->get_view_family(); view_family != nullptr) {
-        sdk::FSceneViewFamily::update_offsets(view_family, nullptr);
+    if (!is_ue_5_7_or_newer()) {
+        if (auto view_family = init_options->get_view_family(); view_family != nullptr) {
+            if (sdk::FSceneViewFamily::update_offsets(view_family, nullptr)) {
+                g_hook->note_scene_view_family_offsets_ready();
+            }
+        }
     }
 
     const auto is_ue5 = g_hook->has_double_precision();
     auto init_options_ue5 = (sdk::FSceneViewInitOptionsUE5*)init_options;
 
     const auto init_options_scene_state = init_options->get_scene_state();
+    const auto init_options_original_stereo_pass = init_options->get_stereo_pass();
+    const auto init_options_view_family = init_options->get_view_family();
+    const auto init_options_scene = init_options_view_family != nullptr
+        ? init_options_view_family->get_scene_interface()
+        : nullptr;
+    bool restore_init_options_after_constructor = false;
+
+    utility::ScopeGuard restore_init_options_guard{[&]() {
+        if (!restore_init_options_after_constructor) {
+            return;
+        }
+
+        init_options->set_scene_state(init_options_scene_state);
+        init_options->set_stereo_pass(init_options_original_stereo_pass);
+    }};
 
     if (init_options_scene_state != nullptr) {
         if (is_ue5) {
@@ -2961,9 +8090,14 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
 
     last_frame_count = g_frame_count;
 
-    const auto true_index = vr->is_using_afr() ? (g_frame_count + last_index) % 2 : last_index;
+    const auto true_index =
+        dune_manual_custom_present_pose
+            ? (vr->is_using_afr() ? g_frame_count % 2 : 0)
+            : (vr->is_using_afr() ? (g_frame_count + last_index) % 2 : last_index);
 
-    if (vr->is_splitscreen_compatibility_enabled() || vr->is_sceneview_compatibility_enabled()) {
+    if (vr->is_splitscreen_compatibility_enabled() ||
+        vr->is_sceneview_compatibility_enabled() ||
+        dune_manual_custom_present_pose) {
         int32_t w = vr->get_hmd_width();
         int32_t h = vr->get_hmd_height();
 
@@ -3011,7 +8145,20 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         auto euler_d = glm::vec<3, double>{euler};
         auto euler_pointer = is_ue5 ? (Rotator<float>*)&euler_d : (Rotator<float>*)&euler;
 
-        g_hook->calculate_stereo_view_offset_(true_index + 1, euler_pointer, 100.0f, &init_options_view_origin);
+        float scene_world_to_meters = 100.0f;
+
+        if (vr->is_sceneview_compatibility_enabled()) {
+            // SceneView compatibility manually rebuilds the eye views here. Keep its legacy
+            // 100uu/m basis so UE5.6+ world-scale changes do not flatten the stereo view.
+            SPDLOG_INFO_ONCE("[SceneViewCompat] Using fixed 100.0 world-to-meters for manual view offset");
+        } else {
+            scene_world_to_meters = init_options->get_world_to_meters_scale().value_or(100.0f);
+            if (!std::isfinite(scene_world_to_meters) || scene_world_to_meters <= 0.0f || scene_world_to_meters > 100000.0f) {
+                scene_world_to_meters = 100.0f;
+            }
+        }
+
+        g_hook->calculate_stereo_view_offset_(true_index + 1, euler_pointer, scene_world_to_meters, &init_options_view_origin);
 
         if (is_ue5) {
             euler = euler_d;
@@ -3019,8 +8166,21 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
 
         const auto view_rot_mat = conversion_mat * utility::math::ue_inverse_rotation_matrix(euler);
 
-        *(FIntRect*)&init_options_view_rect = view_rect;
-        *(FIntRect*)&init_options_constrained_view_rect = view_rect;
+        if (!dune_manual_custom_present_pose) {
+            *(FIntRect*)&init_options_view_rect = view_rect;
+            *(FIntRect*)&init_options_constrained_view_rect = view_rect;
+        } else {
+            SPDLOG_INFO_EVERY_N_SEC(
+                2,
+                "[Dune][CustomPresent] Applied manual HMD pose/projection mode={} eye={} view_index={} rect=[{},{} -> {},{}]",
+                vr->is_using_afr() ? "synced" : "native_mono",
+                true_index,
+                last_index,
+                init_options_view_rect[0],
+                init_options_view_rect[1],
+                init_options_view_rect[2],
+                init_options_view_rect[3]);
+        }
 
         if (is_ue5) {
             init_options_view_rotation_matrix_ue5 = view_rot_mat;
@@ -3037,33 +8197,58 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         }
     }
 
-    const auto init_options_stereo_pass = init_options->get_stereo_pass();
+    const auto init_options_stereo_pass = init_options_original_stereo_pass;
 
     std::optional<uint32_t> views_original_count{};
 
-    if (vr->is_native_stereo_fix_enabled() && vr->is_native_stereo_fix_same_pass_enabled() && init_options_stereo_pass > EStereoscopicPass::eSSP_PRIMARY) {
+    if (vr->is_native_stereo_fix_enabled() && init_options_stereo_pass > EStereoscopicPass::eSSP_PRIMARY) {
         if (g_hook->get_render_target_manager()->get_scene_capture_render_target() != nullptr) {
-            init_options->set_stereo_pass(EStereoscopicPass::eSSP_PRIMARY);
+            const bool is_ue55_or_newer = is_ue_5_5_runtime() || is_ue_5_6_or_newer();
+            const bool force_primary_constructor_pass = subnautica2_is_current_game();
+            const bool preserve_secondary_pass =
+                is_ue55_or_newer &&
+                vr->is_native_stereo_fix_preserve_secondary_pass_enabled() &&
+                !vr->should_force_native_stereo_fix_same_pass() &&
+                !force_primary_constructor_pass;
+            const bool use_primary_constructor_pass =
+                force_primary_constructor_pass ||
+                (vr->is_native_stereo_fix_same_pass_enabled() && !preserve_secondary_pass);
 
-            auto view_family = init_options->get_view_family();
-            auto views = view_family != nullptr ? view_family->get_views() : nullptr;
+            if (use_primary_constructor_pass) {
+                init_options->set_stereo_pass(EStereoscopicPass::eSSP_PRIMARY);
+                restore_init_options_after_constructor = true;
+                if (force_primary_constructor_pass) {
+                    SPDLOG_INFO_ONCE(
+                        "[Subnautica2][NativeStereoFix] Using PRIMARY constructor pass with hidden view list");
+                } else {
+                    SPDLOG_INFO_ONCE(
+                        "[NativeStereoFix] Relabeling the secondary eye as PRIMARY using the legacy same-pass path");
+                }
+            } else if (preserve_secondary_pass) {
+                SPDLOG_INFO_ONCE(
+                    "[NativeStereoFix] Preserving UE5.5+ SECONDARY pass identity for modern per-eye renderer paths");
+            }
 
-            if (views != nullptr) {
-                // Hide the fact that we have multiple views from the FSceneView constructor.
-                // At least 1 view causes special stereo logic to run in the constructor.
-                // Notably I've seen more than 1 view causing crashes on UE5 with the native stereo fix without doing this.
-                views_original_count = views->count;
-                views->count = 0;
+            if (is_ue5) {
+                auto view_family = init_options->get_view_family();
+                auto views = view_family != nullptr ? view_family->get_views() : nullptr;
+
+                if (views != nullptr && use_primary_constructor_pass) {
+                    // UE5.5+ indexes the primary view while constructing a
+                    // secondary pass. Never hide this list unless the temporary
+                    // constructor pass has also been relabeled as PRIMARY.
+                    views_original_count = views->count;
+                    views->count = 0;
+                    SPDLOG_INFO_ONCE(
+                        "[NativeStereoFix] Hiding FSceneViewFamily views during secondary-view construction");
+                }
             }
         }
     }
 
-    bool new_scene_state_inserted_this_frame = false;
-
     if (init_options_scene_state != nullptr && !g_hook->m_sceneview_data.known_scene_states.contains(init_options_scene_state)) {
         SPDLOG_INFO("Inserting new scene state {:x}", (uintptr_t)init_options_scene_state);
         known_scene_states.insert(init_options_scene_state);
-        new_scene_state_inserted_this_frame = true;
     } else if (init_options_scene_state == nullptr) {
         SPDLOG_ERROR_ONCE("Scene state passed to FSceneView constructor is null");
 
@@ -3072,15 +8257,121 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         }
     }
 
-    if (init_options_scene_state != nullptr && !new_scene_state_inserted_this_frame && vr->is_ghosting_fix_enabled() && !known_scene_states.empty() && vr->is_using_afr() && true_index == 1) {
-        init_options->set_stereo_pass(EStereoscopicPass::eSSP_PRIMARY);
+    auto& ghosting_pair = g_hook->m_sceneview_data.ghosting_pair;
+    auto& ghosting_state = g_hook->m_sceneview_data.ghosting_state;
 
-        // Set the scene state to the one that isn't the current one
-        for (auto scene_state : known_scene_states) {
-            if (scene_state != init_options_scene_state) {
-                SPDLOG_INFO_ONCE("Setting scene state to {:x}", (uintptr_t)scene_state);
-                init_options->set_scene_state(scene_state);
-                break;
+    const auto is_valid_scene_state = [](sdk::FSceneViewStateInterface* state) {
+        if (state == nullptr || !is_readable_process_range((uintptr_t)state, sizeof(uintptr_t))) {
+            return false;
+        }
+
+        const auto vtable = *(uintptr_t*)state;
+        return vtable != 0 &&
+            is_readable_process_range(vtable, sizeof(uintptr_t)) &&
+            utility::get_module_within((void*)vtable).has_value();
+    };
+
+    const bool ghosting_fix_can_remap =
+        vr->is_ghosting_fix_enabled() &&
+        vr->is_using_afr() &&
+        !vr->is_native_stereo_fix_enabled() &&
+        !vr->is_splitscreen_compatibility_enabled() &&
+        !vr->is_sceneview_compatibility_enabled();
+
+    if (!ghosting_fix_can_remap) {
+        if (ghosting_state != GhostingFixState::Off) {
+            SPDLOG_INFO_ONCE("[GhostingFix] Disabling remap state because the rendering mode changed");
+        }
+
+        ghosting_pair = {};
+        ghosting_state = GhostingFixState::Off;
+        g_hook->m_sceneview_data.ghosting_learning_start_frame = 0;
+        g_hook->m_sceneview_data.ghosting_fail_frame = 0;
+        g_hook->m_sceneview_data.ghosting_logged_bootstrap_disabled = false;
+    } else if (!g_hook->m_has_view_extensions_installed || !g_hook->m_sceneview_data.constructor_hook) {
+        ghosting_state = GhostingFixState::WaitingForHooks;
+    } else if (init_options_scene == nullptr || !is_valid_scene_state(init_options_scene_state)) {
+        if (ghosting_state != GhostingFixState::WaitingForHooks) {
+            SPDLOG_INFO_ONCE("[GhostingFix] Waiting for a valid FSceneView scene/state before remapping");
+        }
+
+        ghosting_state = GhostingFixState::WaitingForHooks;
+    } else {
+        const auto scene_id = (uintptr_t)init_options_scene;
+        if (ghosting_pair.scene != scene_id) {
+            ghosting_pair = {};
+            ghosting_pair.scene = scene_id;
+            ghosting_pair.first_seen_frame = g_frame_count;
+            g_hook->m_sceneview_data.ghosting_learning_start_frame = g_frame_count;
+            g_hook->m_sceneview_data.ghosting_fail_frame = 0;
+            g_hook->m_sceneview_data.ghosting_logged_bootstrap_disabled = false;
+            ghosting_state = GhostingFixState::LearningViewStates;
+
+            SPDLOG_INFO("[GhostingFix] Learning scene-state pair for scene={:x}", scene_id);
+        }
+
+        if (ghosting_state != GhostingFixState::FailedClosed) {
+            ghosting_pair.last_seen_frame = g_frame_count;
+
+            const auto eye_index = true_index & 1;
+            const auto other_eye_index = eye_index ^ 1;
+
+            if (ghosting_pair.eye_state[eye_index] == nullptr ||
+                !is_valid_scene_state(ghosting_pair.eye_state[eye_index]) ||
+                (ghosting_pair.eye_state[eye_index] != init_options_scene_state &&
+                    ghosting_pair.eye_state[other_eye_index] != init_options_scene_state))
+            {
+                ghosting_pair.eye_state[eye_index] = init_options_scene_state;
+                SPDLOG_INFO(
+                    "[GhostingFix] Learned eye {} scene state {:x}",
+                    eye_index,
+                    (uintptr_t)init_options_scene_state);
+            }
+
+            const bool has_valid_pair =
+                is_valid_scene_state(ghosting_pair.eye_state[0]) &&
+                is_valid_scene_state(ghosting_pair.eye_state[1]) &&
+                ghosting_pair.eye_state[0] != ghosting_pair.eye_state[1];
+
+            if (has_valid_pair) {
+                ghosting_state = GhostingFixState::Active;
+
+                if (eye_index == 1) {
+                    init_options->set_stereo_pass(EStereoscopicPass::eSSP_PRIMARY);
+
+                    if (init_options_scene_state != ghosting_pair.eye_state[1]) {
+                        init_options->set_scene_state(ghosting_pair.eye_state[1]);
+                    }
+
+                    restore_init_options_after_constructor = true;
+
+                    SPDLOG_INFO_ONCE(
+                        "[GhostingFix] Remapping AFR right-eye FSceneView to dedicated scene state");
+                }
+            } else {
+                ghosting_state = GhostingFixState::LearningViewStates;
+
+                if (!vr->is_ghosting_fix_bootstrap_enabled() &&
+                    !g_hook->m_sceneview_data.ghosting_logged_bootstrap_disabled)
+                {
+                    g_hook->m_sceneview_data.ghosting_logged_bootstrap_disabled = true;
+                    SPDLOG_INFO(
+                        "[GhostingFix] Remap-only mode has not seen a second scene state yet; enable Bootstrap Separate View States if this game needs UEVR to force one");
+                }
+
+                if (vr->is_ghosting_fix_bootstrap_enabled()) {
+                    constexpr uint32_t BOOTSTRAP_TIMEOUT_FRAMES = 600;
+
+                    if (g_hook->m_sceneview_data.ghosting_learning_start_frame != 0 &&
+                        g_frame_count - g_hook->m_sceneview_data.ghosting_learning_start_frame > BOOTSTRAP_TIMEOUT_FRAMES)
+                    {
+                        ghosting_state = GhostingFixState::FailedClosed;
+                        g_hook->m_sceneview_data.ghosting_fail_frame = g_frame_count;
+                        SPDLOG_WARN(
+                            "[GhostingFix] Failed to learn separate scene states within {} frames; failing closed for this scene",
+                            BOOTSTRAP_TIMEOUT_FRAMES);
+                    }
+                }
             }
         }
     }
@@ -3122,7 +8413,43 @@ void FFakeStereoRenderingHook::setup_view_family(ISceneViewExtension* extension,
         return;
     }
 
-    //vr->update_hmd_state(true, vr->get_runtime()->internal_frame_count + 1);
+}
+
+void FFakeStereoRenderingHook::setup_view(
+    ISceneViewExtension* extension,
+    sdk::FSceneViewFamily& view_family,
+    sdk::FSceneView& view)
+{
+    if (!dune_awakening_is_current_game() ||
+        g_hook == nullptr ||
+        !g_framework->is_game_data_intialized())
+    {
+        return;
+    }
+
+    const auto view_family_target = view_family.get_render_target();
+    const auto view_family_scene = view_family.get_scene_interface();
+    const auto auxiliary = dune_is_auxiliary_view_family(&view_family, "SetupView trace");
+    const auto vr = VR::get();
+    const auto render_frame = vr != nullptr ? vr->get_frame_count() : 0;
+    const auto runtime_frame =
+        vr != nullptr && vr->get_runtime() != nullptr ? vr->get_runtime()->internal_frame_count : 0;
+
+    SPDLOG_INFO_EVERY_N_SEC(
+        1,
+        "[Dune][ViewTrace] SetupView view={:x} family={:x} target={:x} scene={:x} auxiliary={} live_pawn={} "
+        "viewport_draw={} render_frame={} runtime_frame={} global_frame={} caller={:x}",
+        reinterpret_cast<uintptr_t>(&view),
+        reinterpret_cast<uintptr_t>(&view_family),
+        reinterpret_cast<uintptr_t>(view_family_target),
+        reinterpret_cast<uintptr_t>(view_family_scene),
+        auxiliary,
+        g_hook->dune_has_live_pawn(),
+        g_hook->is_in_viewport_client_draw(),
+        render_frame,
+        runtime_frame,
+        g_frame_count,
+        reinterpret_cast<uintptr_t>(_ReturnAddress()));
 }
 
 void FFakeStereoRenderingHook::setup_viewpoint(ISceneViewExtension* extension, void* player_controller, void* view_info) {
@@ -3134,6 +8461,232 @@ void FFakeStereoRenderingHook::setup_viewpoint(ISceneViewExtension* extension, v
     }
 
     auto& vr = VR::get();
+
+    if (dune_awakening_is_current_game() && g_hook != nullptr) {
+        g_dune_pending_true_stereo_view.valid = false;
+        if (vr == nullptr || !vr->is_dune_true_stereo_enabled()) {
+            g_hook->invalidate_dune_true_stereo_frame();
+        }
+
+        struct DuneMinimalViewInfoPrefix {
+            Vector3d location;
+            Rotator<double> rotation;
+            float fov;
+            float desired_fov;
+        };
+
+        DuneMinimalViewInfoPrefix info{};
+        const auto readable =
+            view_info != nullptr &&
+            safe_read_value(reinterpret_cast<uintptr_t>(view_info), info);
+        const auto render_frame = vr != nullptr ? vr->get_frame_count() : 0;
+        const auto runtime_frame =
+            vr != nullptr && vr->get_runtime() != nullptr ? vr->get_runtime()->internal_frame_count : 0;
+
+        if (readable) {
+            SPDLOG_INFO_EVERY_N_SEC(
+                1,
+                "[Dune][ViewTrace] SetupViewPoint player={:x} view_info={:x} live_pawn={} viewport_draw={} "
+                "render_frame={} runtime_frame={} global_frame={} location=[{:.3f},{:.3f},{:.3f}] "
+                "rotation=[{:.3f},{:.3f},{:.3f}] fov={:.3f} desired_fov={:.3f} caller={:x}",
+                reinterpret_cast<uintptr_t>(player_controller),
+                reinterpret_cast<uintptr_t>(view_info),
+                g_hook->dune_has_live_pawn(),
+                g_hook->is_in_viewport_client_draw(),
+                render_frame,
+                runtime_frame,
+                g_frame_count,
+                info.location.x,
+                info.location.y,
+                info.location.z,
+                info.rotation.pitch,
+                info.rotation.yaw,
+                info.rotation.roll,
+                info.fov,
+                info.desired_fov,
+                reinterpret_cast<uintptr_t>(_ReturnAddress()));
+
+            const auto is_main_gameplay_view =
+                g_hook->dune_has_live_pawn() &&
+                g_hook->is_in_viewport_client_draw() &&
+                vr != nullptr &&
+                vr->get_runtime() != nullptr &&
+                !vr->is_using_2d_screen();
+
+            if (is_main_gameplay_view) {
+                sdk::APlayerController* local_player_controller = nullptr;
+
+                try {
+                    auto* const engine = sdk::UEngine::get();
+                    auto* const local_player =
+                        engine != nullptr
+                            ? reinterpret_cast<sdk::UObject*>(engine->get_localplayer(0))
+                            : nullptr;
+
+                    if (local_player != nullptr) {
+                        local_player_controller =
+                            local_player->get_property<sdk::APlayerController*>(L"PlayerController");
+                    }
+                } catch (...) {
+                    SPDLOG_WARNING_EVERY_N_SEC(
+                        2,
+                        "[Dune][ViewPose] Failed to resolve the local player controller; leaving the transient view unchanged");
+                }
+
+                const auto finite_rotation = [](const Rotator<double>& rotation) {
+                    return std::isfinite(rotation.pitch) &&
+                           std::isfinite(rotation.yaw) &&
+                           std::isfinite(rotation.roll);
+                };
+
+                if (local_player_controller != nullptr &&
+                    local_player_controller == player_controller &&
+                    finite_rotation(info.rotation))
+                {
+                    const auto view_mat_inverse = glm::yawPitchRoll(
+                        glm::radians(static_cast<float>(-info.rotation.yaw)),
+                        glm::radians(static_cast<float>(info.rotation.pitch)),
+                        glm::radians(static_cast<float>(-info.rotation.roll)));
+                    const auto base_inverse = glm::normalize(glm::quat{view_mat_inverse});
+                    const auto rotation_offset = vr->get_rotation_offset();
+                    const auto current_hmd_rotation =
+                        glm::normalize(rotation_offset * glm::quat{vr->get_rotation(0)});
+                    const auto adjusted_quaternion =
+                        glm::normalize(base_inverse * current_hmd_rotation);
+                    const auto adjusted_euler =
+                        glm::degrees(utility::math::euler_angles_from_steamvr(adjusted_quaternion));
+
+                    auto adjusted_rotation = info.rotation;
+                    adjusted_rotation.pitch = adjusted_euler.x;
+                    adjusted_rotation.yaw = adjusted_euler.y;
+                    adjusted_rotation.roll = adjusted_euler.z;
+
+                    const auto pitch_delta =
+                        std::remainder(adjusted_rotation.pitch - info.rotation.pitch, 360.0);
+                    const auto yaw_delta =
+                        std::remainder(adjusted_rotation.yaw - info.rotation.yaw, 360.0);
+                    const auto roll_delta =
+                        std::remainder(adjusted_rotation.roll - info.rotation.roll, 360.0);
+                    const auto sane_rotation =
+                        finite_rotation(adjusted_rotation) &&
+                        std::isfinite(pitch_delta) &&
+                        std::isfinite(yaw_delta) &&
+                        std::isfinite(roll_delta) &&
+                        std::abs(adjusted_rotation.pitch) <= 360.0 &&
+                        std::abs(adjusted_rotation.yaw) <= 360.0 &&
+                        std::abs(adjusted_rotation.roll) <= 360.0 &&
+                        std::abs(pitch_delta) <= 180.001 &&
+                        std::abs(yaw_delta) <= 180.001 &&
+                        std::abs(roll_delta) <= 180.001;
+                    const auto rotation_address =
+                        reinterpret_cast<uintptr_t>(view_info) +
+                        offsetof(DuneMinimalViewInfoPrefix, rotation);
+
+                    if (sane_rotation &&
+                        is_writable_process_range(rotation_address, sizeof(adjusted_rotation)))
+                    {
+                        memcpy(
+                            reinterpret_cast<void*>(rotation_address),
+                            &adjusted_rotation,
+                            sizeof(adjusted_rotation));
+
+                        if (vr->is_dune_true_stereo_enabled()) {
+                            const auto frame = static_cast<uint32_t>(render_frame);
+                            const auto eye =
+                                (frame % 2u) == vr->m_left_eye_interval
+                                    ? static_cast<uint8_t>(VRRuntime::Eye::LEFT)
+                                    : static_cast<uint8_t>(VRRuntime::Eye::RIGHT);
+
+                            g_dune_pending_true_stereo_view = DunePendingTrueStereoView{
+                                .valid = true,
+                                .render_frame = frame,
+                                .eye = eye,
+                                .player_controller = reinterpret_cast<uintptr_t>(player_controller),
+                                .view_info = reinterpret_cast<uintptr_t>(view_info),
+                                .adjusted_quaternion = adjusted_quaternion,
+                            };
+                        }
+
+                        SPDLOG_INFO_EVERY_N_SEC(
+                            1,
+                            "[Dune][ViewPose] Applied transient HMD rotation player={:x} view_info={:x} "
+                            "original=[{:.3f},{:.3f},{:.3f}] adjusted=[{:.3f},{:.3f},{:.3f}] "
+                            "delta=[{:.3f},{:.3f},{:.3f}] render_frame={} runtime_frame={}",
+                            reinterpret_cast<uintptr_t>(player_controller),
+                            reinterpret_cast<uintptr_t>(view_info),
+                            info.rotation.pitch,
+                            info.rotation.yaw,
+                            info.rotation.roll,
+                            adjusted_rotation.pitch,
+                            adjusted_rotation.yaw,
+                            adjusted_rotation.roll,
+                            pitch_delta,
+                            yaw_delta,
+                            roll_delta,
+                            render_frame,
+                            runtime_frame);
+                    } else {
+                        SPDLOG_WARNING_EVERY_N_SEC(
+                            2,
+                            "[Dune][ViewPose] Rejected unsafe transient rotation view_info={:x} "
+                            "adjusted=[{:.3f},{:.3f},{:.3f}] delta=[{:.3f},{:.3f},{:.3f}] writable={}",
+                            reinterpret_cast<uintptr_t>(view_info),
+                            adjusted_rotation.pitch,
+                            adjusted_rotation.yaw,
+                            adjusted_rotation.roll,
+                            pitch_delta,
+                            yaw_delta,
+                            roll_delta,
+                            is_writable_process_range(rotation_address, sizeof(adjusted_rotation)));
+                    }
+                }
+            }
+        } else {
+            SPDLOG_WARNING_EVERY_N_SEC(
+                2,
+                "[Dune][ViewTrace] SetupViewPoint received unreadable view_info={:x} player={:x}",
+                reinterpret_cast<uintptr_t>(view_info),
+                reinterpret_cast<uintptr_t>(player_controller));
+        }
+
+        static bool logged_gameplay_stack = false;
+        static bool logged_non_gameplay_stack = false;
+        auto& logged_stack =
+            g_hook->dune_has_live_pawn() ? logged_gameplay_stack : logged_non_gameplay_stack;
+
+        if (!logged_stack) {
+            logged_stack = true;
+            std::array<void*, 12> stack{};
+            const auto depth =
+                RtlCaptureStackBackTrace(0, static_cast<DWORD>(stack.size()), stack.data(), nullptr);
+
+            for (USHORT i = 0; i < depth; ++i) {
+                SPDLOG_INFO(
+                    "[Dune][ViewTrace] SetupViewPoint {} stack[{}]={:x}",
+                    g_hook->dune_has_live_pawn() ? "gameplay" : "non_gameplay",
+                    i,
+                    reinterpret_cast<uintptr_t>(stack[i]));
+            }
+        }
+    }
+
+    if (everspace2_is_current_game() && view_info != nullptr && vr->is_hmd_active()) {
+        const auto runtime = vr->get_runtime();
+        const auto frame_count = everspace2_get_next_view_pose_frame(runtime);
+
+        if (const auto openxr = vr->get_openxr_runtime();
+            openxr != nullptr &&
+            openxr->ready() &&
+            g_everspace2_last_view_pose_frame.exchange(frame_count, std::memory_order_acq_rel) != frame_count)
+        {
+            // ES2 never resolves UGameViewportClient::Draw. SetupViewPoint is
+            // its reliable per-frame pre-culling opportunity to publish the
+            // tracking pose consumed by the normal stereo view calculation.
+            vr->update_hmd_state(true, frame_count);
+            SPDLOG_INFO_ONCE(
+                "[Everspace2][OpenXR][render-pose] Publishing HMD poses from SetupViewPoint");
+        }
+    }
 
     if (!vr->is_ghosting_fix_enabled() || g_hook->m_fixed_localplayer_view_count) {
         return;
@@ -3157,13 +8710,268 @@ void FFakeStereoRenderingHook::setup_viewpoint(ISceneViewExtension* extension, v
 
         // No need to StartDisabled on this because we're on the same thread.
         g_hook->m_localplayer_get_viewpoint_hook = safetyhook::create_inline(*caller, (uintptr_t)&localplayer_setup_viewpoint);
-        
+
         if (!g_hook->m_localplayer_get_viewpoint_hook) {
             SPDLOG_ERROR("Failed to hook ISceneViewExtension::SetupViewPoint");
             return;
         }
 
         SPDLOG_INFO("Hooked ISceneViewExtension::SetupViewPoint");
+    }
+}
+
+void FFakeStereoRenderingHook::setup_view_projection_matrix(
+    ISceneViewExtension* extension,
+    void* projection_data)
+{
+    if (!dune_awakening_is_current_game() ||
+        g_hook == nullptr ||
+        !g_framework->is_game_data_intialized())
+    {
+        return;
+    }
+
+    using ProjectionData = sdk::FSceneViewProjectionDataUE5T<double>;
+    ProjectionData data{};
+    const auto readable =
+        projection_data != nullptr &&
+        safe_read_value(reinterpret_cast<uintptr_t>(projection_data), data);
+    const auto vr = VR::get();
+    const auto render_frame = vr != nullptr ? vr->get_frame_count() : 0;
+    const auto runtime_frame =
+        vr != nullptr && vr->get_runtime() != nullptr ? vr->get_runtime()->internal_frame_count : 0;
+
+    if (!readable) {
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[Dune][ViewTrace] SetupViewProjectionMatrix received unreadable data={:x}",
+            reinterpret_cast<uintptr_t>(projection_data));
+        return;
+    }
+
+    SPDLOG_INFO_EVERY_N_SEC(
+        1,
+        "[Dune][ViewTrace] SetupViewProjectionMatrix data={:x} live_pawn={} viewport_draw={} "
+        "render_frame={} runtime_frame={} global_frame={} origin=[{:.3f},{:.3f},{:.3f}] "
+        "rect=[{},{} -> {},{}] constrained=[{},{} -> {},{}] "
+        "projection=[{:.5f},{:.5f},{:.5f},{:.5f}] caller={:x}",
+        reinterpret_cast<uintptr_t>(projection_data),
+        g_hook->dune_has_live_pawn(),
+        g_hook->is_in_viewport_client_draw(),
+        render_frame,
+        runtime_frame,
+        g_frame_count,
+        data.view_origin.x,
+        data.view_origin.y,
+        data.view_origin.z,
+        data.view_rect[0],
+        data.view_rect[1],
+        data.view_rect[2],
+        data.view_rect[3],
+        data.constrained_view_rect[0],
+        data.constrained_view_rect[1],
+        data.constrained_view_rect[2],
+        data.constrained_view_rect[3],
+        data.projection_matrix[0][0],
+        data.projection_matrix[1][1],
+        data.projection_matrix[2][2],
+        data.projection_matrix[3][2],
+        reinterpret_cast<uintptr_t>(_ReturnAddress()));
+
+    const auto pending_view = g_dune_pending_true_stereo_view;
+    g_dune_pending_true_stereo_view.valid = false;
+
+    if (vr != nullptr && vr->is_dune_true_stereo_enabled()) {
+        const auto frame = static_cast<uint32_t>(render_frame);
+        const auto rect_width = data.view_rect[2] - data.view_rect[0];
+        const auto rect_height = data.view_rect[3] - data.view_rect[1];
+        const auto valid_rect =
+            rect_width > 0 &&
+            rect_height > 0 &&
+            rect_width <= 16384 &&
+            rect_height <= 16384;
+        const auto finite_origin =
+            std::isfinite(data.view_origin.x) &&
+            std::isfinite(data.view_origin.y) &&
+            std::isfinite(data.view_origin.z);
+        const auto matching_main_view =
+            pending_view.valid &&
+            pending_view.render_frame == frame &&
+            pending_view.player_controller != 0 &&
+            pending_view.view_info != 0 &&
+            g_hook->dune_has_live_pawn() &&
+            g_hook->is_in_viewport_client_draw() &&
+            valid_rect &&
+            finite_origin;
+
+        if (matching_main_view) {
+            const auto eye = static_cast<VRRuntime::Eye>(pending_view.eye);
+            const auto eye_offset = glm::vec3{vr->get_eye_offset(eye)};
+            const auto finite_eye_offset =
+                std::isfinite(eye_offset.x) &&
+                std::isfinite(eye_offset.y) &&
+                std::isfinite(eye_offset.z) &&
+                glm::length(eye_offset) >= 0.001f &&
+                glm::length(eye_offset) <= 1.0f;
+
+            auto world_to_meters = vr->get_world_to_meters();
+            if (!std::isfinite(world_to_meters) ||
+                world_to_meters < 10.0f ||
+                world_to_meters > 100000.0f)
+            {
+                world_to_meters = 100.0f * vr->get_world_scale();
+            }
+
+            const auto eye_rotation =
+                glm::normalize(glm::quat{vr->get_eye_transform(pending_view.eye)});
+            const auto eye_quaternion =
+                glm::normalize(pending_view.adjusted_quaternion * eye_rotation);
+            const auto quat_converter = glm::quat{Matrix4x4f{
+                0, 0, -1, 0,
+                1, 0, 0, 0,
+                0, 1, 0, 0,
+                0, 0, 0, 1,
+            }};
+            const auto eye_separation =
+                quat_converter * (eye_quaternion * (eye_offset * world_to_meters));
+            const auto finite_eye_separation =
+                std::isfinite(eye_separation.x) &&
+                std::isfinite(eye_separation.y) &&
+                std::isfinite(eye_separation.z) &&
+                glm::length(eye_separation) <= 1000.0f;
+
+            auto adjusted_origin = data.view_origin;
+            adjusted_origin -= glm::dvec3{eye_separation};
+
+            const auto projection_f = vr->get_projection_matrix(eye);
+            const glm::dmat4 openxr_projection{projection_f};
+            bool finite_projection = true;
+            for (glm::length_t column = 0; column < 4 && finite_projection; ++column) {
+                for (glm::length_t row = 0; row < 4; ++row) {
+                    if (!std::isfinite(openxr_projection[column][row])) {
+                        finite_projection = false;
+                        break;
+                    }
+                }
+            }
+
+            const auto sane_projection =
+                finite_projection &&
+                std::abs(openxr_projection[0][0]) >= 0.01 &&
+                std::abs(openxr_projection[0][0]) <= 1000.0 &&
+                std::abs(openxr_projection[1][1]) >= 0.01 &&
+                std::abs(openxr_projection[1][1]) <= 1000.0 &&
+                std::abs(openxr_projection[2][0]) <= 2.0 &&
+                std::abs(openxr_projection[2][1]) <= 2.0;
+            const auto sane_origin =
+                std::isfinite(adjusted_origin.x) &&
+                std::isfinite(adjusted_origin.y) &&
+                std::isfinite(adjusted_origin.z);
+
+            // Dune's AMD presentation path reconstructs scene depth using the
+            // game's projection conventions. Preserve those depth/clip terms
+            // and only import the per-eye OpenXR lens terms.
+            auto projection = data.projection_matrix;
+            projection[0][0] = openxr_projection[0][0];
+            projection[1][1] = openxr_projection[1][1];
+            projection[2][0] = openxr_projection[2][0];
+            projection[2][1] = openxr_projection[2][1];
+
+            auto* writable_data = reinterpret_cast<ProjectionData*>(projection_data);
+            const auto origin_address =
+                reinterpret_cast<uintptr_t>(&writable_data->view_origin);
+            const auto projection_address =
+                reinterpret_cast<uintptr_t>(&writable_data->projection_matrix);
+            const auto writable =
+                is_writable_process_range(origin_address, sizeof(adjusted_origin)) &&
+                is_writable_process_range(projection_address, sizeof(projection));
+
+            if (finite_eye_offset &&
+                std::isfinite(world_to_meters) &&
+                world_to_meters > 0.0f &&
+                finite_eye_separation &&
+                sane_origin &&
+                sane_projection &&
+                writable)
+            {
+                memcpy(
+                    reinterpret_cast<void*>(origin_address),
+                    &adjusted_origin,
+                    sizeof(adjusted_origin));
+                memcpy(
+                    reinterpret_cast<void*>(projection_address),
+                    &projection,
+                    sizeof(projection));
+
+                g_hook->publish_dune_true_stereo_frame(frame, pending_view.eye);
+
+                SPDLOG_INFO_EVERY_N_SEC(
+                    1,
+                    "[Dune][TrueStereo] Applied synchronized eye={} frame={} origin=[{:.3f},{:.3f},{:.3f}] "
+                    "eye_delta=[{:.4f},{:.4f},{:.4f}] world_to_meters={:.3f} "
+                    "lens=[{:.5f},{:.5f},{:.5f},{:.5f}] preserved_depth=[{:.5f},{:.5f},{:.5f},{:.5f}]",
+                    pending_view.eye == static_cast<uint8_t>(VRRuntime::Eye::LEFT) ? "left" : "right",
+                    frame,
+                    adjusted_origin.x,
+                    adjusted_origin.y,
+                    adjusted_origin.z,
+                    eye_separation.x,
+                    eye_separation.y,
+                    eye_separation.z,
+                    world_to_meters,
+                    projection[0][0],
+                    projection[1][1],
+                    projection[2][0],
+                    projection[2][1],
+                    projection[2][2],
+                    projection[2][3],
+                    projection[3][2],
+                    projection[3][3]);
+            } else {
+                g_hook->invalidate_dune_true_stereo_frame();
+                SPDLOG_WARNING_EVERY_N_SEC(
+                    2,
+                    "[Dune][TrueStereo] Rejected unsafe eye view frame={} eye={} offset_ok={} separation_ok={} "
+                    "origin_ok={} projection_ok={} writable={}; using head-tracked mono fallback",
+                    frame,
+                    pending_view.eye,
+                    finite_eye_offset,
+                    finite_eye_separation,
+                    sane_origin,
+                    sane_projection,
+                    writable);
+            }
+        } else {
+            // SetupViewProjectionMatrix also runs for auxiliary scene families
+            // after the gameplay view. Those calls must not erase a verified
+            // main-view token before D3D12 consumes it.
+            SPDLOG_INFO_EVERY_N_SEC(
+                2,
+                "[Dune][TrueStereo] Ignoring unpaired auxiliary projection frame={} pending_valid={} pending_frame={} "
+                "viewport_draw={} live_pawn={} rect={}x{}",
+                frame,
+                pending_view.valid,
+                pending_view.render_frame,
+                g_hook->is_in_viewport_client_draw(),
+                g_hook->dune_has_live_pawn(),
+                rect_width,
+                rect_height);
+        }
+    }
+
+    static bool logged_gameplay_stack = false;
+    if (g_hook->dune_has_live_pawn() && !logged_gameplay_stack) {
+        logged_gameplay_stack = true;
+        std::array<void*, 12> stack{};
+        const auto depth =
+            RtlCaptureStackBackTrace(0, static_cast<DWORD>(stack.size()), stack.data(), nullptr);
+
+        for (USHORT i = 0; i < depth; ++i) {
+            SPDLOG_INFO(
+                "[Dune][ViewTrace] SetupViewProjectionMatrix gameplay stack[{}]={:x}",
+                i,
+                reinterpret_cast<uintptr_t>(stack[i]));
+        }
     }
 }
 
@@ -3190,6 +8998,17 @@ void FFakeStereoRenderingHook::localplayer_setup_viewpoint(void* localplayer, vo
 
 void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family_candidate) {
     ZoneScopedN("BeginRenderViewFamilyReal");
+    const auto profile_engine_render = should_profile_engine_render_timing();
+    const auto begin_render_viewfamily_real_start =
+        profile_engine_render ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    utility::ScopeGuard begin_render_viewfamily_real_timing_guard{[&]() {
+        if (!profile_engine_render) {
+            return;
+        }
+
+        g_begin_render_viewfamily_real_timing.add(std::chrono::steady_clock::now() - begin_render_viewfamily_real_start);
+        log_engine_render_timing_if_needed();
+    }};
 
     SPDLOG_INFO_ONCE("Called BeginRenderViewFamilyReal for the first time");
 
@@ -3202,6 +9021,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     auto rtm = g_hook->get_render_target_manager();
 
     if (!vr->is_hmd_active() || !vr->is_native_stereo_fix_enabled()) {
+        avowed_native_fix_gate_reset("hmd inactive or native stereo fix disabled");
         rtm->destroy_scene_capture();
 
         g_hook->m_render_module_begin_render_viewfamily_hook.unsafe_call<void>(render_module, canvas, view_family_candidate);
@@ -3233,11 +9053,40 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     auto& views = *views_ptr;
     const auto prev_count = views.count;
 
+    if (auto view_family_target = view_family->get_render_target(); view_family_target != nullptr) {
+        g_hook->try_adopt_scene_viewport_render_target(
+            reinterpret_cast<sdk::FViewport*>(view_family_target),
+            "BeginRenderingViewFamily RenderTarget");
+    }
+
     const auto rt = rtm->get_scene_capture_utexture();
     const auto rtrsrc = rt != nullptr ? (sdk::FTextureRenderTargetResource*)rt->get_resource() : nullptr;
     const auto rtfrt = rtrsrc != nullptr ? rtrsrc->as_render_target() : nullptr;
+    const auto scene_capture_rhi = rtm->get_scene_capture_render_target();
+    const auto scene_capture_native = avowed_try_get_native_resource(scene_capture_rhi);
+
+    if (avowed_is_current_game()) {
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[Avowed][NativeStereoFix] BeginRenderViewFamilyReal: uses_tarrayview={} views={} scene_utexture={} resource={} render_target={} capture_rhi={:x} capture_native={:x} fixed_localplayer={}",
+            uses_tarrayview,
+            views.count,
+            rt != nullptr,
+            rtrsrc != nullptr,
+            rtfrt != nullptr,
+            (uintptr_t)scene_capture_rhi,
+            scene_capture_native,
+            g_hook->m_fixed_localplayer_view_count);
+    }
 
     if (rtfrt == nullptr) {
+        avowed_native_fix_gate_update(
+            (uintptr_t)view_family->get_scene_interface(),
+            0,
+            (uintptr_t)scene_capture_rhi,
+            scene_capture_native,
+            false);
+
         // This is fine to call constantly because we use an in-flight render target
         // that gets unset after the texture is fully created. This function exits early otherwise.
         rtm->create_scene_capture();
@@ -3248,36 +9097,65 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     }
 
     auto view_family_target = view_family->get_render_target();
+    const auto view_family_scene = view_family->get_scene_interface();
 
     if (view_family_target == nullptr) {
+        avowed_native_fix_gate_update(
+            (uintptr_t)view_family_scene,
+            0,
+            (uintptr_t)scene_capture_rhi,
+            scene_capture_native,
+            false);
+
         g_hook->m_render_module_begin_render_viewfamily_hook.unsafe_call<void>(render_module, canvas, view_family_candidate);
         return;
     }
 
+    uint32_t avowed_gate_stable_frames = 0;
+    uint32_t avowed_gate_required_frames = AVOWED_NATIVE_FIX_STABLE_FRAMES;
+    const auto avowed_gate_ready = avowed_native_fix_gate_update(
+        (uintptr_t)view_family_scene,
+        (uintptr_t)view_family_target,
+        (uintptr_t)scene_capture_rhi,
+        scene_capture_native,
+        rtfrt != nullptr && scene_capture_rhi != nullptr,
+        &avowed_gate_stable_frames,
+        &avowed_gate_required_frames);
+
     bool wants_swap = false;
     if (views.count > 1) {
         views.count = 1;
-        wants_swap = true;
+        wants_swap = !avowed_is_current_game() || avowed_gate_ready;
 
-        auto runtime = vr->get_runtime();
-        const auto frame_count = runtime->internal_frame_count;
+        if (avowed_is_current_game() && !avowed_gate_ready) {
+            SPDLOG_INFO_EVERY_N_SEC(
+                2,
+                "[Avowed][NativeStereoFix] Suppressing right-eye pass during render transition stabilization stable={}/{}",
+                avowed_gate_stable_frames,
+                avowed_gate_required_frames);
+        }
 
-        // We need to clone the VR state from last frame to this frame
-        if (runtime->is_openxr()) {
-            auto openxr = (runtimes::OpenXR*)runtime;
-            std::scoped_lock __{ openxr->sync_assignment_mtx };
+        if (wants_swap) {
+            auto runtime = vr->get_runtime();
+            const auto frame_count = runtime->internal_frame_count;
 
-            const auto last_frame = (frame_count) % runtimes::OpenXR::QUEUE_SIZE;
-            const auto now_frame = (frame_count + 1) % runtimes::OpenXR::QUEUE_SIZE;
-            openxr->pipeline_states[now_frame] = openxr->pipeline_states[last_frame];
-            openxr->pipeline_states[now_frame].frame_count = now_frame;
-        } else {
-            auto openvr = (runtimes::OpenVR*)runtime;
-            std::unique_lock __{ openvr->pose_mtx };
+            // We need to clone the VR state from last frame to this frame
+            if (runtime->is_openxr()) {
+                auto openxr = (runtimes::OpenXR*)runtime;
+                std::scoped_lock __{ openxr->sync_assignment_mtx };
 
-            const auto last_frame = (frame_count) % openvr->pose_queue.size();
-            const auto now_frame = (frame_count + 1) % openvr->pose_queue.size();
-            openvr->pose_queue[now_frame] = openvr->pose_queue[last_frame];
+                const auto last_frame = (frame_count) % runtimes::OpenXR::QUEUE_SIZE;
+                const auto now_frame = (frame_count + 1) % runtimes::OpenXR::QUEUE_SIZE;
+                openxr->pipeline_states[now_frame] = openxr->pipeline_states[last_frame];
+                openxr->pipeline_states[now_frame].frame_count = now_frame;
+            } else {
+                auto openvr = (runtimes::OpenVR*)runtime;
+                std::unique_lock __{ openvr->pose_mtx };
+
+                const auto last_frame = (frame_count) % openvr->pose_queue.size();
+                const auto now_frame = (frame_count + 1) % openvr->pose_queue.size();
+                openvr->pose_queue[now_frame] = openvr->pose_queue[last_frame];
+            }
         }
 
         /*auto init_options = (sdk::FSceneViewInitOptions*)((uintptr_t)view_family.views.data[0] + INIT_OPTIONS_OFFSET);
@@ -3299,6 +9177,10 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     g_hook->m_render_module_begin_render_viewfamily_hook.unsafe_call<void>(render_module, canvas, view_family_candidate);
 
     if (wants_swap) {
+        if (avowed_is_current_game()) {
+            SPDLOG_INFO_EVERY_N_SEC(2, "[Avowed][NativeStereoFix] Executing right-eye second render pass into scene capture target");
+        }
+
         // Swap out the existing render target for our custom one
         // Also, the entire point of swapping the render target
         // instead of "just" re-using the existing one is that doing that causes a 90% FPS drop
@@ -3329,6 +9211,17 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
 
 void FFakeStereoRenderingHook::begin_render_viewfamily(ISceneViewExtension* extension, sdk::FSceneViewFamily& view_family) {
     ZoneScopedN("BeginRenderViewFamily");
+    const auto profile_engine_render = should_profile_engine_render_timing();
+    const auto begin_render_viewfamily_start =
+        profile_engine_render ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    utility::ScopeGuard begin_render_viewfamily_timing_guard{[&]() {
+        if (!profile_engine_render) {
+            return;
+        }
+
+        g_begin_render_viewfamily_timing.add(std::chrono::steady_clock::now() - begin_render_viewfamily_start);
+        log_engine_render_timing_if_needed();
+    }};
 
     SPDLOG_INFO_ONCE("Called BeginRenderViewFamily for the first time");
 
@@ -3336,7 +9229,26 @@ void FFakeStereoRenderingHook::begin_render_viewfamily(ISceneViewExtension* exte
         return;
     }
 
-    sdk::FSceneViewFamily::update_offsets(&view_family, g_hook->get_render_target_manager()->get_viewport());
+    if (dune_awakening_is_current_game() && g_hook->is_dune_character_creation_active()) {
+        return;
+    }
+
+    if (!g_hook->has_scene_view_family_offsets_ready() &&
+        sdk::FSceneViewFamily::update_offsets(&view_family, g_hook->get_render_target_manager()->get_viewport()))
+    {
+        g_hook->note_scene_view_family_offsets_ready();
+    }
+
+    if (dune_is_auxiliary_view_family(&view_family, "BeginRenderViewFamily")) {
+        return;
+    }
+
+    if (auto view_family_target = view_family.get_render_target(); view_family_target != nullptr) {
+        g_hook->try_adopt_scene_viewport_render_target(
+            reinterpret_cast<sdk::FViewport*>(view_family_target),
+            "FSceneViewFamily::RenderTarget");
+    }
+
     auto si = view_family.get_scene_interface();
 
     if (si != nullptr) {
@@ -3357,10 +9269,15 @@ void FFakeStereoRenderingHook::begin_render_viewfamily(ISceneViewExtension* exte
     const auto frame_count = *(uint32_t*)((uintptr_t)&view_family + SceneViewExtensionAnalyzer::frame_count_offset);
     auto views_ptr = view_family.get_views();
 
-    //vr->update_hmd_state(true, frame_count);
     auto runtime = vr->get_runtime();
     runtime->internal_frame_count = frame_count;
     runtime->on_pre_render_game_thread(frame_count);
+
+    if (everspace2_is_current_game()) {
+        // SetupViewPoint runs before this callback. Publish a stable token for
+        // the next frame so all of its viewpoint calls share one tracking pose.
+        g_everspace2_next_view_pose_frame.store(frame_count + 1, std::memory_order_release);
+    }
 
     // This is a HACKHACKHACK to get splitscreen working on around 4.20 to 4.27 something
     // This is completely borked on UE5
@@ -3489,58 +9406,85 @@ void FFakeStereoRenderingHook::begin_render_viewfamily(ISceneViewExtension* exte
 
     using BeginRenderViewFamilyRealFn = void(*)(void*, sdk::FCanvas*, sdk::FSceneViewFamily*);
     static BeginRenderViewFamilyRealFn begin_rendering_view_family_real_fn = nullptr;
-    static bool already_tried = false;
-    if (begin_rendering_view_family_real_fn == nullptr && !already_tried && vr->is_native_stereo_fix_enabled()) {
-        already_tried = true;
+    static uint32_t resolver_attempts = 0;
+    static uint32_t calls_until_retry = 0;
 
-        // Get callstack
-        constexpr auto max_stack_depth = 100;
-        uintptr_t stack[max_stack_depth]{};
+    if (begin_rendering_view_family_real_fn == nullptr && vr->is_native_stereo_fix_enabled()) {
+        if (calls_until_retry > 0) {
+            --calls_until_retry;
+        } else {
+            ++resolver_attempts;
+            calls_until_retry = 30;
 
-        const auto depth = RtlCaptureStackBackTrace(0, max_stack_depth, (void**)&stack, nullptr);
-        uintptr_t mid = 0;
+            const auto candidate = resolve_begin_rendering_viewfamilies_from_stack();
+            if (!candidate) {
+                SPDLOG_WARN(
+                    "[NativeStereoFix] Failed to resolve BeginRenderingViewFamilies on attempt {}; "
+                    "will retry in {} callbacks",
+                    resolver_attempts,
+                    calls_until_retry);
+                return;
+            }
 
-        for (int i = 1; i < depth; i++) {
-            SPDLOG_INFO(" {:x}", (uintptr_t)stack[i]);
-            mid = stack[i];
-            break;
-        }
+            begin_rendering_view_family_real_fn =
+                reinterpret_cast<BeginRenderViewFamilyRealFn>(*candidate);
+            SPDLOG_INFO(
+                "[NativeStereoFix] Resolved BeginRenderingViewFamilies real function at {:x} on attempt {}",
+                reinterpret_cast<uintptr_t>(begin_rendering_view_family_real_fn),
+                resolver_attempts);
 
-        if (mid != 0) {
-            const auto candidate = utility::find_virtual_function_start(mid);
+            g_hook->m_render_module_begin_render_viewfamily_hook = safetyhook::create_inline(
+                reinterpret_cast<uintptr_t>(begin_rendering_view_family_real_fn),
+                reinterpret_cast<uintptr_t>(&begin_render_viewfamily_real));
 
-            if (candidate) {
-                begin_rendering_view_family_real_fn = (BeginRenderViewFamilyRealFn)*candidate;
-
-                if (begin_rendering_view_family_real_fn != nullptr) {
-                    SPDLOG_INFO("Found BeginRenderingViewFamily real function at {:x}", (uintptr_t)begin_rendering_view_family_real_fn);
-
-                    g_hook->m_render_module_begin_render_viewfamily_hook = safetyhook::create_inline((uintptr_t)begin_rendering_view_family_real_fn, (uintptr_t)&begin_render_viewfamily_real);
-
-                    if (g_hook->m_render_module_begin_render_viewfamily_hook) {
-                        SPDLOG_INFO("Hooked BeginRenderingViewFamily real function");
-                    } else {
-                        SPDLOG_ERROR("Failed to hook BeginRenderingViewFamily real function");
-                    }
-                } else {
-                    SPDLOG_ERROR("Failed to find BeginRenderingViewFamily real function");
-                }
+            if (g_hook->m_render_module_begin_render_viewfamily_hook) {
+                SPDLOG_INFO("[NativeStereoFix] Hooked BeginRenderingViewFamilies real function");
             } else {
-                SPDLOG_ERROR("Failed to find BeginRenderingViewFamily real function");
+                SPDLOG_ERROR("[NativeStereoFix] Failed to hook BeginRenderingViewFamilies real function");
+                begin_rendering_view_family_real_fn = nullptr;
             }
         }
     }
 }
 
+const char* FFakeStereoRenderingHook::get_ghosting_fix_status_text() {
+    std::scoped_lock lock{m_sceneview_data.mtx};
+
+    switch (m_sceneview_data.ghosting_state) {
+    case GhostingFixState::WaitingForHooks:
+        return "waiting for SceneView hooks";
+    case GhostingFixState::LearningViewStates:
+        return "learning per-eye view states";
+    case GhostingFixState::Active:
+        return "active";
+    case GhostingFixState::FailedClosed:
+        return "failed closed";
+    case GhostingFixState::Off:
+    default:
+        return "off";
+    }
+}
+
 void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExtension* extension, sdk::FRHICommandListBase* cmd_list, sdk::FSceneViewFamily& view_family) {
     ZoneScopedN("PreRenderViewFamily_RenderThread");
+    const auto profile_engine_render = should_profile_engine_render_timing();
+    const auto prerender_viewfamily_rt_start =
+        profile_engine_render ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    utility::ScopeGuard prerender_viewfamily_rt_timing_guard{[&]() {
+        if (!profile_engine_render) {
+            return;
+        }
+
+        g_prerender_viewfamily_rt_timing.add(std::chrono::steady_clock::now() - prerender_viewfamily_rt_start);
+        log_engine_render_timing_if_needed();
+    }};
 
     utility::ScopeGuard _{[]() {
         RenderThreadWorker::get().execute();
     }};
-    
+
     SPDLOG_INFO_ONCE("Called PreRenderViewFamily_RenderThread for the first time");
-    
+
     if (!g_framework->is_game_data_intialized()) {
         return;
     }
@@ -3550,6 +9494,16 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
     if (!vr->is_hmd_active()) {
         return;
     }
+
+    if (dune_awakening_is_current_game() && g_hook->is_dune_character_creation_active()) {
+        return;
+    }
+
+    if (dune_is_auxiliary_view_family(&view_family, "PreRenderViewFamily_RenderThread")) {
+        return;
+    }
+
+    g_hook->note_prerender_viewfamily_seen();
 
     static size_t execution_count{0};
 
@@ -3609,6 +9563,14 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
             }
 
             static size_t actual_offset = 0;
+
+            // ES2's private UE5.5.4 symbols place FMemStackBase at the start of
+            // FRHICommandListBase and Root immediately after it at +0x28.
+            if (is_ue_5_5_runtime() && everspace2_is_current_game()) {
+                actual_offset = 0x28;
+                SPDLOG_INFO_ONCE("[Everspace2][UE5.5][RHICommandList] Using source-validated Root offset 0x28");
+            }
+
             auto l = (sdk::FRHICommandListBase*)((uintptr_t)command_list + actual_offset);
             const auto is_ue5 = g_hook->has_double_precision();
 
@@ -3663,6 +9625,41 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
             }
         });
     };
+
+    auto fall_back_to_slate_thread = [&]() {
+        if (is_ue_5_7_or_newer()) {
+            g_hook->m_prefer_slate_thread_for_session = true;
+            save_ue57_slate_thread_preference(true);
+        }
+
+        if (is_ue_5_7_or_newer()) {
+            g_hook->get_render_target_manager()->try_schedule_dedicated_ui_creation();
+        }
+
+        if (g_hook->has_slate_hook()) {
+            enqueue_poses_on_slate_thread();
+        } else {
+            vr->get_runtime()->enqueue_render_poses(frame_count + compensation);
+        }
+    };
+
+    if (is_ue_5_7_or_newer() &&
+        g_hook->has_slate_hook() &&
+        g_hook->has_seen_stable_slate_draw() &&
+        !g_hook->has_successful_command_list_hijack() &&
+        !g_hook->m_prefer_slate_thread_for_session &&
+        g_hook->m_first_stable_slate_draw_at.time_since_epoch().count() != 0 &&
+        std::chrono::steady_clock::now() - g_hook->m_first_stable_slate_draw_at > std::chrono::seconds(2))
+    {
+        SPDLOG_WARN_ONCE("[UE 5.7] Command-list path did not stabilize after the first Slate draw; preferring Slate-thread startup");
+        fall_back_to_slate_thread();
+        return;
+    }
+
+    if (is_ue_5_7_or_newer() && g_hook->m_prefer_slate_thread_for_session && g_hook->has_slate_hook()) {
+        enqueue_poses_on_slate_thread();
+        return;
+    }
 
     // okay well I think this evaluates to false all the time
     // but apparently it has been working for a LONG TIME so I'm not going to touch this until after release
@@ -3771,22 +9768,11 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
             }
         } catch(...) {
             SPDLOG_INFO_ONCE("Failed to hook command list, falling back to Slate thread hook");
-
-            if (g_hook->has_slate_hook()) {
-                enqueue_poses_on_slate_thread();
-            } else {
-                vr->get_runtime()->enqueue_render_poses(frame_count + compensation);
-            }
+            fall_back_to_slate_thread();
         }
     } else {
         SPDLOG_INFO_ONCE("Bad root or command list, falling back to Slate thread hook");
-
-        // welp v2
-        if (g_hook->has_slate_hook()) {
-            enqueue_poses_on_slate_thread();
-        } else {
-            vr->get_runtime()->enqueue_render_poses(frame_count + compensation);
-        }
+        fall_back_to_slate_thread();
     }
 }
 
@@ -3851,11 +9837,11 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
         if (exception->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
             const auto exception_address = exception->ContextRecord->Rip;
 
+            const auto daysgone_current = daysgone_is_current_game();
+
             if (ignored_addresses.contains(exception_address)) {
                 return EXCEPTION_CONTINUE_SEARCH;
             }
-
-            ignored_addresses.insert(exception_address);
 
             if (exception_address == 0) {
                 SPDLOG_INFO("[Exception Handler] Exception address is null");
@@ -3885,8 +9871,340 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
 
             SPDLOG_INFO("Encountered attempted dereference of null pointer at {:x}", exception_address);
 
+            const auto fault_target = exception->ExceptionRecord->NumberParameters > 1
+                ? static_cast<uintptr_t>(exception->ExceptionRecord->ExceptionInformation[1])
+                : std::numeric_limits<uintptr_t>::max();
+
+            const auto is_rax_base = [](auto reg) {
+                return reg == NDR_RAX || reg == NDR_EAX;
+            };
+
+            const auto reg_to_index = [](auto reg) -> std::optional<uint8_t> {
+                if (reg == NDR_RAX || reg == NDR_EAX) return 0;
+                if (reg == NDR_RCX || reg == NDR_ECX) return 1;
+                if (reg == NDR_RDX || reg == NDR_EDX) return 2;
+                if (reg == NDR_RBX || reg == NDR_EBX) return 3;
+                if (reg == NDR_RSP || reg == NDR_ESP) return 4;
+                if (reg == NDR_RBP || reg == NDR_EBP) return 5;
+                if (reg == NDR_RSI || reg == NDR_ESI) return 6;
+                if (reg == NDR_RDI || reg == NDR_EDI) return 7;
+                if (reg == NDR_R8 || reg == NDR_R8D) return 8;
+                if (reg == NDR_R9 || reg == NDR_R9D) return 9;
+                if (reg == NDR_R10 || reg == NDR_R10D) return 10;
+                if (reg == NDR_R11 || reg == NDR_R11D) return 11;
+                if (reg == NDR_R12 || reg == NDR_R12D) return 12;
+                if (reg == NDR_R13 || reg == NDR_R13D) return 13;
+                if (reg == NDR_R14 || reg == NDR_R14D) return 14;
+                if (reg == NDR_R15 || reg == NDR_R15D) return 15;
+                return std::nullopt;
+            };
+
+            auto make_zero_register_patch = [&reg_to_index](auto reg) -> std::vector<int16_t> {
+                const auto index = reg_to_index(reg);
+
+                if (!index) {
+                    return {};
+                }
+
+                const auto dest = *index;
+                std::vector<int16_t> patch{};
+
+                if (dest < 8) {
+                    patch.push_back(0x31);
+                    patch.push_back(static_cast<int16_t>(0xC0 | (dest << 3) | dest));
+                } else {
+                    patch.push_back(0x45);
+                    patch.push_back(0x31);
+                    const auto r = static_cast<uint8_t>(dest - 8);
+                    patch.push_back(static_cast<int16_t>(0xC0 | (r << 3) | r));
+                }
+
+                return patch;
+            };
+
+            auto set_context_register = [&reg_to_index](CONTEXT* context, auto reg, DWORD64 value) -> bool {
+                const auto index = reg_to_index(reg);
+
+                if (!index) {
+                    return false;
+                }
+
+                switch (*index) {
+                case 0: context->Rax = value; return true;
+                case 1: context->Rcx = value; return true;
+                case 2: context->Rdx = value; return true;
+                case 3: context->Rbx = value; return true;
+                case 4: context->Rsp = value; return true;
+                case 5: context->Rbp = value; return true;
+                case 6: context->Rsi = value; return true;
+                case 7: context->Rdi = value; return true;
+                case 8: context->R8 = value; return true;
+                case 9: context->R9 = value; return true;
+                case 10: context->R10 = value; return true;
+                case 11: context->R11 = value; return true;
+                case 12: context->R12 = value; return true;
+                case 13: context->R13 = value; return true;
+                case 14: context->R14 = value; return true;
+                case 15: context->R15 = value; return true;
+                default: return false;
+                }
+            };
+
+            const auto exception_module = utility::get_module_within(exception_address).value_or(nullptr);
+            const auto executable_base = reinterpret_cast<uintptr_t>(utility::get_executable());
+            const auto exception_rva =
+                exception_module == utility::get_executable() && executable_base != 0 && exception_address >= executable_base
+                    ? exception_address - executable_base
+                    : 0;
+
+            const auto is_daysgone_fname_block_lookup =
+                daysgone_current &&
+                exception_module == utility::get_executable() &&
+                exception_rva == 0x19fd30a &&
+                exception->ContextRecord->Rax == 0 &&
+                decoded->Operands[0].Type == ND_OP_REG &&
+                decoded->Operands[0].Info.Register.Reg == NDR_RDX &&
+                std::string_view{decoded->Mnemonic}.starts_with("MOV") &&
+                op2.Type == ND_OP_MEM &&
+                op2.Info.Memory.HasBase &&
+                is_rax_base(op2.Info.Memory.Base);
+
+            if (is_daysgone_fname_block_lookup) {
+                constexpr uintptr_t daysgone_fname_to_string_return_rva = 0x19fd370;
+
+                SPDLOG_WARN_ONCE(
+                    "[DaysGone] Recovering invalid UE4 FName block lookup at RVA 0x19fd30a; returning empty name string");
+
+                exception->ContextRecord->Rax = exception->ContextRecord->Rbx;
+                exception->ContextRecord->Rip = executable_base + daysgone_fname_to_string_return_rva;
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+
+            const auto is_daysgone_view_extension_null_chain =
+                daysgone_current &&
+                exception_module == utility::get_executable() &&
+                fault_target <= 0x20 &&
+                decoded->Operands[0].Type == ND_OP_REG &&
+                std::string_view{decoded->Mnemonic}.starts_with("MOV") &&
+                op2.Info.Memory.HasDisp &&
+                is_rax_base(op2.Info.Memory.Base) &&
+                (op2.Info.Memory.Disp == 0x8 || op2.Info.Memory.Disp == 0x10);
+
+            if (is_daysgone_view_extension_null_chain) {
+                auto patch_bytes = make_zero_register_patch(decoded->Operands[0].Info.Register.Reg);
+
+                if (!patch_bytes.empty() && patch_bytes.size() <= decoded->Length) {
+                    for (size_t i = patch_bytes.size(); i < decoded->Length; ++i) {
+                        patch_bytes.push_back(0x90);
+                    }
+
+                    SPDLOG_WARN(
+                        "[DaysGone] Patching UE4.10/4.11 SceneViewExtension null chain at {:x}: fault={:x} disp={:x}",
+                        exception_address,
+                        fault_target,
+                        op2.Info.Memory.Disp);
+
+                    xrsystem_patches.push_back(Patch::create(exception_address, patch_bytes));
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                }
+
+                SPDLOG_ERROR(
+                    "[DaysGone] Failed to create safe zero-register patch at {:x}; patch_len={} instr_len={}",
+                    exception_address,
+                    patch_bytes.size(),
+                        decoded->Length);
+            }
+
+            const auto is_rcx_base = [](auto reg) {
+                return reg == NDR_RCX || reg == NDR_ECX;
+            };
+
+            const auto is_rbx_base = [](auto reg) {
+                return reg == NDR_RBX || reg == NDR_EBX;
+            };
+
+            const auto is_daysgone_null_projection_source =
+                daysgone_current &&
+                exception_module == utility::get_executable() &&
+                fault_target == 0 &&
+                decoded->Operands[0].Type == ND_OP_REG &&
+                decoded->Operands[0].Info.Register.Reg == NDR_RAX &&
+                op2.Type == ND_OP_MEM &&
+                op2.Info.Memory.HasBase &&
+                is_rcx_base(op2.Info.Memory.Base) &&
+                (!op2.Info.Memory.HasDisp || op2.Info.Memory.Disp == 0);
+
+            if (is_daysgone_null_projection_source) {
+                const auto next_instruction_addr = exception_address + decoded->Length;
+                const auto next_instruction = utility::decode_one((uint8_t*)next_instruction_addr);
+                const auto is_expected_vcall =
+                    next_instruction &&
+                    std::string_view{next_instruction->Mnemonic}.starts_with("CALL") &&
+                    next_instruction->OperandsCount >= 1 &&
+                    next_instruction->Operands[0].Type == ND_OP_MEM &&
+                    next_instruction->Operands[0].Info.Memory.HasBase &&
+                    next_instruction->Operands[0].Info.Memory.Base == NDR_RAX &&
+                    next_instruction->Operands[0].Info.Memory.HasDisp &&
+                    next_instruction->Operands[0].Info.Memory.Disp == 0x20;
+
+                if (is_expected_vcall) {
+                    alignas(16) static const std::array<float, 20> daysgone_fallback_matrix{
+                        1.0f, 0.0f, 0.0f, 0.0f,
+                        0.0f, 1.0f, 0.0f, 0.0f,
+                        0.0f, 0.0f, 1.0f, 0.0f,
+                        0.0f, 0.0f, 0.0f, 1.0f,
+                        0.0f, 0.0f, 0.0f, 0.0f,
+                    };
+
+                    SPDLOG_WARN(
+                        "[DaysGone] Recovering null projection-source call at {:x}; using fallback matrix and skipping vcall {:x}",
+                        exception_address,
+                        next_instruction_addr);
+
+                    exception->ContextRecord->Rax = reinterpret_cast<DWORD64>(daysgone_fallback_matrix.data());
+                    exception->ContextRecord->Rip = next_instruction_addr + next_instruction->Length;
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                }
+
+                SPDLOG_ERROR(
+                    "[DaysGone] Null projection-source pattern at {:x} did not match expected vcall",
+                    exception_address);
+            }
+
+            const auto is_daysgone_null_texture_output_ref =
+                daysgone_current &&
+                exception_module == utility::get_executable() &&
+                fault_target == 0x10 &&
+                decoded->Operands[0].Type == ND_OP_REG &&
+                op2.Type == ND_OP_MEM &&
+                op2.Info.Memory.HasBase &&
+                is_rbx_base(op2.Info.Memory.Base) &&
+                op2.Info.Memory.HasDisp &&
+                op2.Info.Memory.Disp == 0x10;
+
+            if (is_daysgone_null_texture_output_ref) {
+                const auto next_instruction_addr = exception_address + decoded->Length;
+                const auto next_instruction = utility::decode_one((uint8_t*)next_instruction_addr);
+                const auto next_base_is_expected = [&]() {
+                    if (!next_instruction ||
+                        next_instruction->OperandsCount < 2 ||
+                        next_instruction->Operands[1].Type != ND_OP_MEM ||
+                        !next_instruction->Operands[1].Info.Memory.HasBase)
+                    {
+                        return false;
+                    }
+
+                    const auto base = next_instruction->Operands[1].Info.Memory.Base;
+                    return base == NDR_R12 || base == NDR_R13 || base == NDR_R14 || base == NDR_R15 || base == NDR_RBP;
+                }();
+                const auto is_expected_followup =
+                    next_instruction &&
+                    std::string_view{next_instruction->Mnemonic}.starts_with("MOV") &&
+                    next_instruction->OperandsCount >= 2 &&
+                    next_instruction->Operands[0].Type == ND_OP_REG &&
+                    next_instruction->Operands[1].Type == ND_OP_MEM &&
+                    next_instruction->Operands[1].Info.Memory.HasBase &&
+                    next_base_is_expected &&
+                    next_instruction->Operands[1].Info.Memory.HasDisp &&
+                    next_instruction->Operands[1].Info.Memory.Disp == 0x28;
+
+                if (is_expected_followup &&
+                    set_context_register(exception->ContextRecord, decoded->Operands[0].Info.Register.Reg, 0))
+                {
+                    SPDLOG_WARN(
+                        "[DaysGone] Recovering null post-process texture output ref at {:x}; dest_reg={} next_base={} using null resource ref",
+                        exception_address,
+                        (int)decoded->Operands[0].Info.Register.Reg,
+                        (int)next_instruction->Operands[1].Info.Memory.Base);
+
+                    exception->ContextRecord->Rip = next_instruction_addr;
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                }
+
+                SPDLOG_ERROR(
+                    "[DaysGone] Null texture-output-ref pattern at {:x} did not match expected followup",
+                    exception_address);
+            }
+
+            const auto is_daysgone_null_scene_render_target_output_ref =
+                daysgone_current &&
+                exception_module == utility::get_executable() &&
+                fault_target == 0x10 &&
+                decoded->Operands[0].Type == ND_OP_REG &&
+                op2.Type == ND_OP_MEM &&
+                op2.Info.Memory.HasBase &&
+                (is_rcx_base(op2.Info.Memory.Base) || is_rax_base(op2.Info.Memory.Base)) &&
+                op2.Info.Memory.HasDisp &&
+                op2.Info.Memory.Disp == 0x10;
+
+            if (is_daysgone_null_scene_render_target_output_ref) {
+                const auto previous_instruction = utility::resolve_instruction(exception_address - 1);
+                const auto scene_target_slot = [&]() -> std::optional<int64_t> {
+                    if (!previous_instruction ||
+                        !std::string_view{previous_instruction->instrux.Mnemonic}.starts_with("MOV") ||
+                        previous_instruction->instrux.OperandsCount < 2 ||
+                        previous_instruction->instrux.Operands[0].Type != ND_OP_REG ||
+                        previous_instruction->instrux.Operands[1].Type != ND_OP_MEM ||
+                        !previous_instruction->instrux.Operands[1].Info.Memory.HasBase ||
+                        !previous_instruction->instrux.Operands[1].Info.Memory.HasDisp)
+                    {
+                        return std::nullopt;
+                    }
+
+                    const auto loaded_reg = previous_instruction->instrux.Operands[0].Info.Register.Reg;
+                    const auto source_base = previous_instruction->instrux.Operands[1].Info.Memory.Base;
+                    const auto source_disp = previous_instruction->instrux.Operands[1].Info.Memory.Disp;
+                    const auto current_base = op2.Info.Memory.Base;
+
+                    const auto feeds_current_null_ref =
+                        (is_rcx_base(current_base) && loaded_reg == NDR_RCX) ||
+                        (is_rax_base(current_base) && loaded_reg == NDR_RAX);
+
+                    if (!feeds_current_null_ref) {
+                        return std::nullopt;
+                    }
+
+                    const auto source_is_scene_targets =
+                        is_rax_base(source_base) ||
+                        source_base == NDR_R15 ||
+                        source_base == NDR_R15D;
+
+                    if (!source_is_scene_targets) {
+                        return std::nullopt;
+                    }
+
+                    switch (source_disp) {
+                    case 0xA8:
+                    case 0xB0:
+                    case 0x188:
+                        return source_disp;
+                    default:
+                        return std::nullopt;
+                    }
+                }();
+
+                if (scene_target_slot &&
+                    set_context_register(exception->ContextRecord, decoded->Operands[0].Info.Register.Reg, 0))
+                {
+                    SPDLOG_WARN(
+                        "[DaysGone] Recovering null scene-render-target output ref at {:x}; dest_reg={} from FSceneRenderTargets slot 0x{:x}",
+                        exception_address,
+                        (int)decoded->Operands[0].Info.Register.Reg,
+                        *scene_target_slot);
+
+                    exception->ContextRecord->Rip = exception_address + decoded->Length;
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                }
+
+                SPDLOG_ERROR(
+                    "[DaysGone] Null scene-render-target output-ref pattern at {:x} did not match expected FSceneRenderTargets load",
+                    exception_address);
+            }
+
+            ignored_addresses.insert(exception_address);
+
             // Get the start of the previous instruction
-            const auto previous_instruction = utility::resolve_instruction(exception_address - 1);
+            auto previous_instruction = utility::resolve_instruction(exception_address - 1);
 
             if (!previous_instruction) {
                 SPDLOG_ERROR("Could not resolve previous instruction at {:x}", exception_address - 1);
@@ -3896,8 +10214,54 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             if (previous_instruction->instrux.Operands[0].Type != ND_OP_REG ||
                 previous_instruction->instrux.Operands[0].Info.Register.Reg != op2.Info.Memory.Base)
             {
-                SPDLOG_ERROR("Previous instruction does not use the same register as the dereference");
-                return EXCEPTION_CONTINUE_SEARCH;
+                const auto can_use_stalker2_backscan = stalker2_is_current_game() && is_ue_5_1_dx12_backend();
+
+                if (!can_use_stalker2_backscan) {
+                    SPDLOG_ERROR("Previous instruction does not use the same register as the dereference");
+                    return EXCEPTION_CONTINUE_SEARCH;
+                }
+
+                std::optional<utility::Resolved> xr_hmd_load{};
+                const auto prior_instructions = utility::get_disassembly_behind(exception_address);
+
+                for (auto it = prior_instructions.rbegin(); it != prior_instructions.rend(); ++it) {
+                    const auto& candidate = *it;
+                    const auto& candidate_ix = candidate.instrux;
+
+                    if ((exception_address - candidate.addr) > 0x40) {
+                        break;
+                    }
+
+                    if (candidate_ix.OperandsCount < 2 ||
+                        candidate_ix.Operands[0].Type != ND_OP_REG ||
+                        candidate_ix.Operands[0].Info.Register.Reg != op2.Info.Memory.Base)
+                    {
+                        continue;
+                    }
+
+                    const auto& candidate_op2 = candidate_ix.Operands[1];
+
+                    if (candidate_op2.Type == ND_OP_MEM &&
+                        candidate_op2.Info.Memory.HasBase &&
+                        candidate_op2.Info.Memory.HasDisp &&
+                        candidate_op2.Info.Memory.Disp == potential_hmd_device_offset)
+                    {
+                        xr_hmd_load = candidate;
+                        break;
+                    }
+                }
+
+                if (!xr_hmd_load) {
+                    SPDLOG_ERROR("Previous instruction does not use the same register as the dereference");
+                    return EXCEPTION_CONTINUE_SEARCH;
+                }
+
+                SPDLOG_INFO(
+                    "[Stalker2][UE5.1] Matched non-adjacent XRSystem/HMDDevice load at {:x} for null dereference at {:x}",
+                    xr_hmd_load->addr,
+                    exception_address);
+
+                previous_instruction = *xr_hmd_load;
             }
 
             const auto prev_op2 = previous_instruction->instrux.Operands[1];
@@ -4134,9 +10498,18 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
         }
 
         auto& vtable = *(uintptr_t**)entry.reference;
+        const auto original_vtable = (void**)vtable;
 
         g_hook->m_analyze_view_extensions_start_time = std::chrono::high_resolution_clock::now();
         g_hook->m_analyzing_view_extensions = true;
+
+        if (SceneViewExtensionAnalyzer::try_apply_cached_discovery(original_vtable)) {
+            vtable = g_view_extension_vtable.data();
+            g_hook->m_analyzing_view_extensions = false;
+            g_hook->m_has_view_extensions_installed = true;
+            m_has_view_extension_hook = true;
+            return true;
+        }
 
         if (!m_rendertarget_manager_embedded_in_stereo_device) {
             SceneViewExtensionAnalyzer::FillVtable<g_view_extension_vtable.size()-1>::fill(g_view_extension_vtable);
@@ -4249,6 +10622,14 @@ std::optional<uintptr_t> FFakeStereoRenderingHook::locate_fake_stereo_rendering_
     const auto vtable_ref = utility::scan(*fake_stereo_rendering_constructor, 100, "48 8D 05 ? ? ? ?");
 
     if (!vtable_ref) {
+        SPDLOG_WARN("Failed to find FFakeStereoRendering VTable Reference through legacy pattern, trying constructor RIP-reference scan");
+
+        if (const auto vtable_from_constructor = locate_vtable_from_constructor_rip_references(*fake_stereo_rendering_constructor)) {
+            SPDLOG_INFO("FFakeStereoRendering VTable: {:x}", *vtable_from_constructor);
+            cached_result = vtable_from_constructor;
+            return vtable_from_constructor;
+        }
+
         SPDLOG_ERROR("Failed to find FFakeStereoRendering VTable Reference");
         return std::nullopt;
     }
@@ -4287,6 +10668,43 @@ std::optional<uintptr_t> FFakeStereoRenderingHook::locate_active_stereo_renderin
 
         if (result == 0) {
             return std::nullopt;
+        }
+
+        if (strikers_club_is_current_game()) {
+            uintptr_t current_vtable{};
+            SIZE_T bytes_read{};
+            const auto read_ok =
+                ReadProcessMemory(
+                    GetCurrentProcess(),
+                    reinterpret_cast<const void*>(result),
+                    &current_vtable,
+                    sizeof(current_vtable),
+                    &bytes_read) &&
+                bytes_read == sizeof(current_vtable);
+
+            const auto installed_shadow_object =
+                g_strikers_club_shadow_object.load(std::memory_order_acquire);
+            const auto installed_shadow_vtable =
+                g_strikers_club_shadow_vtable.load(std::memory_order_acquire);
+            const auto is_original_device = current_vtable == *fake_stereo_device_vtable;
+            const auto is_installed_shadow =
+                result == installed_shadow_object &&
+                installed_shadow_vtable != 0 &&
+                current_vtable == installed_shadow_vtable;
+
+            if (!read_ok || (!is_original_device && !is_installed_shadow)) {
+                SPDLOG_WARN(
+                    "[StrikersClub] Rejecting stale cached stereo device offset={:x} object={:x} expected_vtable={:x} "
+                    "shadow_object={:x} shadow_vtable={:x} actual_vtable={:x} read_ok={}",
+                    s_stereo_rendering_device_offset,
+                    result,
+                    *fake_stereo_device_vtable,
+                    installed_shadow_object,
+                    installed_shadow_vtable,
+                    current_vtable,
+                    read_ok);
+                return std::nullopt;
+            }
         }
 
         return result;
@@ -4425,6 +10843,15 @@ bool FFakeStereoRenderingHook::attempt_runtime_inject_stereo() {
         return false;
     }
 
+    if (everwind_is_current_game()) {
+        // Everwind's updated UE5.5 build can crash inside InitializeHMDDevice
+        // before UEVR reaches its fallback stereo-device path. The old build
+        // already relied on that fallback after InitializeHMDDevice failed to
+        // create a device, so avoid the unsafe engine call for all Everwind builds.
+        SPDLOG_WARN_ONCE("[Everwind] Skipping runtime InitializeHMDDevice; using fallback stereo-device injection");
+        return false;
+    }
+
     static auto enable_stereo_emulation_cvar = sdk::vr::get_enable_stereo_emulation_cvar();
 
     if (!locate_active_stereo_rendering_device()) {
@@ -4512,7 +10939,14 @@ bool FFakeStereoRenderingHook::is_stereo_enabled(FFakeStereoRendering* stereo) {
         g_hook->set_should_recreate_textures(true);
         return true;
     }
-    
+
+    if (dune_should_preserve_native_viewport_target()) {
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[Dune][CustomPresent] Temporarily disabling engine stereo while the native AMD presentation path owns the scene");
+        return false;
+    }
+
     /*if (g_hook->m_analyzing_view_extensions) {
         const auto now = std::chrono::high_resolution_clock::now();
 
@@ -4660,8 +11094,21 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         return;
     }
 
+    const bool synced_ue56_zero_view_is_eye =
+        vr->is_using_synchronized_afr() &&
+        g_hook->m_has_double_precision &&
+        is_ue_5_6_or_newer() &&
+        // SceneView compatibility handles eye offsets manually in sceneview_constructor.
+        // Do not let the normal UE callback change legacy SceneView pass handling.
+        !vr->is_sceneview_compatibility_enabled() &&
+        view_index == 0;
+
+    if (synced_ue56_zero_view_is_eye) {
+        SPDLOG_INFO_ONCE("[SyncedSequential][UE5.6+] Treating CalculateStereoViewOffset view_index 0 as the alternating AFR eye pass");
+    }
+
     // This is eSSP_FULL, we don't care. It will cause the view to become monoscopic if we do anything.
-    if (index_was_ever_two && view_index == 0) {
+    if (index_was_ever_two && view_index == 0 && !synced_ue56_zero_view_is_eye) {
         SPDLOG_INFO_ONCE("calculate stereo view offset called with view index 0 after 2, ignoring.");
         return;
     }
@@ -4675,7 +11122,14 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         index_starts_from_one = false;
     }
 
-    const auto is_full_pass = view_index == 0 && !index_was_ever_two && !index_was_ever_negative;
+    // UE5 uses zero-based 0/1 eye indices; a genuine mono pass arrives as INDEX_NONE above.
+    // Do not misclassify the left eye as a full pass when no -1/2 call preceded it.
+    const auto is_full_pass =
+        view_index == 0 &&
+        !index_was_ever_two &&
+        !index_was_ever_negative &&
+        !g_hook->m_has_double_precision &&
+        !synced_ue56_zero_view_is_eye;
 
     auto true_index = index_starts_from_one ? ((view_index + 1) % 2) : (view_index % 2);
     const auto has_double_precision = g_hook->m_has_double_precision;
@@ -4709,8 +11163,24 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         }
 
         //vr->wait_for_present();
-        
-        if (!g_hook->m_has_view_extension_hook && !g_hook->m_has_game_viewport_client_draw_hook) {
+
+        if (everspace2_is_current_game() && !g_hook->m_has_game_viewport_client_draw_hook) {
+            const auto runtime = vr->get_runtime();
+            const auto frame_count = everspace2_get_next_view_pose_frame(runtime);
+
+            if (const auto openxr = vr->get_openxr_runtime();
+                openxr != nullptr &&
+                openxr->ready() &&
+                g_everspace2_last_view_pose_frame.exchange(frame_count, std::memory_order_acq_rel) != frame_count)
+            {
+                // ES2 never resolves UGameViewportClient::Draw, so its normal
+                // pre-view pose update is absent. Refresh immediately before
+                // the first eye consumes the HMD transform.
+                vr->update_hmd_state(true, frame_count);
+                SPDLOG_INFO_ONCE(
+                    "[Everspace2][OpenXR][render-pose] Publishing HMD poses from CalculateStereoViewOffset");
+            }
+        } else if (!g_hook->m_has_view_extension_hook && !g_hook->m_has_game_viewport_client_draw_hook) {
             vr->update_hmd_state();
         }
     }
@@ -4935,7 +11405,19 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         }
 
         // Modify Player Control Rotation
-        if ((true_index == 1 || vr->is_using_afw()) && vr->is_aim_modify_player_control_rotation_enabled() && vr->is_any_aim_method_active()) {
+        const auto controller_camera_guard_active = vr->is_controller_camera_conflict_guard_active();
+        const auto direct_aim_compatibility_fallback =
+            vr->is_hmd_active() &&
+            !controller_camera_guard_active &&
+            (is_deadzone_ue56_executable() || vr->is_direct_aim_compatibility_enabled()) &&
+            (vr->is_headlocked_aim_enabled() ||
+                (vr->is_controller_aim_enabled() && vr->is_using_controllers()));
+
+        if ((true_index == 1 || vr->is_using_afw()) &&
+            vr->is_any_aim_method_active() &&
+            !controller_camera_guard_active &&
+            (vr->is_aim_modify_player_control_rotation_enabled() || direct_aim_compatibility_fallback))
+        {
             if (g_hook->m_tracking_system_hook != nullptr) {
                 g_hook->m_tracking_system_hook->manual_update_control_rotation();
             }
@@ -4970,7 +11452,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
                 glm::radians(-(float)rot_d->yaw),
                 glm::radians((float)rot_d->pitch),
                 glm::radians(-(float)rot_d->roll));
-        // ç‰‡æ®µï¼šåœ¨ calculate_stereo_view_offset æ–¹æ³•æœ«å°¾è°ƒç”¨æˆ–æ’å…¥ä»¥èŽ·å–æœ€ç»ˆ view çŸ©é˜µ
+        // Æ¬¶Î£ºÔÚ calculate_stereo_view_offset ·½·¨Ä©Î²µ÷ÓÃ»ò²åÈëÒÔ»ñÈ¡×îÖÕ view ¾ØÕó
         if (!has_double_precision) {
             glm::vec3 cam_pos = (*view_location) / vr->get_world_to_meters();
             glm::vec3 cam_pos_other = view_location_other / vr->get_world_to_meters();
@@ -5014,29 +11496,101 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
 
     auto& vr = VR::get();
 
-    // Only call PostInitProperties if ghosting fix enabled or native stereo is being used.
-    // Also, if we don't have a hook on GetDesiredNumberOfViews, we need to call PostInitProperties
-    //if (!vr->is_using_afr() || vr->is_ghosting_fix_enabled() || !g_hook->m_get_desired_number_of_views_hook) {
-    if (!vr->should_skip_post_init_properties()) {
+    const bool wants_ghosting_bootstrap =
+        vr->is_ghosting_fix_enabled() &&
+        vr->is_ghosting_fix_bootstrap_enabled() &&
+        vr->is_using_afr() &&
+        !vr->is_native_stereo_fix_enabled() &&
+        !vr->is_splitscreen_compatibility_enabled() &&
+        !vr->is_sceneview_compatibility_enabled();
+    const bool wants_localplayer_bootstrap =
+        wants_ghosting_bootstrap ||
+        vr->is_native_stereo_fix_enabled() ||
+        vr->is_splitscreen_compatibility_enabled() ||
+        vr->is_sceneview_compatibility_enabled() ||
+        !g_hook->m_get_desired_number_of_views_hook;
+
+    if (!vr->should_skip_post_init_properties() && wants_localplayer_bootstrap) {
         if (!g_hook->m_fixed_localplayer_view_count) {
             if (!g_hook->m_calculate_stereo_projection_matrix_post_hook) {
                 const auto return_address = (uintptr_t)_ReturnAddress();
-                SPDLOG_INFO("Inserting midhook after CalculateStereoProjectionMatrix... @ {:x}", return_address);
 
-                constexpr auto max_stack_depth = 100;
-                uintptr_t stack[max_stack_depth]{};
+                if (subnautica2_is_current_game() && !g_hook->m_hooked_alternative_localplayer_scan) {
+                    // Subnautica 2 can wedge if we patch the immediate return address
+                    // during first startup projection. Use the safer GetProjectionData
+                    // pre-hook path and let the next frame provide the LocalPlayer.
+                    constexpr auto max_stack_depth = 100;
+                    uintptr_t stack[max_stack_depth]{};
 
-                const auto depth = RtlCaptureStackBackTrace(0, max_stack_depth, (void**)&stack, nullptr);
+                    const auto depth = RtlCaptureStackBackTrace(0, max_stack_depth, (void**)&stack, nullptr);
+                    g_hook->m_projection_matrix_stack.clear();
 
-                for (int i = 0; i < depth; i++) {
-                    g_hook->m_projection_matrix_stack.push_back(stack[i]);
-                    SPDLOG_INFO(" {:x}", (uintptr_t)stack[i]);
+                    for (int i = 0; i < depth; i++) {
+                        g_hook->m_projection_matrix_stack.push_back(stack[i]);
+                    }
+
+                    if (g_hook->m_projection_matrix_stack.size() >= 3) {
+                        const auto post_get_projection_data = g_hook->m_projection_matrix_stack[2];
+                        const auto get_projection_data_candidate_1 = utility::find_function_start_with_call(post_get_projection_data);
+                        const auto get_projection_data_candidate_2 = utility::find_virtual_function_start(post_get_projection_data);
+                        std::optional<uintptr_t> get_projection_data{};
+
+                        if (get_projection_data_candidate_1 && get_projection_data_candidate_2) {
+                            const auto candidate_1_distance = std::abs((int64_t)post_get_projection_data - (int64_t)*get_projection_data_candidate_1);
+                            const auto candidate_2_distance = std::abs((int64_t)post_get_projection_data - (int64_t)*get_projection_data_candidate_2);
+                            get_projection_data = candidate_1_distance < candidate_2_distance ? get_projection_data_candidate_1 : get_projection_data_candidate_2;
+                        } else if (get_projection_data_candidate_1) {
+                            get_projection_data = get_projection_data_candidate_1;
+                        } else if (get_projection_data_candidate_2) {
+                            get_projection_data = get_projection_data_candidate_2;
+                        } else {
+                            get_projection_data = utility::find_function_start(post_get_projection_data);
+                        }
+
+                        if (get_projection_data) {
+                            SPDLOG_INFO("[Subnautica2] Hooking GetProjectionData at {:x} instead of CalculateStereoProjectionMatrix return address", *get_projection_data);
+                            auto hook = safetyhook::create_mid((void*)*get_projection_data, &FFakeStereoRenderingHook::pre_get_projection_data);
+
+                            if (hook) {
+                                g_hook->m_get_projection_data_pre_hook = std::move(hook);
+                                g_hook->m_hooked_alternative_localplayer_scan = true;
+                            } else {
+                                SPDLOG_WARN("[Subnautica2] Failed to hook GetProjectionData; disabling LocalPlayer bootstrap for this session");
+                                g_hook->m_fixed_localplayer_view_count = true;
+                            }
+                        } else {
+                            SPDLOG_WARN("[Subnautica2] Failed to locate GetProjectionData; disabling LocalPlayer bootstrap for this session");
+                            g_hook->m_fixed_localplayer_view_count = true;
+                        }
+                    } else {
+                        SPDLOG_WARN("[Subnautica2] Projection stack was too shallow for GetProjectionData hook; disabling LocalPlayer bootstrap for this session");
+                        g_hook->m_fixed_localplayer_view_count = true;
+                    }
+
+                    g_hook->m_projection_matrix_stack.clear();
                 }
 
-                g_hook->m_calculate_stereo_projection_matrix_post_hook = safetyhook::create_mid((void*)return_address, &FFakeStereoRenderingHook::post_calculate_stereo_projection_matrix);
+                if (g_hook->m_hooked_alternative_localplayer_scan || g_hook->m_fixed_localplayer_view_count) {
+                    // The alternative LocalPlayer bootstrap path is installed or this
+                    // session has failed closed; do not patch the return address.
+                } else {
+                    SPDLOG_INFO("Inserting midhook after CalculateStereoProjectionMatrix... @ {:x}", return_address);
 
-                if (!g_hook->m_calculate_stereo_projection_matrix_post_hook) {
-                    SPDLOG_ERROR("Failed to insert midhook after CalculateStereoProjectionMatrix!");
+                    constexpr auto max_stack_depth = 100;
+                    uintptr_t stack[max_stack_depth]{};
+
+                    const auto depth = RtlCaptureStackBackTrace(0, max_stack_depth, (void**)&stack, nullptr);
+
+                    for (int i = 0; i < depth; i++) {
+                        g_hook->m_projection_matrix_stack.push_back(stack[i]);
+                        SPDLOG_INFO(" {:x}", (uintptr_t)stack[i]);
+                    }
+
+                    g_hook->m_calculate_stereo_projection_matrix_post_hook = safetyhook::create_mid((void*)return_address, &FFakeStereoRenderingHook::post_calculate_stereo_projection_matrix);
+
+                    if (!g_hook->m_calculate_stereo_projection_matrix_post_hook) {
+                        SPDLOG_ERROR("Failed to insert midhook after CalculateStereoProjectionMatrix!");
+                    }
                 }
             }
         } else if (g_hook->m_calculate_stereo_projection_matrix_post_hook) {
@@ -5076,9 +11630,9 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
         g_hook->m_calculate_stereo_projection_matrix_hook.call<Matrix4x4f*>(stereo, out, view_index);
     } else {
         if (g_hook->m_has_double_precision) {
-            (*out)[3][2] = sdk::globals::get_near_clipping_plane();
-        } else {
             (*(Matrix4x4d*)out)[3][2] = (double)sdk::globals::get_near_clipping_plane();
+        } else {
+            (*out)[3][2] = sdk::globals::get_near_clipping_plane();
         }
     }
 
@@ -5322,11 +11876,27 @@ uint32_t FFakeStereoRenderingHook::get_desired_number_of_views_hook(FFakeStereoR
     }
 
     if (!is_stereo_enabled || (vr->is_using_afr() && !vr->is_splitscreen_compatibility_enabled())) {
-        // We need to know about the second scene state to fix ghosting, so set the view count to 2
-        // after we know about it, we can continue returning 1.
-        if (is_stereo_enabled && vr->is_ghosting_fix_enabled() && vr->is_using_afr() &&
-            g_hook->m_sceneview_data.known_scene_states.size() < 2 && g_hook->m_fixed_localplayer_view_count &&
-            !!g_hook->m_sceneview_data.constructor_hook && g_hook->m_has_view_extensions_installed)
+        const auto& ghosting_pair = g_hook->m_sceneview_data.ghosting_pair;
+        const bool ghosting_needs_second_state =
+            ghosting_pair.eye_state[0] == nullptr ||
+            ghosting_pair.eye_state[1] == nullptr ||
+            ghosting_pair.eye_state[0] == ghosting_pair.eye_state[1];
+
+        // Remap-only is the default safe Ghosting Fix path. The old
+        // GetDesiredNumberOfViews=2 bootstrap is now explicit opt-in because
+        // some UE4.27/UE5 titles crash when PostInitProperties is forced.
+        if (is_stereo_enabled &&
+            vr->is_ghosting_fix_enabled() &&
+            vr->is_ghosting_fix_bootstrap_enabled() &&
+            vr->is_using_afr() &&
+            !vr->is_native_stereo_fix_enabled() &&
+            !vr->is_sceneview_compatibility_enabled() &&
+            !vr->is_splitscreen_compatibility_enabled() &&
+            g_hook->m_sceneview_data.ghosting_state != GhostingFixState::FailedClosed &&
+            ghosting_needs_second_state &&
+            g_hook->m_fixed_localplayer_view_count &&
+            !!g_hook->m_sceneview_data.constructor_hook &&
+            g_hook->m_has_view_extensions_installed)
         {
             // Only works correctly if view extensions are installed, so we can reset the view count to 1 without crashing
             return 2;
@@ -5337,13 +11907,52 @@ uint32_t FFakeStereoRenderingHook::get_desired_number_of_views_hook(FFakeStereoR
 
     if (vr->is_native_stereo_fix_enabled()) {
         auto rtm = g_hook->get_render_target_manager();
-        if ((rtm->get_scene_capture_render_target() == nullptr || !g_hook->m_sceneview_data.constructor_hook || !g_hook->m_render_module_begin_render_viewfamily_hook)) {
+        const auto scene_capture_rt_ready = rtm->get_scene_capture_render_target() != nullptr;
+        const auto scene_capture_utexture_ready = rtm->get_scene_capture_utexture() != nullptr;
+        const auto fsceneview_hook_ready = !!g_hook->m_sceneview_data.constructor_hook;
+        const auto begin_viewfamily_hook_ready = !!g_hook->m_render_module_begin_render_viewfamily_hook;
+
+        if (avowed_is_current_game()) {
+            SPDLOG_INFO_EVERY_N_SEC(
+                2,
+                "[Avowed][NativeStereoFix] GetDesiredNumberOfViews state: stereo_enabled={} scene_rt={} scene_utexture={} fsceneview_hook={} begin_viewfamily_hook={} fixed_localplayer={}",
+                is_stereo_enabled,
+                scene_capture_rt_ready,
+                scene_capture_utexture_ready,
+                fsceneview_hook_ready,
+                begin_viewfamily_hook_ready,
+                g_hook->m_fixed_localplayer_view_count);
+        }
+
+        if ((!scene_capture_rt_ready || !fsceneview_hook_ready || !begin_viewfamily_hook_ready)) {
             if (rtm->get_scene_capture_utexture() == nullptr) {
                 rtm->create_scene_capture();
             }
 
+            if (avowed_is_current_game()) {
+                SPDLOG_INFO_EVERY_N_SEC(2, "[Avowed][NativeStereoFix] Returning one view while native-fix prerequisites initialize");
+            }
+
             return 1; // wait for the scene capture render target to be set and FSceneView constructor to be hooked
         }
+
+        if (avowed_is_current_game()) {
+            uint32_t stable_frames = 0;
+            uint32_t required_frames = AVOWED_NATIVE_FIX_STABLE_FRAMES;
+
+            if (!avowed_native_fix_gate_ready(&stable_frames, &required_frames)) {
+                SPDLOG_INFO_EVERY_N_SEC(
+                    2,
+                    "[Avowed][NativeStereoFix] Returning one view while render transition stabilizes stable={}/{}",
+                    stable_frames,
+                    required_frames);
+                return 1;
+            }
+        }
+    }
+
+    if (avowed_is_current_game() && vr->is_native_stereo_fix_enabled()) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[Avowed][NativeStereoFix] Returning two views for native stereo fix");
     }
 
     return 2;
@@ -5561,6 +12170,69 @@ void FFakeStereoRenderingHook::post_calculate_stereo_projection_matrix(safetyhoo
         return;
     }
 
+    if (avowed_is_current_game() && !avowed_is_live_uobject(localplayer)) {
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[Avowed][NativeStereoFix] CalculateStereoProjectionMatrix yielded non-UObject LocalPlayer candidate {:x}; switching to GetProjectionData scan",
+            localplayer);
+
+        auto try_hook_get_projection_data = [&]() -> bool {
+            if (g_hook->m_hooked_alternative_localplayer_scan || g_hook->m_fixed_localplayer_view_count) {
+                return false;
+            }
+
+            if (g_hook->m_projection_matrix_stack.size() < 3) {
+                SPDLOG_WARNING_EVERY_N_SEC(
+                    2,
+                    "[Avowed][NativeStereoFix] Cannot install GetProjectionData LocalPlayer scan; projection stack has {} entries",
+                    g_hook->m_projection_matrix_stack.size());
+                return false;
+            }
+
+            const auto post_get_projection_data = g_hook->m_projection_matrix_stack[2];
+            const auto get_projection_data_candidate_1 = utility::find_function_start_with_call(post_get_projection_data);
+            const auto get_projection_data_candidate_2 = utility::find_virtual_function_start(post_get_projection_data);
+            std::optional<uintptr_t> get_projection_data{};
+
+            if (get_projection_data_candidate_1 && get_projection_data_candidate_2) {
+                const auto candidate_1_distance = std::abs((int64_t)post_get_projection_data - (int64_t)*get_projection_data_candidate_1);
+                const auto candidate_2_distance = std::abs((int64_t)post_get_projection_data - (int64_t)*get_projection_data_candidate_2);
+                get_projection_data = candidate_1_distance < candidate_2_distance ? get_projection_data_candidate_1 : get_projection_data_candidate_2;
+            } else if (get_projection_data_candidate_1) {
+                get_projection_data = get_projection_data_candidate_1;
+            } else if (get_projection_data_candidate_2) {
+                get_projection_data = get_projection_data_candidate_2;
+            } else {
+                get_projection_data = utility::find_function_start(post_get_projection_data);
+            }
+
+            if (!get_projection_data) {
+                SPDLOG_WARNING_EVERY_N_SEC(2, "[Avowed][NativeStereoFix] Failed to locate GetProjectionData; disabling LocalPlayer bootstrap spam");
+                return false;
+            }
+
+            SPDLOG_INFO("[Avowed][NativeStereoFix] Hooking GetProjectionData at {:x}", *get_projection_data);
+
+            auto hook = safetyhook::create_mid((void*)*get_projection_data, &FFakeStereoRenderingHook::pre_get_projection_data);
+            if (!hook) {
+                SPDLOG_ERROR("[Avowed][NativeStereoFix] Failed to hook GetProjectionData");
+                return false;
+            }
+
+            g_hook->m_get_projection_data_pre_hook = std::move(hook);
+            g_hook->m_hooked_alternative_localplayer_scan = true;
+            g_hook->m_projection_matrix_stack.clear();
+            SPDLOG_INFO("[Avowed][NativeStereoFix] Installed GetProjectionData LocalPlayer scan");
+            return true;
+        };
+
+        if (!try_hook_get_projection_data()) {
+            g_hook->m_fixed_localplayer_view_count = true;
+        }
+
+        return;
+    }
+
     g_hook->post_init_properties(localplayer);
 }
 
@@ -5584,11 +12256,31 @@ void FFakeStereoRenderingHook::pre_get_projection_data(safetyhook::Context& ctx)
         return;
     }
 
+    if (avowed_is_current_game() && !avowed_is_live_uobject(localplayer)) {
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[Avowed][NativeStereoFix] GetProjectionData yielded non-UObject LocalPlayer candidate {:x}; disabling LocalPlayer bootstrap",
+            localplayer);
+        g_hook->m_fixed_localplayer_view_count = true;
+        return;
+    }
+
     g_hook->post_init_properties(localplayer);
 }
 
 void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
     SPDLOG_INFO("Searching for PostInitProperties virtual function...");
+
+    if (is_deadzone_ue56_executable()) {
+        // Deadzone Rogue's UE5.6.1 retail build can OOM while resolving
+        // UObject::StaticClass() through FName/object scans during this
+        // bootstrap. The game already reaches the stereo path without this
+        // call, so fail closed instead of hammering the unsafe resolver.
+        SPDLOG_WARN_ONCE("[Deadzone][PostInitProperties] Skipping UObject-based PostInitProperties resolver to avoid unsafe FName scan");
+        g_hook->m_sceneview_data.known_scene_states.clear();
+        g_hook->m_fixed_localplayer_view_count = true;
+        return;
+    }
 
     std::optional<uint32_t> idx{};
     const auto engine = sdk::UEngine::get_lvalue();
@@ -5598,16 +12290,69 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
         return;
     }
 
-    const auto vtable = *(uintptr_t**)localplayer;
+    uintptr_t vtable_address{};
+
+    if (avowed_is_current_game()) {
+        uintptr_t class_address{};
+        if (!avowed_is_live_uobject(localplayer, &vtable_address, &class_address)) {
+            SPDLOG_WARNING_EVERY_N_SEC(
+                2,
+                "[Avowed][NativeStereoFix] Refusing PostInitProperties on unsafe LocalPlayer candidate {:x}",
+                localplayer);
+            g_hook->m_fixed_localplayer_view_count = true;
+            return;
+        }
+
+        SPDLOG_INFO_ONCE("[Avowed][NativeStereoFix] LocalPlayer candidate validated via GUObjectArray (object={:x}, class={:x}, vtable={:x})",
+            localplayer,
+            class_address,
+            vtable_address);
+    } else {
+        vtable_address = *(uintptr_t*)localplayer;
+    }
+
+    const auto vtable = (uintptr_t*)vtable_address;
 
     if (vtable == nullptr || IsBadReadPtr((void*)vtable, sizeof(void*))) {
-        SPDLOG_ERROR("Cannot proceed, vtable for so-called \"local player\" is invalid!");
+        if (everwind_is_current_game()) {
+            // Everwind's UE5.5 projection path can hand us a stable non-LocalPlayer
+            // pointer every frame. Do not keep hammering PostInitProperties scans.
+            SPDLOG_WARNING_EVERY_N_SEC(
+                2,
+                "[Everwind][PostInitProperties] Refusing invalid LocalPlayer candidate {:x}; disabling LocalPlayer bootstrap",
+                localplayer);
+            g_hook->m_fixed_localplayer_view_count = true;
+        } else {
+            SPDLOG_ERROR("Cannot proceed, vtable for so-called \"local player\" is invalid!");
+        }
         return;
     }
 
-    INSTRUX ix{};
+    const auto ue51_post_init = is_ue_5_1_dx_backend();
+    const auto ue52_post_init = is_ue_5_2_dx_backend();
+    const auto ue53_post_init = is_ue_5_3_dx_backend();
+    const auto prospi_ue427_post_init = is_ue_4_27_runtime() && prospi_is_current_game();
+    const auto needs_source_informed_post_init =
+        prospi_ue427_post_init ||
+        is_ue_5_7_or_newer() ||
+        is_ue_5_6_dx12_backend() ||
+        is_ue_5_5_dx_backend() ||
+        is_ue_5_4_dx_backend() ||
+        ue53_post_init ||
+        ue52_post_init ||
+        ue51_post_init;
 
-    for (auto i = 1; i < 25; ++i) {
+    if (needs_source_informed_post_init) {
+        idx = resolve_post_init_properties_index_from_uobject(localplayer);
+    }
+
+    if ((prospi_ue427_post_init || ue51_post_init || ue52_post_init || ue53_post_init) && !idx) {
+        g_hook->m_sceneview_data.known_scene_states.clear();
+        g_hook->m_fixed_localplayer_view_count = true;
+        return;
+    }
+
+    for (auto i = 1; !idx && i < 25; ++i) {
         if (idx) {
             break;
         }
@@ -5633,7 +12378,7 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
                 if (*disp == (uintptr_t)engine || 
                     (!IsBadReadPtr((void*)*disp, sizeof(void*)) && *(uintptr_t*)*disp == (uintptr_t)*engine)) 
                 {
-                    SPDLOG_INFO("Found PostInitProperties at {} {:x}!", i, (uintptr_t)vfunc);
+                    SPDLOG_INFO("Found PostInitProperties through legacy body scan at {} {:x}!", i, (uintptr_t)vfunc);
                     idx = i;
                     return utility::ExhaustionResult::BREAK;
                 }
@@ -5644,6 +12389,13 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
     }
 
     if (!idx) {
+        if (needs_source_informed_post_init) {
+            SPDLOG_WARN("Failed to find PostInitProperties virtual function on UE 5.4+/modern path; skipping LocalPlayer bootstrap for safety");
+            g_hook->m_sceneview_data.known_scene_states.clear();
+            g_hook->m_fixed_localplayer_view_count = true;
+            return;
+        }
+
         SPDLOG_ERROR("Failed to find PostInitProperties virtual function! A crash may occur!");
     }
 
@@ -5783,8 +12535,2767 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
     g_hook->m_fixed_localplayer_view_count = true;
 }
 
-void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, void* a2, void* a3, 
-                                                                void* a4, void* params, void* unk1, void* unk2) 
+void FFakeStereoRenderingHook::ue57_add_slate_draw_elements_pass_hook(safetyhook::Context& ctx) {
+    if (g_hook == nullptr || !is_ue_5_7_or_newer() || !g_framework->is_dx12()) {
+        return;
+    }
+
+    if (!g_hook->m_inside_slate_draw_window || GetCurrentThreadId() != g_hook->m_slate_draw_window_thread_id) {
+        return;
+    }
+
+    auto* inputs = reinterpret_cast<UE57SlateDrawElementsPassInputsHead*>(ctx.r8);
+
+    if (!looks_like_ue57_slate_draw_elements_inputs(inputs)) {
+        return;
+    }
+
+    const auto scene_viewport_texture = inputs->scene_viewport_texture;
+    const auto elements_texture = inputs->elements_texture;
+
+    static bool logged_valid_path{false};
+
+    if (elements_texture != scene_viewport_texture) {
+        static bool logged_separate_path{false};
+
+        if (!logged_valid_path) {
+            logged_valid_path = true;
+            SPDLOG_INFO("[UE 5.7 Slate] Validated AddSlateDrawElementsPass inputs");
+        }
+
+        if (!logged_separate_path) {
+            logged_separate_path = true;
+            SPDLOG_INFO("[UE 5.7 Slate] DrawElements pass already has a separate ElementsTexture");
+        }
+    } else {
+        if (!logged_valid_path) {
+            logged_valid_path = true;
+            SPDLOG_INFO("[UE 5.7 Slate] Validated AddSlateDrawElementsPass inputs");
+        }
+
+        SPDLOG_INFO_EVERY_N_SEC(5, "[UE 5.7 Slate] DrawElements pass is still aliasing ElementsTexture to SceneViewportTexture");
+    }
+}
+
+namespace {
+struct UE55SlateDrawWindowPassInputsHead {
+    void* renderer;
+    void* window_element_list;
+    void* window;
+    sdk::FViewportInfo* viewport_info;
+};
+
+struct UE55SlatePostProcessArrayView {
+    void* data;
+    uint64_t count;
+};
+
+struct UE55FIntPoint {
+    int32_t x;
+    int32_t y;
+};
+
+struct UE55FIntRect {
+    UE55FIntPoint min;
+    UE55FIntPoint max;
+};
+
+struct UE55SlateDrawWindowPassInputs {
+    void* renderer;
+    void* window_element_list;
+    void* window;
+    sdk::FViewportInfo* viewport_info;
+    UE55SlatePostProcessArrayView post_process_requests;
+    UE55FIntPoint cursor_position;
+    UE55FIntRect scene_view_rect;
+    float viewport_scale_ui;
+};
+
+struct UE55SlateDrawWindowPassOutputs {
+    void* viewport_rhi;
+    FRHITexture2D* viewport_texture_rhi;
+    FRHITexture2D* output_texture_rhi;
+};
+
+struct UE55SlateDrawWindowsArrayView {
+    UE55SlateDrawWindowPassInputs* data;
+    int32_t count;
+    int32_t padding;
+};
+
+struct UE55SlateExtent {
+    uint32_t width{};
+    uint32_t height{};
+};
+
+bool try_read_ue55_slate_draw_inputs(void* candidate, void* renderer, UE55SlateDrawWindowPassInputsHead& out) {
+    if (!is_readable_process_range((uintptr_t)candidate, sizeof(UE55SlateDrawWindowPassInputsHead))) {
+        return false;
+    }
+
+    memcpy(&out, candidate, sizeof(out));
+
+    if (out.renderer != renderer || out.window == nullptr) {
+        return false;
+    }
+
+    return is_readable_process_range((uintptr_t)out.window, sizeof(void*));
+}
+
+bool try_read_ue55_slate_draw_inputs_full(void* candidate, void* renderer, UE55SlateDrawWindowPassInputs& out) {
+    if (!is_readable_process_range((uintptr_t)candidate, sizeof(UE55SlateDrawWindowPassInputs))) {
+        return false;
+    }
+
+    memcpy(&out, candidate, sizeof(out));
+
+    if (out.renderer != renderer || out.window == nullptr) {
+        return false;
+    }
+
+    return is_readable_process_range((uintptr_t)out.window, sizeof(void*));
+}
+
+bool try_read_ue55_slate_draw_windows_first_input(
+    void* candidate,
+    void* renderer,
+    UE55SlateDrawWindowPassInputsHead& out_head,
+    UE55SlateDrawWindowPassInputs& out_full,
+    bool& out_has_full)
+{
+    out_has_full = false;
+
+    if (!is_readable_process_range((uintptr_t)candidate, sizeof(UE55SlateDrawWindowsArrayView))) {
+        return false;
+    }
+
+    UE55SlateDrawWindowsArrayView windows{};
+    memcpy(&windows, candidate, sizeof(windows));
+
+    if (windows.data == nullptr || windows.count <= 0 || windows.count > 16) {
+        return false;
+    }
+
+    if (!try_read_ue55_slate_draw_inputs(windows.data, renderer, out_head)) {
+        return false;
+    }
+
+    out_has_full = try_read_ue55_slate_draw_inputs_full(windows.data, renderer, out_full);
+    return true;
+}
+
+std::optional<UE55SlateExtent> ue55_get_slate_expected_extent(const UE55SlateDrawWindowPassInputs& inputs) {
+    const auto width = inputs.scene_view_rect.max.x - inputs.scene_view_rect.min.x;
+    const auto height = inputs.scene_view_rect.max.y - inputs.scene_view_rect.min.y;
+
+    if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
+        return std::nullopt;
+    }
+
+    return UE55SlateExtent{(uint32_t)width, (uint32_t)height};
+}
+
+bool looks_like_vtable_object(void* object) {
+    uintptr_t vtable{};
+    return safe_read_value((uintptr_t)object, vtable) && looks_like_virtual_function_table(vtable);
+}
+
+bool try_call_slate_viewport_bool_slot(sdk::ISlateViewport* viewport, size_t slot, bool& out) {
+    out = false;
+
+    if (viewport == nullptr || !looks_like_vtable_object(viewport)) {
+        return false;
+    }
+
+    uintptr_t vtable{};
+    if (!safe_read_value((uintptr_t)viewport, vtable) ||
+        !is_readable_process_range(vtable + (slot * sizeof(void*)), sizeof(void*)))
+    {
+        return false;
+    }
+
+    uintptr_t fn{};
+    if (!safe_read_value(vtable + (slot * sizeof(void*)), fn) ||
+        fn == 0 ||
+        !is_executable_process_range(fn, 1))
+    {
+        return false;
+    }
+
+    using BoolVirtualFn = bool (*)(sdk::ISlateViewport*);
+
+    __try {
+        out = ((BoolVirtualFn)fn)(viewport);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+sdk::FSlateResource* try_get_slate_viewport_render_target_texture(sdk::ISlateViewport* viewport, bool& faulted) {
+    faulted = false;
+
+    __try {
+        return viewport != nullptr ? viewport->GetViewportRenderTargetTexture() : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        faulted = true;
+        return nullptr;
+    }
+}
+
+bool ue55_is_valid_ui_texture_candidate(
+    VRRenderTargetManager_Base* rtm,
+    FRHITexture2D* texture,
+    std::optional<UE55SlateExtent> expected_extent,
+    const char* source)
+{
+    if (!supports_ue55_dedicated_ui_target_for_current_game() || rtm == nullptr || texture == nullptr || IsBadReadPtr(texture, sizeof(void*))) {
+        return false;
+    }
+
+    if (texture == rtm->get_render_target()) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.5][SlateUI] rejecting {} candidate because it matches the scene render target: tex={:x}",
+            source != nullptr ? source : "<unknown>", (uintptr_t)texture);
+        return false;
+    }
+
+    const auto desc = ue55_try_get_d3d12_desc(texture, source);
+    if (!desc) {
+        return false;
+    }
+
+    if (!expected_extent || expected_extent->width == 0 || expected_extent->height == 0) {
+        SPDLOG_INFO_EVERY_N_SEC(2,
+            "[UE5.5][SlateUI] observing {} candidate tex={:x} [{}x{} fmt={} flags=0x{:x}] but no trusted Slate extent is available yet",
+            source != nullptr ? source : "<unknown>",
+            (uintptr_t)texture,
+            desc->Width,
+            desc->Height,
+            (uint32_t)desc->Format,
+            (uint32_t)desc->Flags);
+        return false;
+    }
+
+    if (desc->Width != expected_extent->width || desc->Height != expected_extent->height) {
+        SPDLOG_INFO_EVERY_N_SEC(2,
+            "[UE5.5][SlateUI] rejecting {} candidate tex={:x} because extent [{}x{}] != expected Slate [{}x{}]",
+            source != nullptr ? source : "<unknown>",
+            (uintptr_t)texture,
+            desc->Width,
+            desc->Height,
+            expected_extent->width,
+            expected_extent->height);
+        return false;
+    }
+
+    SPDLOG_INFO_EVERY_N_SEC(2,
+        "[UE5.5][SlateUI] accepted {} candidate tex={:x} [{}x{} fmt={} flags=0x{:x}]",
+        source != nullptr ? source : "<unknown>",
+        (uintptr_t)texture,
+        desc->Width,
+        desc->Height,
+        (uint32_t)desc->Format,
+        (uint32_t)desc->Flags);
+
+    return true;
+}
+
+void ue55_promote_slate_outputs(
+    VRRenderTargetManager_Base* rtm,
+    void* outputs_ptr,
+    std::optional<UE55SlateExtent> expected_extent)
+{
+    if (!supports_ue55_dedicated_ui_target_for_current_game() || rtm == nullptr || outputs_ptr == nullptr) {
+        return;
+    }
+
+    if (!is_readable_process_range((uintptr_t)outputs_ptr, sizeof(UE55SlateDrawWindowPassOutputs))) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.5][SlateUI] DrawWindow outputs are not readable yet: {:x}", (uintptr_t)outputs_ptr);
+        return;
+    }
+
+    UE55SlateDrawWindowPassOutputs outputs{};
+    memcpy(&outputs, outputs_ptr, sizeof(outputs));
+
+    SPDLOG_INFO_EVERY_N_SEC(2,
+        "[UE5.5][SlateUI] DrawWindow outputs viewport_rhi={:x} viewport_texture={:x} output_texture={:x} expected={}x{}",
+        (uintptr_t)outputs.viewport_rhi,
+        (uintptr_t)outputs.viewport_texture_rhi,
+        (uintptr_t)outputs.output_texture_rhi,
+        expected_extent ? expected_extent->width : 0,
+        expected_extent ? expected_extent->height : 0);
+
+    if (everspace2_is_current_game()) {
+        // ES2 transitions through pooled render targets during cinematics.
+        // Keep the rooted dedicated UI target instead of retaining a transient
+        // DrawWindow output that may be recycled by FRenderTargetPool.
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[Everspace2][UE5.5][SlateUI] Observed DrawWindow outputs without promoting pooled candidates");
+        return;
+    }
+
+    if (ue55_is_valid_ui_texture_candidate(rtm, outputs.viewport_texture_rhi, expected_extent, "DrawWindow viewport texture output")) {
+        if (rtm->get_dedicated_ui_target() != outputs.viewport_texture_rhi) {
+            rtm->set_dedicated_ui_target(outputs.viewport_texture_rhi, expected_extent->width, expected_extent->height);
+            rtm->get_fallback_ui_target_ref() = nullptr;
+            if (should_preserve_promoted_ue55_slate_target()) {
+                rtm->cancel_dedicated_ui_creation_preserving_target("UE5.5 promoted DrawWindow viewport texture");
+            }
+            SPDLOG_WARN("[UE5.5][SlateUI] promoted DrawWindow viewport texture output as dedicated UI target");
+        }
+        return;
+    }
+
+    if (ue55_is_valid_ui_texture_candidate(rtm, outputs.output_texture_rhi, expected_extent, "DrawWindow output texture")) {
+        SPDLOG_INFO_EVERY_N_SEC(2,
+            "[UE5.5][SlateUI] DrawWindow output texture is window-sized but not promoted; explicit SlateOutputTexture routing remains preferred");
+    }
+}
+
+bool ue55_try_promote_fallback_ui_target(
+    VRRenderTargetManager_Base* rtm,
+    std::optional<UE55SlateExtent> expected_extent,
+    const char* source)
+{
+    if (!(everwind_is_current_game() || is_deadzone_ue56_executable()) || rtm == nullptr || !expected_extent) {
+        return false;
+    }
+
+    auto* fallback = rtm->get_fallback_ui_target_ref();
+
+    if (!ue55_is_valid_ui_texture_candidate(rtm, fallback, expected_extent, source)) {
+        return false;
+    }
+
+    if (rtm->get_dedicated_ui_target() != fallback) {
+        rtm->set_dedicated_ui_target(fallback, expected_extent->width, expected_extent->height);
+        rtm->get_fallback_ui_target_ref() = nullptr;
+        rtm->cancel_dedicated_ui_creation_preserving_target(
+            is_deadzone_ue56_executable() ? "Deadzone D3D12 UI fallback target" : "Everwind D3D12 UI fallback target");
+        SPDLOG_WARN("[UE5.5][SlateUI] promoted {} D3D12 UI fallback target as dedicated UI target",
+            is_deadzone_ue56_executable() ? "Deadzone" : "Everwind");
+    }
+
+    return true;
+}
+}
+
+void FFakeStereoRenderingHook::slate_output_texture_register_hook_impl(safetyhook::Context& ctx, bool ue58) {
+    const char* tag = ue58 ? "[UE5.8][SlateUI]" : "[UE5.5][SlateUI]";
+
+    if (g_hook == nullptr) {
+        return;
+    }
+
+    if (ue58) {
+        if (!is_ue_5_8() || !supports_ue57_dedicated_ui_target() || g_framework == nullptr || !g_framework->is_dx12()) {
+            return;
+        }
+    } else if (!supports_ue55_dedicated_ui_target_for_current_game()) {
+        return;
+    }
+
+    if (!g_hook->m_inside_slate_draw_window || GetCurrentThreadId() != g_hook->m_slate_draw_window_thread_id) {
+        return;
+    }
+
+    if (ctx.r8 == 0 ||
+        !is_readable_process_range(ctx.r8, sizeof(wchar_t) * 19) ||
+        !std::wstring_view{(const wchar_t*)ctx.r8, 18}.starts_with(L"SlateOutputTexture"))
+    {
+        return;
+    }
+
+    auto* rtm = g_hook->get_render_target_manager();
+    auto* ui_target = rtm != nullptr ? rtm->get_dedicated_ui_target() : nullptr;
+
+    if ((everwind_is_current_game() || is_deadzone_ue56_executable()) &&
+        rtm != nullptr &&
+        (ui_target == nullptr || ui_target == rtm->get_render_target()))
+    {
+        auto* fallback = rtm->get_fallback_ui_target_ref();
+
+        if (fallback != nullptr && fallback != rtm->get_render_target() && !IsBadReadPtr(fallback, sizeof(void*))) {
+            ui_target = fallback;
+        }
+    }
+
+    if (rtm == nullptr || ui_target == nullptr || ui_target == rtm->get_render_target()) {
+        SPDLOG_INFO_EVERY_N_SEC(1, "{} SlateOutputTexture call reached before a valid dedicated UI target exists", tag);
+        return;
+    }
+
+    const auto desc = ue55_try_get_d3d12_desc(ui_target, "dedicated UI target at SlateOutputTexture");
+    if (!desc) {
+        SPDLOG_INFO_EVERY_N_SEC(1, "{} dedicated UI target is not a valid D3D12 texture yet: {:x}", tag, (uintptr_t)ui_target);
+        return;
+    }
+
+    const auto expected_width = rtm->get_dedicated_ui_width();
+    const auto expected_height = rtm->get_dedicated_ui_height();
+
+    if (expected_width != 0 && expected_height != 0 &&
+        (desc->Width != expected_width || desc->Height != expected_height))
+    {
+        SPDLOG_INFO_EVERY_N_SEC(1,
+            "{} refusing SlateOutputTexture replacement because dedicated UI target extent [{}x{}] != requested [{}x{}]",
+            tag,
+            desc->Width,
+            desc->Height,
+            expected_width,
+            expected_height);
+        return;
+    }
+
+    const auto original = (FRHITexture2D*)ctx.rdx;
+    const auto original_desc = ue55_try_get_d3d12_desc(original, "original SlateOutputTexture");
+
+    if (!original_desc) {
+        SPDLOG_INFO_EVERY_N_SEC(1, "{} refusing SlateOutputTexture replacement because the original RDX texture is not a valid D3D12 texture: {:x}",
+            tag,
+            (uintptr_t)original);
+        return;
+    }
+
+    SPDLOG_INFO_EVERY_N_SEC(1,
+        "{} routing SlateOutputTexture original={:x} [{}x{}] -> dedicated={:x} [{}x{} fmt={}]",
+        tag,
+        (uintptr_t)original,
+        original_desc->Width,
+        original_desc->Height,
+        (uintptr_t)ui_target,
+        desc->Width,
+        desc->Height,
+        (uint32_t)desc->Format);
+
+    ctx.rdx = (uintptr_t)ui_target;
+}
+
+void FFakeStereoRenderingHook::ue55_slate_output_texture_register_hook(safetyhook::Context& ctx) {
+    slate_output_texture_register_hook_impl(ctx, false);
+}
+
+void FFakeStereoRenderingHook::ue58_slate_output_texture_register_hook(safetyhook::Context& ctx) {
+    slate_output_texture_register_hook_impl(ctx, true);
+}
+
+namespace {
+struct DaysGoneRawTArray {
+    uintptr_t data{};
+    int32_t count{};
+    int32_t max{};
+};
+
+struct DaysGoneVec2 {
+    float x{};
+    float y{};
+};
+
+struct DaysGoneVec3 {
+    float x{};
+    float y{};
+    float z{};
+};
+
+struct DaysGoneVec4 {
+    float x{};
+    float y{};
+    float z{};
+    float w{};
+};
+
+struct DaysGoneWidgetTransform {
+    DaysGoneVec2 translation{};
+    DaysGoneVec2 scale{1.0f, 1.0f};
+    DaysGoneVec2 shear{};
+    float angle{};
+};
+
+struct DaysGoneSlateWidgetOriginalState {
+    uintptr_t widget{};
+    bool captured{};
+    DaysGoneWidgetTransform transform{};
+    DaysGoneVec2 pivot{};
+};
+
+struct DaysGoneViewportRootOriginalState {
+    uintptr_t widget{};
+    bool captured{};
+    DaysGoneVec4 color_and_opacity{1.0f, 1.0f, 1.0f, 1.0f};
+};
+
+struct DaysGoneIntPoint {
+    int32_t x{};
+    int32_t y{};
+};
+
+std::array<DaysGoneSlateWidgetOriginalState, 16> g_daysgone_slate_widget_originals{};
+std::array<DaysGoneViewportRootOriginalState, 16> g_daysgone_viewport_root_originals{};
+uint64_t g_daysgone_slate_widget_apply_count{};
+uint64_t g_daysgone_slate_widget_restore_count{};
+struct DaysGoneSlateCompositeCVarState {
+    sdk::IConsoleVariable* cvar{};
+    bool looked_up{};
+    bool has_original{};
+    int32_t original_value{};
+    bool forced{};
+    bool logged_missing{};
+} g_daysgone_slate_composite_cvar{};
+
+bool daysgone_object_pointer_is_readable(sdk::UObjectBase* object);
+std::string daysgone_describe_uobject(sdk::UObjectBase* object);
+
+struct DaysGoneD3D11TextureCandidate {
+    ID3D11Texture2D* native{};
+    D3D11_TEXTURE2D_DESC desc{};
+    uintptr_t outer_offset{std::numeric_limits<uintptr_t>::max()};
+    uintptr_t inner_offset{std::numeric_limits<uintptr_t>::max()};
+};
+
+bool daysgone_is_valid_d3d11_desc(const D3D11_TEXTURE2D_DESC& desc) {
+    return desc.Width >= 640 && desc.Height >= 360 && desc.Width <= 8192 && desc.Height <= 8192;
+}
+
+bool daysgone_is_plausible_slate_ui_desc(const D3D11_TEXTURE2D_DESC& desc) {
+    if (!daysgone_is_valid_d3d11_desc(desc)) {
+        return false;
+    }
+
+    if ((desc.BindFlags & D3D11_BIND_RENDER_TARGET) == 0 || (desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0) {
+        return false;
+    }
+
+    switch (desc.Format) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        break;
+    default:
+        return false;
+    }
+
+    // Days Gone exposes the Bend SlateIntermediateBuffer as an HMD-sized target
+    // in VR. Accept both a normal 16:9 UI texture and the HMD-shaped buffer; the
+    // D3D11 path keys black out before submitting it as a UEVR UI layer.
+    const auto aspect = static_cast<float>(desc.Width) / static_cast<float>(desc.Height);
+    const auto looks_like_flat_ui = desc.Width >= 1280 && desc.Height >= 720 && desc.Width > desc.Height && aspect >= 1.45f && aspect <= 2.25f;
+    const auto looks_like_hmd_ui = desc.Width >= 1280 && desc.Height >= 720 && aspect >= 0.75f && aspect <= 1.35f;
+    return looks_like_flat_ui || looks_like_hmd_ui;
+}
+
+bool daysgone_is_d3d11_or_dxgi_com_object(IUnknown* object) {
+    if (object == nullptr || !is_readable_process_range((uintptr_t)object, sizeof(void*))) {
+        return false;
+    }
+
+    auto* const vtable = *(void**)object;
+    if (vtable == nullptr || !is_readable_process_range((uintptr_t)vtable, sizeof(void*))) {
+        return false;
+    }
+
+    const auto module = utility::get_module_within(vtable);
+    if (!module) {
+        return false;
+    }
+
+    const auto module_path = utility::get_module_path(*module);
+    if (!module_path) {
+        return false;
+    }
+
+    auto lower = std::string{*module_path};
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    return lower.find("d3d11") != std::string::npos || lower.find("dxgi") != std::string::npos;
+}
+
+bool daysgone_try_query_d3d11_texture(IUnknown* object, ID3D11Texture2D*& out_native, D3D11_TEXTURE2D_DESC& out_desc) {
+    out_native = nullptr;
+    out_desc = {};
+
+    if (!daysgone_is_d3d11_or_dxgi_com_object(object)) {
+        return false;
+    }
+
+    ID3D11Texture2D* texture = nullptr;
+    if (SUCCEEDED(object->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&texture))) && texture != nullptr) {
+        D3D11_TEXTURE2D_DESC desc{};
+        texture->GetDesc(&desc);
+        texture->Release();
+
+        if (daysgone_is_valid_d3d11_desc(desc)) {
+            out_native = texture;
+            out_desc = desc;
+            return true;
+        }
+    }
+
+    ID3D11ShaderResourceView* srv = nullptr;
+    if (SUCCEEDED(object->QueryInterface(__uuidof(ID3D11ShaderResourceView), reinterpret_cast<void**>(&srv))) && srv != nullptr) {
+        ID3D11Resource* resource = nullptr;
+        srv->GetResource(&resource);
+        srv->Release();
+
+        if (resource != nullptr) {
+            texture = nullptr;
+            if (SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&texture))) && texture != nullptr) {
+                D3D11_TEXTURE2D_DESC desc{};
+                texture->GetDesc(&desc);
+                texture->Release();
+                resource->Release();
+
+                if (daysgone_is_valid_d3d11_desc(desc)) {
+                    out_native = texture;
+                    out_desc = desc;
+                    return true;
+                }
+
+                return false;
+            }
+
+            resource->Release();
+        }
+    }
+
+    return false;
+}
+
+bool daysgone_try_read_pointer(uintptr_t address, uintptr_t& out) {
+    out = 0;
+    if (address == 0 || !is_readable_process_range(address, sizeof(uintptr_t))) {
+        return false;
+    }
+
+    out = *reinterpret_cast<const uintptr_t*>(address);
+    return out >= 0x10000;
+}
+
+bool daysgone_try_get_d3d11_texture_candidate(FRHITexture2D* texture, DaysGoneD3D11TextureCandidate& out_candidate) {
+    out_candidate = {};
+
+    if (texture == nullptr || !is_readable_process_range((uintptr_t)texture, sizeof(void*))) {
+        return false;
+    }
+
+    auto try_native_texture_pointer = [&](uintptr_t raw_native, uintptr_t outer_offset, uintptr_t inner_offset) {
+        auto* native = reinterpret_cast<ID3D11Texture2D*>(raw_native);
+        if (!daysgone_is_d3d11_or_dxgi_com_object(reinterpret_cast<IUnknown*>(native))) {
+            return false;
+        }
+
+        D3D11_TEXTURE2D_DESC desc{};
+        native->GetDesc(&desc);
+        if (!daysgone_is_valid_d3d11_desc(desc)) {
+            return false;
+        }
+
+        out_candidate.native = native;
+        out_candidate.desc = desc;
+        out_candidate.outer_offset = outer_offset;
+        out_candidate.inner_offset = inner_offset;
+        return true;
+    };
+
+    // Live Days Gone evidence shows BendTemporalAA's SlateIntermediateBuffer
+    // local is an UE4.11 wrapper: wrapper lives at +0x8/+0x10, and its native
+    // ID3D11Texture2D lives at +0xA0. Keep this fixed and fail-closed; broad
+    // COM probing here can destabilize injection.
+    constexpr std::array<uintptr_t, 2> kWrapperOffsets{0x8, 0x10};
+    constexpr uintptr_t kNativeTextureOffset = 0xA0;
+
+    const auto base = reinterpret_cast<uintptr_t>(texture);
+    for (const auto outer_offset : kWrapperOffsets) {
+        uintptr_t wrapper{};
+        if (!daysgone_try_read_pointer(base + outer_offset, wrapper)) {
+            continue;
+        }
+
+        uintptr_t native{};
+        if (daysgone_try_read_pointer(wrapper + kNativeTextureOffset, native) &&
+            try_native_texture_pointer(native, outer_offset, kNativeTextureOffset))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool daysgone_try_get_d3d11_texture_desc(FRHITexture2D* texture, D3D11_TEXTURE2D_DESC& out_desc) {
+    DaysGoneD3D11TextureCandidate candidate{};
+    if (!daysgone_try_get_d3d11_texture_candidate(texture, candidate)) {
+        return false;
+    }
+
+    out_desc = candidate.desc;
+    return true;
+}
+template <typename T>
+bool daysgone_read_value(uintptr_t address, T& out) {
+    if (address == 0 || !is_readable_process_range(address, sizeof(T))) {
+        return false;
+    }
+
+    out = *reinterpret_cast<const T*>(address);
+    return true;
+}
+
+template <typename T>
+bool daysgone_write_value(uintptr_t address, const T& value) {
+    if (address == 0 || !is_writable_process_range(address, sizeof(T))) {
+        return false;
+    }
+
+    *reinterpret_cast<T*>(address) = value;
+    return true;
+}
+
+bool daysgone_write_bool_bit(uintptr_t address, bool value) {
+    uint8_t current{};
+    if (!daysgone_read_value(address, current)) {
+        return false;
+    }
+
+    current = static_cast<uint8_t>((current & ~uint8_t{1}) | (value ? uint8_t{1} : uint8_t{0}));
+    return daysgone_write_value(address, current);
+}
+
+void daysgone_set_disable_slate_composite(bool enabled) {
+    try {
+        auto& state = g_daysgone_slate_composite_cvar;
+
+        if (!state.looked_up) {
+            state.looked_up = true;
+            const auto console_manager = sdk::FConsoleManager::get();
+            if (console_manager != nullptr) {
+                auto* object = console_manager->find(L"r.Bend.TemporalAA.DisableSlateComposite");
+                if (object != nullptr && object->AsCommand() == nullptr) {
+                    state.cvar = static_cast<sdk::IConsoleVariable*>(object);
+                }
+            }
+        }
+
+        if (state.cvar == nullptr) {
+            if (!state.logged_missing) {
+                state.logged_missing = true;
+                SPDLOG_WARN("[DaysGone][SlateOverlay] r.Bend.TemporalAA.DisableSlateComposite unavailable");
+            }
+            return;
+        }
+
+        if (enabled) {
+            if (!state.has_original) {
+                state.original_value = state.cvar->GetInt();
+                state.has_original = true;
+            }
+
+            if (state.cvar->GetInt() != 1) {
+                state.cvar->Set(L"1");
+            }
+
+            if (!state.forced) {
+                SPDLOG_INFO("[DaysGone][SlateOverlay] Disabled Bend in-scene Slate composite; using extracted UEVR UI layer");
+                state.forced = true;
+            }
+            return;
+        }
+
+        if (state.forced || state.has_original) {
+            const auto restore_value = state.has_original ? state.original_value : 0;
+            if (state.cvar->GetInt() != restore_value) {
+                state.cvar->Set(std::to_wstring(restore_value).c_str());
+            }
+
+            if (state.forced) {
+                SPDLOG_INFO("[DaysGone][SlateOverlay] Restored Bend in-scene Slate composite to {}", restore_value);
+            }
+        }
+
+        state.forced = false;
+        state.has_original = false;
+        state.original_value = 0;
+    } catch (...) {
+        SPDLOG_WARNING_EVERY_N_SEC(2, "[DaysGone][SlateOverlay] Failed to update r.Bend.TemporalAA.DisableSlateComposite");
+    }
+}
+
+bool daysgone_capture_slate_widget_original(sdk::UObjectBase* widget) {
+    if (!daysgone_object_pointer_is_readable(widget)) {
+        return false;
+    }
+
+    const auto widget_address = reinterpret_cast<uintptr_t>(widget);
+    for (auto& state : g_daysgone_slate_widget_originals) {
+        if (state.captured && state.widget == widget_address) {
+            return true;
+        }
+    }
+
+    for (auto& state : g_daysgone_slate_widget_originals) {
+        if (state.captured) {
+            continue;
+        }
+
+        state.widget = widget_address;
+        state.captured = true;
+        daysgone_read_value(widget_address + 0xB0, state.transform);
+        daysgone_read_value(widget_address + 0xCC, state.pivot);
+        SPDLOG_INFO(
+            "[DaysGone][SlateWidgetFix] Captured widget original {} transform=({:.1f},{:.1f}) scale=({:.3f},{:.3f}) pivot=({:.2f},{:.2f})",
+            daysgone_describe_uobject(widget),
+            state.transform.translation.x,
+            state.transform.translation.y,
+            state.transform.scale.x,
+            state.transform.scale.y,
+            state.pivot.x,
+            state.pivot.y);
+        return true;
+    }
+
+    SPDLOG_WARN_ONCE("[DaysGone][SlateWidgetFix] Original state cache is full; cannot capture more Slate widgets");
+    return false;
+}
+
+void daysgone_call_widget_vec2_function(sdk::UObjectBase* widget, const wchar_t* function_name, DaysGoneVec2 value) {
+    if (!daysgone_object_pointer_is_readable(widget)) {
+        return;
+    }
+
+    struct Params {
+        DaysGoneVec2 value;
+    } params{value};
+
+    widget->call_function(function_name, &params);
+}
+
+void daysgone_call_widget_transform_function(sdk::UObjectBase* widget, DaysGoneWidgetTransform value) {
+    if (!daysgone_object_pointer_is_readable(widget)) {
+        return;
+    }
+
+    struct Params {
+        DaysGoneWidgetTransform value;
+    } params{value};
+
+    widget->call_function(L"SetRenderTransform", &params);
+}
+
+void daysgone_call_widget_position_in_viewport(sdk::UObjectBase* widget, DaysGoneVec2 position, bool remove_dpi_scale) {
+    if (!daysgone_object_pointer_is_readable(widget)) {
+        return;
+    }
+
+    struct Params {
+        DaysGoneVec2 position;
+        bool remove_dpi_scale;
+    } params{position, remove_dpi_scale};
+
+    widget->call_function(L"SetPositionInViewport", &params);
+}
+
+void daysgone_call_user_widget_color_and_opacity(sdk::UObjectBase* widget, DaysGoneVec4 value) {
+    if (!daysgone_object_pointer_is_readable(widget)) {
+        return;
+    }
+
+    struct Params {
+        DaysGoneVec4 value;
+    } params{value};
+
+    widget->call_function(L"SetColorAndOpacity", &params);
+}
+
+void daysgone_call_widget_no_param_function(sdk::UObjectBase* widget, const wchar_t* function_name) {
+    if (!daysgone_object_pointer_is_readable(widget)) {
+        return;
+    }
+
+    uint8_t unused_params{};
+    widget->call_function(function_name, &unused_params);
+}
+
+bool daysgone_widget_is_viewport_root_candidate(sdk::UObjectBase* widget) {
+    if (!daysgone_object_pointer_is_readable(widget)) {
+        return false;
+    }
+
+    const auto desc = daysgone_describe_uobject(widget);
+    return desc.find("UI_MainMenuWidget_C") != std::string::npos ||
+        desc.find("UI_HudWidget_C") != std::string::npos ||
+        desc.find("UI_SubtitleWidget_C") != std::string::npos ||
+        desc.find("UI_MegaMenu_C") != std::string::npos ||
+        desc.find("OptionsMenuWidget_C") != std::string::npos ||
+        desc.find("OptionsTopMenuWidget_C") != std::string::npos;
+}
+
+bool daysgone_capture_viewport_root_original(sdk::UObjectBase* widget) {
+    if (!daysgone_widget_is_viewport_root_candidate(widget)) {
+        return false;
+    }
+
+    const auto widget_address = reinterpret_cast<uintptr_t>(widget);
+    for (auto& state : g_daysgone_viewport_root_originals) {
+        if (state.captured && state.widget == widget_address) {
+            return true;
+        }
+    }
+
+    for (auto& state : g_daysgone_viewport_root_originals) {
+        if (state.captured) {
+            continue;
+        }
+
+        state.widget = widget_address;
+        state.captured = true;
+        daysgone_read_value(widget_address + 0x120, state.color_and_opacity);
+
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[DaysGone][ViewportSlotFix] captured root opacity {} rgba=({:.3f},{:.3f},{:.3f},{:.3f})",
+            daysgone_describe_uobject(widget),
+            state.color_and_opacity.x,
+            state.color_and_opacity.y,
+            state.color_and_opacity.z,
+            state.color_and_opacity.w);
+        return true;
+    }
+
+    SPDLOG_WARN_ONCE("[DaysGone][ViewportSlotFix] Root original-state cache is full; opacity restore may be incomplete");
+    return false;
+}
+
+bool daysgone_restore_viewport_root_original_opacity(sdk::UObjectBase* widget) {
+    if (!daysgone_widget_is_viewport_root_candidate(widget)) {
+        return false;
+    }
+
+    const auto widget_address = reinterpret_cast<uintptr_t>(widget);
+    for (auto& state : g_daysgone_viewport_root_originals) {
+        if (!state.captured || state.widget != widget_address) {
+            continue;
+        }
+
+        daysgone_write_value(widget_address + 0x120, state.color_and_opacity);
+        daysgone_call_user_widget_color_and_opacity(widget, state.color_and_opacity);
+        state = {};
+        return true;
+    }
+
+    return false;
+}
+
+bool daysgone_apply_user_widget_viewport_slot(sdk::UObjectBase* widget, DaysGoneVec2 translation, float scale, float opacity) {
+    if (!daysgone_widget_is_viewport_root_candidate(widget)) {
+        return false;
+    }
+
+    daysgone_capture_viewport_root_original(widget);
+
+    const auto clamped_scale = std::clamp(scale, 0.05f, 8.0f);
+    const auto clamped_opacity = std::clamp(opacity, 0.0f, 2.0f);
+    const DaysGoneVec2 alignment{0.5f, 0.5f};
+    const DaysGoneVec2 desired_size{1920.0f, 1080.0f};
+    const DaysGoneVec2 viewport_position{960.0f + translation.x, 540.0f + translation.y};
+    const DaysGoneVec2 pivot{0.5f, 0.5f};
+    const DaysGoneVec2 render_scale{clamped_scale, clamped_scale};
+    const DaysGoneVec4 color_and_opacity{1.0f, 1.0f, 1.0f, clamped_opacity};
+
+    daysgone_call_widget_vec2_function(widget, L"SetAlignmentInViewport", alignment);
+    daysgone_call_widget_vec2_function(widget, L"SetDesiredSizeInViewport", desired_size);
+    daysgone_call_widget_position_in_viewport(widget, viewport_position, false);
+    daysgone_call_widget_vec2_function(widget, L"SetRenderTransformPivot", pivot);
+    daysgone_call_widget_vec2_function(widget, L"SetRenderScale", render_scale);
+    daysgone_write_value((uintptr_t)widget + 0x120, color_and_opacity);
+    daysgone_call_user_widget_color_and_opacity(widget, color_and_opacity);
+    daysgone_call_widget_no_param_function(widget, L"InvalidateLayoutAndVolatility");
+    daysgone_call_widget_no_param_function(widget, L"ForceLayoutPrepass");
+
+    SPDLOG_INFO_EVERY_N_SEC(
+        2,
+        "[DaysGone][ViewportSlotFix] applied {} pos=({:.1f},{:.1f}) size=({:.1f},{:.1f}) render_scale={:.3f} opacity={:.3f}",
+        daysgone_describe_uobject(widget),
+        viewport_position.x,
+        viewport_position.y,
+        desired_size.x,
+        desired_size.y,
+        clamped_scale,
+        clamped_opacity);
+
+    return true;
+}
+
+void daysgone_restore_user_widget_viewport_slot(sdk::UObjectBase* widget) {
+    if (!daysgone_widget_is_viewport_root_candidate(widget)) {
+        return;
+    }
+
+    daysgone_call_widget_vec2_function(widget, L"SetAlignmentInViewport", {0.0f, 0.0f});
+    daysgone_call_widget_vec2_function(widget, L"SetDesiredSizeInViewport", {1920.0f, 1080.0f});
+    daysgone_call_widget_position_in_viewport(widget, {0.0f, 0.0f}, false);
+    daysgone_call_widget_vec2_function(widget, L"SetRenderTransformPivot", {0.0f, 0.0f});
+    daysgone_call_widget_vec2_function(widget, L"SetRenderScale", {1.0f, 1.0f});
+    if (!daysgone_restore_viewport_root_original_opacity(widget)) {
+        const DaysGoneVec4 color_and_opacity{1.0f, 1.0f, 1.0f, 1.0f};
+        daysgone_write_value((uintptr_t)widget + 0x120, color_and_opacity);
+        daysgone_call_user_widget_color_and_opacity(widget, color_and_opacity);
+    }
+    daysgone_call_widget_no_param_function(widget, L"InvalidateLayoutAndVolatility");
+    daysgone_call_widget_no_param_function(widget, L"ForceLayoutPrepass");
+}
+
+void daysgone_apply_slate_widget_transform(sdk::UObjectBase* widget, DaysGoneVec2 translation, float scale) {
+    if (!daysgone_object_pointer_is_readable(widget) || !daysgone_capture_slate_widget_original(widget)) {
+        return;
+    }
+
+    const auto clamped_scale = std::clamp(scale, 0.05f, 8.0f);
+    DaysGoneWidgetTransform transform{};
+    transform.translation = translation;
+    transform.scale = {clamped_scale, clamped_scale};
+    transform.shear = {};
+    transform.angle = 0.0f;
+    const DaysGoneVec2 pivot{0.5f, 0.5f};
+
+    const auto widget_address = reinterpret_cast<uintptr_t>(widget);
+    daysgone_write_value(widget_address + 0xB0, transform);
+    daysgone_write_value(widget_address + 0xCC, pivot);
+
+    // Also go through UMG's own invalidation path; direct memory writes alone
+    // are not enough for Days Gone's SlateHUD widgets.
+    daysgone_call_widget_transform_function(widget, transform);
+    daysgone_call_widget_vec2_function(widget, L"SetRenderTranslation", translation);
+    daysgone_call_widget_vec2_function(widget, L"SetRenderScale", {clamped_scale, clamped_scale});
+    daysgone_call_widget_vec2_function(widget, L"SetRenderTransformPivot", pivot);
+    daysgone_call_widget_no_param_function(widget, L"InvalidateLayoutAndVolatility");
+    daysgone_call_widget_no_param_function(widget, L"ForceLayoutPrepass");
+
+    ++g_daysgone_slate_widget_apply_count;
+}
+
+void daysgone_restore_slate_widget_originals() {
+    for (auto& state : g_daysgone_slate_widget_originals) {
+        if (!state.captured) {
+            continue;
+        }
+
+        auto* widget = reinterpret_cast<sdk::UObjectBase*>(state.widget);
+        if (daysgone_object_pointer_is_readable(widget)) {
+            daysgone_write_value(state.widget + 0xB0, state.transform);
+            daysgone_write_value(state.widget + 0xCC, state.pivot);
+            daysgone_call_widget_transform_function(widget, state.transform);
+            daysgone_call_widget_vec2_function(widget, L"SetRenderTranslation", state.transform.translation);
+            daysgone_call_widget_vec2_function(widget, L"SetRenderScale", state.transform.scale);
+            daysgone_call_widget_vec2_function(widget, L"SetRenderTransformPivot", state.pivot);
+            daysgone_restore_user_widget_viewport_slot(widget);
+            daysgone_call_widget_no_param_function(widget, L"InvalidateLayoutAndVolatility");
+            daysgone_call_widget_no_param_function(widget, L"ForceLayoutPrepass");
+            ++g_daysgone_slate_widget_restore_count;
+        }
+
+        state = {};
+    }
+}
+
+bool daysgone_has_slate_widget_originals() {
+    return std::any_of(
+        g_daysgone_slate_widget_originals.begin(),
+        g_daysgone_slate_widget_originals.end(),
+        [](const auto& state) { return state.captured; });
+}
+
+bool daysgone_object_pointer_is_readable(sdk::UObjectBase* object) {
+    if (object == nullptr || (uintptr_t)object < 0x10000) {
+        return false;
+    }
+
+    if (!is_readable_process_range((uintptr_t)object, std::max<size_t>(sizeof(void*), sdk::UObjectBase::get_class_size()))) {
+        return false;
+    }
+
+    sdk::UClass* klass{};
+    if (!daysgone_read_value((uintptr_t)object + sdk::UObjectBase::get_class_private_offset(), klass)) {
+        return false;
+    }
+
+    return klass != nullptr && is_readable_process_range((uintptr_t)klass, sizeof(void*));
+}
+
+std::string daysgone_trim_log_string(std::string value, size_t max_len = 96) {
+    if (value.size() <= max_len) {
+        return value;
+    }
+
+    value.resize(max_len);
+    value += "...";
+    return value;
+}
+
+std::string daysgone_describe_uobject(sdk::UObjectBase* object) {
+    if (object == nullptr) {
+        return "0";
+    }
+
+    if (!daysgone_object_pointer_is_readable(object)) {
+        return fmt::format("{:x}:unreadable", (uintptr_t)object);
+    }
+
+    auto* klass = object->get_class();
+    std::string class_name = klass != nullptr && is_readable_process_range((uintptr_t)klass, sizeof(void*))
+        ? utility::narrow(klass->get_name_safe())
+        : "<bad-class>";
+    std::string object_name = utility::narrow(object->get_name_safe());
+
+    if (class_name.empty()) {
+        class_name = "<empty-class>";
+    }
+
+    if (object_name.empty()) {
+        object_name = "<empty-name>";
+    }
+
+    return fmt::format(
+        "{:x} {}:{}",
+        (uintptr_t)object,
+        daysgone_trim_log_string(class_name, 48),
+        daysgone_trim_log_string(object_name, 72));
+}
+
+bool daysgone_is_default_object_name(const std::wstring& name) {
+    return name.rfind(L"Default__", 0) == 0 || name.find(L"ClassDefaultObject") != std::wstring::npos;
+}
+
+sdk::UObjectBase* daysgone_find_first_tracked_object(const wchar_t* class_full_name) {
+    auto* klass = sdk::find_uobject<sdk::UClass>(class_full_name, true);
+    if (klass == nullptr || !daysgone_object_pointer_is_readable((sdk::UObjectBase*)klass)) {
+        return nullptr;
+    }
+
+    auto hook = UObjectHook::get();
+    if (hook == nullptr) {
+        return nullptr;
+    }
+
+    auto objects = hook->get_objects_by_class(klass);
+    for (auto* object : objects) {
+        if (object == nullptr || !daysgone_object_pointer_is_readable(object)) {
+            continue;
+        }
+
+        const auto name = object->get_name_safe();
+        if (name.empty() || daysgone_is_default_object_name(name)) {
+            continue;
+        }
+
+        return object;
+    }
+
+    return nullptr;
+}
+
+sdk::UObjectBase* daysgone_find_menu3d_object() {
+    sdk::UObjectBase* menu3d{};
+    if (auto* ui_manager = daysgone_find_first_tracked_object(L"Class /Script/BendGame.UIManager");
+        daysgone_object_pointer_is_readable(ui_manager))
+    {
+        daysgone_read_value((uintptr_t)ui_manager + 0x530, menu3d);
+    }
+
+    if (daysgone_object_pointer_is_readable(menu3d)) {
+        return menu3d;
+    }
+
+    return daysgone_find_first_tracked_object(L"Class /Script/BendGame.Menu3D");
+}
+
+bool daysgone_read_bend_widget_main(sdk::UObjectBase* menu3d, sdk::UObjectBase*& out_widget) {
+    out_widget = nullptr;
+    if (!daysgone_object_pointer_is_readable(menu3d)) {
+        return false;
+    }
+
+    return daysgone_read_value((uintptr_t)menu3d + 0x408, out_widget) &&
+        daysgone_object_pointer_is_readable(out_widget);
+}
+
+void daysgone_push_unique_widget(std::vector<sdk::UObjectBase*>& widgets, sdk::UObjectBase* widget) {
+    if (!daysgone_object_pointer_is_readable(widget)) {
+        return;
+    }
+
+    if (std::find(widgets.begin(), widgets.end(), widget) != widgets.end()) {
+        return;
+    }
+
+    widgets.push_back(widget);
+}
+
+void daysgone_collect_known_daysgone_widget_children(sdk::UObjectBase* widget, std::vector<sdk::UObjectBase*>& widgets);
+
+void daysgone_collect_tracked_widget_class(
+    const wchar_t* class_full_name,
+    std::vector<sdk::UObjectBase*>& widgets,
+    bool collect_known_children)
+{
+    auto* klass = sdk::find_uobject<sdk::UClass>(class_full_name, true);
+    if (klass == nullptr || !daysgone_object_pointer_is_readable((sdk::UObjectBase*)klass)) {
+        return;
+    }
+
+    auto hook = UObjectHook::get();
+    if (hook == nullptr) {
+        return;
+    }
+
+    const auto objects = hook->get_objects_by_class(klass);
+    for (auto* object : objects) {
+        if (!daysgone_object_pointer_is_readable(object)) {
+            continue;
+        }
+
+        const auto name = object->get_name_safe();
+        if (name.empty() || daysgone_is_default_object_name(name)) {
+            continue;
+        }
+
+        daysgone_push_unique_widget(widgets, object);
+        if (collect_known_children) {
+            daysgone_collect_known_daysgone_widget_children(object, widgets);
+        }
+    }
+}
+
+void daysgone_collect_widgets_from_slate_menu(sdk::UObjectBase* menu, std::vector<sdk::UObjectBase*>& widgets) {
+    if (!daysgone_object_pointer_is_readable(menu)) {
+        return;
+    }
+
+    sdk::UObjectBase* widget{};
+    if (daysgone_read_value((uintptr_t)menu + 0x80, widget)) {
+        daysgone_push_unique_widget(widgets, widget);
+        daysgone_collect_known_daysgone_widget_children(widget, widgets);
+    }
+
+    // SlateHUD has a second strongly-typed HudWidget pointer at +0xB0. The
+    // visible main/menu/options UI lives here in Days Gone; BP_Menu3D's
+    // BendWidgetMain can exist but have widget=0/rt=0 and not affect output.
+    sdk::UObjectBase* hud_widget{};
+    if (daysgone_read_value((uintptr_t)menu + 0xB0, hud_widget)) {
+        daysgone_push_unique_widget(widgets, hud_widget);
+        daysgone_collect_known_daysgone_widget_children(hud_widget, widgets);
+    }
+}
+
+void daysgone_collect_widget_field_at(sdk::UObjectBase* owner, uintptr_t offset, std::vector<sdk::UObjectBase*>& widgets) {
+    if (!daysgone_object_pointer_is_readable(owner)) {
+        return;
+    }
+
+    sdk::UObjectBase* child{};
+    if (daysgone_read_value((uintptr_t)owner + offset, child)) {
+        daysgone_push_unique_widget(widgets, child);
+    }
+}
+
+void daysgone_collect_known_daysgone_widget_children(sdk::UObjectBase* widget, std::vector<sdk::UObjectBase*>& widgets) {
+    if (!daysgone_object_pointer_is_readable(widget)) {
+        return;
+    }
+
+    const auto desc = daysgone_describe_uobject(widget);
+
+    if (desc.find("UI_HudWidget_C") != std::string::npos) {
+        // The root UI_HudWidget did not move in live testing. These are the
+        // real UMG subtrees Days Gone paints for HUD/menu/tutorial/subtitle
+        // content, so include them in the same opt-in placement transform.
+        constexpr std::array<uintptr_t, 16> kHudChildWidgetOffsets{
+            0x450, // AccessibilityWrapper
+            0x458, // AspectBars
+            0x470, // CanvasWrapper
+            0x478, // CoreElements
+            0x480, // EdgeMarkers
+            0x488, // HCM_BGBlack
+            0x490, // HCM_BGBlack_0
+            0x4A0, // HealthOverlay
+            0x4A8, // HitEffects
+            0x4B0, // HUDContents
+            0x4B8, // HudWrapper
+            0x4C0, // Loading
+            0x4C8, // MissionPopup
+            0x4F8, // SimpleTutorialOverlay
+            0x548, // SurvivalWheel
+            0x570  // Weapon
+        };
+
+        for (const auto offset : kHudChildWidgetOffsets) {
+            daysgone_collect_widget_field_at(widget, offset, widgets);
+        }
+    }
+
+    if (desc.find("UI_MegaMenu_C") != std::string::npos) {
+        constexpr std::array<uintptr_t, 8> kMegaMenuChildWidgetOffsets{
+            0x250, // 3D_Select_Left
+            0x258, // Bars
+            0x260, // Inventory_Menu
+            0x268, // Map_Menu
+            0x270, // OverlayContent
+            0x278, // Skills_Menu
+            0x280, // Storylines_Menu
+            0x288  // UI_ModifiersMenu
+        };
+
+        for (const auto offset : kMegaMenuChildWidgetOffsets) {
+            daysgone_collect_widget_field_at(widget, offset, widgets);
+        }
+    }
+}
+
+void daysgone_collect_menu3d_user_widgets(sdk::UObjectBase* menu3d, std::vector<sdk::UObjectBase*>& widgets) {
+    if (!daysgone_object_pointer_is_readable(menu3d)) {
+        return;
+    }
+
+    constexpr std::array<uintptr_t, 9> kMenu3DWidgetOffsets{
+        0x5D8, // MapWidgetRef
+        0x5F8, // Menu_Base_Skills
+        0x600, // Menu_Base_Modifiers
+        0x608, // Menu_Base_Inventory
+        0x610, // Menu_Base_Storylines
+        0x618, // Menu_Base_Map
+        0x640, // Menu_Base_MegaMenu
+        0x648, // Menu_Base_Start
+        0x8C8  // Menu_Base_Selector
+    };
+
+    for (const auto offset : kMenu3DWidgetOffsets) {
+        sdk::UObjectBase* widget{};
+        if (daysgone_read_value((uintptr_t)menu3d + offset, widget)) {
+            daysgone_push_unique_widget(widgets, widget);
+            daysgone_collect_known_daysgone_widget_children(widget, widgets);
+        }
+    }
+}
+
+void daysgone_collect_widgets_from_menu_array(sdk::UObjectBase* owner, uintptr_t offset, std::vector<sdk::UObjectBase*>& widgets) {
+    if (!daysgone_object_pointer_is_readable(owner)) {
+        return;
+    }
+
+    DaysGoneRawTArray array{};
+    if (!daysgone_read_value((uintptr_t)owner + offset, array) ||
+        array.count < 0 || array.max < 0 || array.count > array.max ||
+        array.count > 128 || array.data == 0)
+    {
+        return;
+    }
+
+    const auto bytes = static_cast<size_t>(array.count) * sizeof(uintptr_t);
+    if (!is_readable_process_range(array.data, bytes)) {
+        return;
+    }
+
+    for (int32_t i = 0; i < array.count; ++i) {
+        sdk::UObjectBase* menu{};
+        if (daysgone_read_value(array.data + (static_cast<uintptr_t>(i) * sizeof(uintptr_t)), menu)) {
+            daysgone_collect_widgets_from_slate_menu(menu, widgets);
+        }
+    }
+}
+
+std::vector<sdk::UObjectBase*> daysgone_collect_active_slate_widgets() {
+    std::vector<sdk::UObjectBase*> widgets{};
+    widgets.reserve(8);
+
+    auto* ui_manager = daysgone_find_first_tracked_object(L"Class /Script/BendGame.UIManager");
+    if (daysgone_object_pointer_is_readable(ui_manager)) {
+        daysgone_collect_widgets_from_menu_array(ui_manager, 0x470, widgets); // HudMenus
+        daysgone_collect_widgets_from_menu_array(ui_manager, 0x480, widgets); // Menus
+        daysgone_collect_widgets_from_menu_array(ui_manager, 0x490, widgets); // MenusCreatedThisFrame
+
+        sdk::UObjectBase* menu3d{};
+        if (daysgone_read_value((uintptr_t)ui_manager + 0x530, menu3d)) {
+            daysgone_collect_widgets_from_slate_menu(menu3d, widgets);
+            daysgone_collect_menu3d_user_widgets(menu3d, widgets);
+        }
+
+        sdk::UObjectBase* subtitle_widget{};
+        if (daysgone_read_value((uintptr_t)ui_manager + 0x518, subtitle_widget)) {
+            daysgone_push_unique_widget(widgets, subtitle_widget);
+        }
+    }
+
+    if (auto* slate_hud = daysgone_find_first_tracked_object(L"Class /Script/BendGame.SlateHUD");
+        daysgone_object_pointer_is_readable(slate_hud))
+    {
+        daysgone_collect_widgets_from_slate_menu(slate_hud, widgets);
+    }
+
+    if (auto* bend_hud = daysgone_find_first_tracked_object(L"Class /Script/BendGame.BendHUD");
+        daysgone_object_pointer_is_readable(bend_hud))
+    {
+        sdk::UObjectBase* slate_hud{};
+        if (daysgone_read_value((uintptr_t)bend_hud + 0x480, slate_hud)) {
+            daysgone_collect_widgets_from_slate_menu(slate_hud, widgets);
+        }
+    }
+
+    // The visible Days Gone menu/HUD is often a normal viewport UUserWidget
+    // owned by BendGameInstance rather than a child of BP_Menu3D/SlateHUD.
+    // Collect those roots explicitly so viewport-slot placement can affect the
+    // actual MainMenu/HUD/subtitle widgets instead of only their child panels.
+    daysgone_collect_tracked_widget_class(
+        L"WidgetBlueprintGeneratedClass /Game/Libraries/UI/Blueprints/Menus/MainMenu/UI_MainMenuWidget.UI_MainMenuWidget_C",
+        widgets,
+        false);
+    daysgone_collect_tracked_widget_class(
+        L"WidgetBlueprintGeneratedClass /Game/Libraries/UI/Blueprints/Menus/_New_Menus/UI_MegaMenu.UI_MegaMenu_C",
+        widgets,
+        true);
+    daysgone_collect_tracked_widget_class(
+        L"WidgetBlueprintGeneratedClass /Game/Libraries/UI/Blueprints/HUD/UI_HudWidget.UI_HudWidget_C",
+        widgets,
+        true);
+    daysgone_collect_tracked_widget_class(
+        L"WidgetBlueprintGeneratedClass /Game/Libraries/UI/Blueprints/HUD/UI_SubtitleWidget.UI_SubtitleWidget_C",
+        widgets,
+        false);
+    daysgone_collect_tracked_widget_class(
+        L"WidgetBlueprintGeneratedClass /Game/Libraries/UI/Blueprints/Menus/Options/OptionsMenuWidget.OptionsMenuWidget_C",
+        widgets,
+        false);
+    daysgone_collect_tracked_widget_class(
+        L"WidgetBlueprintGeneratedClass /Game/Libraries/UI/Blueprints/Menus/Options/OptionsTopMenuWidget.OptionsTopMenuWidget_C",
+        widgets,
+        false);
+
+    return widgets;
+}
+
+void daysgone_restore_viewport_root_slots() {
+    const auto widgets = daysgone_collect_active_slate_widgets();
+    size_t restored{};
+    for (auto* widget : widgets) {
+        if (!daysgone_widget_is_viewport_root_candidate(widget)) {
+            continue;
+        }
+
+        daysgone_restore_user_widget_viewport_slot(widget);
+        ++restored;
+    }
+
+    if (restored != 0) {
+        SPDLOG_INFO("[DaysGone][ViewportSlotFix] restored {} root viewport widget slots", restored);
+    }
+}
+
+std::string daysgone_describe_uobject_array(sdk::UObjectBase* owner, uintptr_t offset, const char* label, size_t max_entries = 6) {
+    if (!daysgone_object_pointer_is_readable(owner)) {
+        return fmt::format("{}=<owner-missing>", label);
+    }
+
+    DaysGoneRawTArray array{};
+    if (!daysgone_read_value((uintptr_t)owner + offset, array)) {
+        return fmt::format("{}=<unreadable-array>", label);
+    }
+
+    if (array.count < 0 || array.max < 0 || array.count > array.max || array.count > 512) {
+        return fmt::format("{}=<bad-array data={:x} count={} max={}>", label, array.data, array.count, array.max);
+    }
+
+    std::string result = fmt::format("{}=count:{} max:{} data:{:x}", label, array.count, array.max, array.data);
+    if (array.count == 0) {
+        return result;
+    }
+
+    const auto shown = std::min<size_t>((size_t)array.count, max_entries);
+    if (array.data == 0 || !is_readable_process_range(array.data, shown * sizeof(uintptr_t))) {
+        return result + " entries:<unreadable>";
+    }
+
+    result += " entries:[";
+    for (size_t i = 0; i < shown; ++i) {
+        uintptr_t raw_object{};
+        if (!daysgone_read_value(array.data + (i * sizeof(uintptr_t)), raw_object)) {
+            result += fmt::format("{}:<bad-read>", i);
+            continue;
+        }
+
+        if (i != 0) {
+            result += "; ";
+        }
+
+        result += fmt::format("{}:{}", i, daysgone_describe_uobject((sdk::UObjectBase*)raw_object));
+    }
+
+    if ((size_t)array.count > shown) {
+        result += fmt::format("; +{}", (size_t)array.count - shown);
+    }
+
+    result += "]";
+    return result;
+}
+
+std::string daysgone_array_count_string(sdk::UObjectBase* owner, uintptr_t offset) {
+    DaysGoneRawTArray array{};
+    if (!daysgone_object_pointer_is_readable(owner) || !daysgone_read_value((uintptr_t)owner + offset, array)) {
+        return "?";
+    }
+
+    if (array.count < 0 || array.max < 0 || array.count > array.max || array.count > 512) {
+        return "bad";
+    }
+
+    return std::to_string(array.count);
+}
+
+std::string daysgone_describe_raw_pointer_field(sdk::UObjectBase* owner, uintptr_t offset, const char* label) {
+    if (!daysgone_object_pointer_is_readable(owner)) {
+        return fmt::format("{}=<owner-missing>", label);
+    }
+
+    sdk::UObjectBase* object{};
+    if (!daysgone_read_value((uintptr_t)owner + offset, object)) {
+        return fmt::format("{}=<unreadable-field>", label);
+    }
+
+    return fmt::format("{}={}", label, daysgone_describe_uobject(object));
+}
+
+std::string daysgone_format_vec2(const DaysGoneVec2& value) {
+    return fmt::format("{:.3f},{:.3f}", value.x, value.y);
+}
+
+std::string daysgone_format_vec3(const DaysGoneVec3& value) {
+    return fmt::format("{:.3f},{:.3f},{:.3f}", value.x, value.y, value.z);
+}
+
+bool daysgone_float_is_sane(float value, float abs_limit = 100000.0f) {
+    return std::isfinite(value) && std::abs(value) <= abs_limit;
+}
+
+std::string daysgone_describe_suspect_uobject_pointer(uintptr_t raw) {
+    if (raw == 0) {
+        return "0";
+    }
+
+    auto* object = (sdk::UObjectBase*)raw;
+    if (daysgone_object_pointer_is_readable(object)) {
+        return daysgone_describe_uobject(object);
+    }
+
+    return fmt::format("{:x}:raw", raw);
+}
+
+std::string daysgone_describe_texture_render_target_2d(sdk::UObjectBase* render_target, const char* label) {
+    if (!daysgone_object_pointer_is_readable(render_target)) {
+        return fmt::format("{}={}", label, daysgone_describe_uobject(render_target));
+    }
+
+    int32_t size_x{};
+    int32_t size_y{};
+    uint8_t flags{};
+    uint8_t override_format{};
+
+    daysgone_read_value((uintptr_t)render_target + 0xB0, size_x);
+    daysgone_read_value((uintptr_t)render_target + 0xB4, size_y);
+    daysgone_read_value((uintptr_t)render_target + 0xCC, flags);
+    daysgone_read_value((uintptr_t)render_target + 0xD0, override_format);
+
+    return fmt::format(
+        "{}={} size={}x{} rt_flags=0x{:02X} override_fmt={}",
+        label,
+        daysgone_describe_uobject(render_target),
+        size_x,
+        size_y,
+        flags,
+        override_format);
+}
+
+std::string daysgone_describe_scene_component_transform(sdk::UObjectBase* component, const char* label) {
+    if (!daysgone_object_pointer_is_readable(component)) {
+        return fmt::format("{}={}", label, daysgone_describe_uobject(component));
+    }
+
+    sdk::UObjectBase* attach_parent{};
+    DaysGoneRawTArray attach_children{};
+    uint8_t scene_flags0{};
+    uint8_t scene_flags1{};
+    DaysGoneVec3 relative_location{};
+    DaysGoneVec3 relative_rotation{};
+    DaysGoneVec3 relative_scale{};
+    DaysGoneVec3 component_velocity{};
+
+    daysgone_read_value((uintptr_t)component + 0xD0, attach_parent);
+    daysgone_read_value((uintptr_t)component + 0xD8, attach_children);
+    daysgone_read_value((uintptr_t)component + 0xF0, scene_flags0);
+    daysgone_read_value((uintptr_t)component + 0xF1, scene_flags1);
+    daysgone_read_value((uintptr_t)component + 0x170, relative_location);
+    daysgone_read_value((uintptr_t)component + 0x17C, relative_rotation);
+    daysgone_read_value((uintptr_t)component + 0x1B0, relative_scale);
+    daysgone_read_value((uintptr_t)component + 0x1E0, component_velocity);
+
+    return fmt::format(
+        "{}={} rel_loc=({}) rel_rot=({}) rel_scale=({}) vel=({}) scene_flags=0x{:02X}/0x{:02X} attach_parent={} attach_children={}/{}",
+        label,
+        daysgone_describe_uobject(component),
+        daysgone_format_vec3(relative_location),
+        daysgone_format_vec3(relative_rotation),
+        daysgone_format_vec3(relative_scale),
+        daysgone_format_vec3(component_velocity),
+        scene_flags0,
+        scene_flags1,
+        daysgone_describe_uobject(attach_parent),
+        attach_children.count,
+        attach_children.max);
+}
+
+std::string daysgone_describe_bend_widget_component(sdk::UObjectBase* component, const char* label) {
+    if (!daysgone_object_pointer_is_readable(component)) {
+        return fmt::format("{}={}", label, daysgone_describe_uobject(component));
+    }
+
+    uint8_t flags600{};
+    uint8_t pooled_widget_type{};
+    uint8_t space{};
+    uint8_t timing_policy{};
+    uint8_t world_orientation{};
+    uint8_t use_image_texture{};
+    uint8_t size_screen{};
+    uint8_t size_from_widget{};
+    uint8_t far_fade{};
+    uint8_t stick_to_edge{};
+    uint8_t disable_occlusion{};
+    uint8_t manually_redraw{};
+    uint8_t redraw_requested{};
+    uint8_t force_redraw_requested{};
+    uint8_t is_opaque{};
+    uint8_t is_two_sided{};
+    uint8_t tick_when_offscreen{};
+    uint8_t blend_mode{};
+    uint8_t use_custom_material{};
+    uint8_t use_legacy_rotation{};
+    uint8_t override_tick{};
+    uint8_t tick_enabled{};
+    uint8_t added_to_screen{};
+
+    uintptr_t widget_class{};
+    sdk::UObjectBase* image_texture{};
+    sdk::UObjectBase* owner_player{};
+    sdk::UObjectBase* widget{};
+    sdk::UObjectBase* translucent_material{};
+    sdk::UObjectBase* translucent_material_post_aa{};
+    sdk::UObjectBase* custom_material{};
+    sdk::UObjectBase* render_target{};
+    sdk::UObjectBase* material_instance{};
+
+    float screen_scale{};
+    float draw_scale{};
+    float far_fade_start{};
+    float far_fade_end{};
+    float opacity{};
+    float redraw_time{};
+    float max_interaction_distance{};
+    DaysGoneVec2 screen_pixel_offset{};
+    DaysGoneVec2 draw_size_f{};
+    DaysGoneIntPoint draw_size_i{};
+    DaysGoneVec2 pivot{};
+    DaysGoneVec3 relative_location{};
+    DaysGoneVec3 relative_rotation{};
+    DaysGoneVec3 relative_scale{};
+
+    const auto base = (uintptr_t)component;
+    daysgone_read_value(base + 0x600, flags600);
+    daysgone_read_value(base + 0x601, pooled_widget_type);
+    daysgone_read_value(base + 0x602, space);
+    daysgone_read_value(base + 0x604, timing_policy);
+    daysgone_read_value(base + 0x605, world_orientation);
+    daysgone_read_value(base + 0x608, use_image_texture);
+    daysgone_read_value(base + 0x618, widget_class);
+    daysgone_read_value(base + 0x620, size_screen);
+    daysgone_read_value(base + 0x624, screen_scale);
+    daysgone_read_value(base + 0x628, screen_pixel_offset);
+    daysgone_read_value(base + 0x630, size_from_widget);
+    daysgone_read_value(base + 0x634, draw_size_i);
+    daysgone_read_value(base + 0x634, draw_size_f);
+    daysgone_read_value(base + 0x63C, draw_scale);
+    daysgone_read_value(base + 0x640, far_fade);
+    daysgone_read_value(base + 0x644, far_fade_start);
+    daysgone_read_value(base + 0x648, far_fade_end);
+    daysgone_read_value(base + 0x64C, opacity);
+    daysgone_read_value(base + 0x650, stick_to_edge);
+    daysgone_read_value(base + 0x651, disable_occlusion);
+    daysgone_read_value(base + 0x652, manually_redraw);
+    daysgone_read_value(base + 0x653, redraw_requested);
+    daysgone_read_value(base + 0x654, force_redraw_requested);
+    daysgone_read_value(base + 0x658, redraw_time);
+    daysgone_read_value(base + 0x668, pivot);
+    daysgone_read_value(base + 0x670, max_interaction_distance);
+    daysgone_read_value(base + 0x678, owner_player);
+    daysgone_read_value(base + 0x690, blend_mode);
+    daysgone_read_value(base + 0x691, is_opaque);
+    daysgone_read_value(base + 0x692, is_two_sided);
+    daysgone_read_value(base + 0x693, tick_when_offscreen);
+    daysgone_read_value(base + 0x610, image_texture);
+    daysgone_read_value(base + 0x6C0, widget);
+    daysgone_read_value(base + 0x6C8, translucent_material);
+    daysgone_read_value(base + 0x6D8, translucent_material_post_aa);
+    daysgone_read_value(base + 0x718, use_custom_material);
+    daysgone_read_value(base + 0x720, custom_material);
+    daysgone_read_value(base + 0x728, render_target);
+    daysgone_read_value(base + 0x730, material_instance);
+    daysgone_read_value(base + 0x738, use_legacy_rotation);
+    daysgone_read_value(base + 0x739, override_tick);
+    daysgone_read_value(base + 0x73A, tick_enabled);
+    daysgone_read_value(base + 0x73C, added_to_screen);
+    daysgone_read_value(base + 0x170, relative_location);
+    daysgone_read_value(base + 0x17C, relative_rotation);
+    daysgone_read_value(base + 0x1B0, relative_scale);
+
+    const auto draw_size_f_is_sane =
+        daysgone_float_is_sane(draw_size_f.x, 32768.0f) &&
+        daysgone_float_is_sane(draw_size_f.y, 32768.0f) &&
+        draw_size_f.x >= 0.0f &&
+        draw_size_f.y >= 0.0f;
+
+    return fmt::format(
+        "{}={} rel_loc=({}) rel_rot=({}) rel_scale=({}) enums pooled={} space={} timing={} orient={} blend={} "
+        "screen_scale={:.3f} screen_offset=({}) draw_size_i={}x{} draw_size_f={} draw_scale={:.3f} pivot=({}) "
+        "flags delay={} use_img={} size_screen={} size_widget={} far={} edge={} no_occ={} manual={} redraw={} force={} opaque={} two_sided={} offscreen={} custom_mat={} legacy_rot={} tick_override={} tick_enabled={} added={} "
+        "fade={:.3f}/{:.3f} opacity={:.3f} redraw_time={:.3f} max_dist={:.3f} widget_class={} image={} owner={} widget={} trans_mat={} postaa_mat={} custom={} {} mid={}",
+        label,
+        daysgone_describe_uobject(component),
+        daysgone_format_vec3(relative_location),
+        daysgone_format_vec3(relative_rotation),
+        daysgone_format_vec3(relative_scale),
+        pooled_widget_type,
+        space,
+        timing_policy,
+        world_orientation,
+        blend_mode,
+        screen_scale,
+        daysgone_format_vec2(screen_pixel_offset),
+        draw_size_i.x,
+        draw_size_i.y,
+        draw_size_f_is_sane ? fmt::format("({})", daysgone_format_vec2(draw_size_f)) : "<not-float>",
+        draw_scale,
+        daysgone_format_vec2(pivot),
+        (flags600 & 1) != 0,
+        (use_image_texture & 1) != 0,
+        (size_screen & 1) != 0,
+        (size_from_widget & 1) != 0,
+        (far_fade & 1) != 0,
+        (stick_to_edge & 1) != 0,
+        (disable_occlusion & 1) != 0,
+        (manually_redraw & 1) != 0,
+        (redraw_requested & 1) != 0,
+        (force_redraw_requested & 1) != 0,
+        (is_opaque & 1) != 0,
+        (is_two_sided & 1) != 0,
+        (tick_when_offscreen & 1) != 0,
+        (use_custom_material & 1) != 0,
+        (use_legacy_rotation & 1) != 0,
+        (override_tick & 1) != 0,
+        (tick_enabled & 1) != 0,
+        (added_to_screen & 1) != 0,
+        far_fade_start,
+        far_fade_end,
+        opacity,
+        redraw_time,
+        max_interaction_distance,
+        daysgone_describe_suspect_uobject_pointer(widget_class),
+        daysgone_describe_uobject(image_texture),
+        daysgone_describe_uobject(owner_player),
+        daysgone_describe_uobject(widget),
+        daysgone_describe_uobject(translucent_material),
+        daysgone_describe_uobject(translucent_material_post_aa),
+        daysgone_describe_uobject(custom_material),
+        daysgone_describe_texture_render_target_2d(render_target, "rt"),
+        daysgone_describe_uobject(material_instance));
+}
+
+std::string daysgone_describe_bp_menu3d_state(sdk::UObjectBase* menu3d) {
+    if (!daysgone_object_pointer_is_readable(menu3d)) {
+        return fmt::format("bpMenu3D={}", daysgone_describe_uobject(menu3d));
+    }
+
+    sdk::UObjectBase* bend_widget_main{};
+    sdk::UObjectBase* bend_widget_bike_info{};
+    sdk::UObjectBase* default_scene_root{};
+    sdk::UObjectBase* root1{};
+    sdk::UObjectBase* main{};
+    sdk::UObjectBase* storylines{};
+    sdk::UObjectBase* skills{};
+    sdk::UObjectBase* inventory{};
+    sdk::UObjectBase* map{};
+    sdk::UObjectBase* menus{};
+    sdk::UObjectBase* current_tween{};
+    sdk::UObjectBase* current_drift{};
+    sdk::UObjectBase* gray_background{};
+    sdk::UObjectBase* white_background{};
+    sdk::UObjectBase* world_map{};
+    sdk::UObjectBase* duplicate_camera{};
+    sdk::UObjectBase* map_widget{};
+    sdk::UObjectBase* skill_menu{};
+    sdk::UObjectBase* modifiers_menu{};
+    sdk::UObjectBase* inventory_menu{};
+    sdk::UObjectBase* storylines_menu{};
+    sdk::UObjectBase* map_menu{};
+    sdk::UObjectBase* mega_menu{};
+    sdk::UObjectBase* start_menu{};
+    sdk::UObjectBase* selector_menu{};
+
+    uint8_t touch_flags{};
+    uint8_t current_menu{};
+    uint8_t next_menu{};
+    uint8_t use_player_camera{};
+    uint8_t tearing_down{};
+    uint8_t tutorial_active{};
+    uint8_t has_run_once{};
+    uint8_t selected_menu{};
+    uint8_t last_menu{};
+    uint8_t previous_menu{};
+    uint8_t override_menu{};
+    uint8_t exit_transition{};
+    int32_t tearing_down_frames{};
+    float distance_from_camera{};
+    float camera_fov{};
+    float timeline_fade{};
+    float timeline_main{};
+    float map_drift_scale{};
+    float drag_threshold_sq{};
+    DaysGoneRawTArray allowed_menus{};
+    DaysGoneVec3 menu_start_location{};
+    DaysGoneVec3 touch_start{};
+    DaysGoneVec3 touch_end{};
+    DaysGoneVec3 default_map_location{};
+
+    const auto base = (uintptr_t)menu3d;
+    daysgone_read_value(base + 0x408, bend_widget_main);
+    daysgone_read_value(base + 0x500, bend_widget_bike_info);
+    daysgone_read_value(base + 0x4F0, default_scene_root);
+    daysgone_read_value(base + 0x4F8, root1);
+    daysgone_read_value(base + 0x508, main);
+    daysgone_read_value(base + 0x510, storylines);
+    daysgone_read_value(base + 0x518, skills);
+    daysgone_read_value(base + 0x520, inventory);
+    daysgone_read_value(base + 0x530, map);
+    daysgone_read_value(base + 0x568, menus);
+    daysgone_read_value(base + 0x570, current_tween);
+    daysgone_read_value(base + 0x578, current_drift);
+    daysgone_read_value(base + 0x580, gray_background);
+    daysgone_read_value(base + 0x588, white_background);
+    daysgone_read_value(base + 0x5A0, touch_flags);
+    daysgone_read_value(base + 0x5A1, current_menu);
+    daysgone_read_value(base + 0x5A2, next_menu);
+    daysgone_read_value(base + 0x5A8, world_map);
+    daysgone_read_value(base + 0x5B0, distance_from_camera);
+    daysgone_read_value(base + 0x5B4, use_player_camera);
+    daysgone_read_value(base + 0x5B8, default_map_location);
+    daysgone_read_value(base + 0x5C8, duplicate_camera);
+    daysgone_read_value(base + 0x5D8, map_widget);
+    daysgone_read_value(base + 0x5E0, camera_fov);
+    daysgone_read_value(base + 0x5E4, tearing_down);
+    daysgone_read_value(base + 0x5E8, tearing_down_frames);
+    daysgone_read_value(base + 0x5F8, skill_menu);
+    daysgone_read_value(base + 0x600, modifiers_menu);
+    daysgone_read_value(base + 0x608, inventory_menu);
+    daysgone_read_value(base + 0x610, storylines_menu);
+    daysgone_read_value(base + 0x618, map_menu);
+    daysgone_read_value(base + 0x620, map_drift_scale);
+    daysgone_read_value(base + 0x640, mega_menu);
+    daysgone_read_value(base + 0x648, start_menu);
+    daysgone_read_value(base + 0x660, tutorial_active);
+    daysgone_read_value(base + 0x668, allowed_menus);
+    daysgone_read_value(base + 0x678, has_run_once);
+    daysgone_read_value(base + 0x688, last_menu);
+    daysgone_read_value(base + 0x68C, drag_threshold_sq);
+    daysgone_read_value(base + 0x690, selected_menu);
+    daysgone_read_value(base + 0x6B8, previous_menu);
+    daysgone_read_value(base + 0x8B0, override_menu);
+    daysgone_read_value(base + 0x8C8, selector_menu);
+    daysgone_read_value(base + 0x8F0, exit_transition);
+    daysgone_read_value(base + 0x538, timeline_fade);
+    daysgone_read_value(base + 0x548, timeline_main);
+    daysgone_read_value(base + 0x558, menu_start_location);
+    daysgone_read_value(base + 0x590, touch_start);
+    daysgone_read_value(base + 0x598, touch_end);
+
+    return fmt::format(
+        "bpMenu3D={} menus cur={} next={} last={} prev={} selected={} override={} touch_blocked={} use_player_cam={} tearing={} tear_frames={} tutorial={} run_once={} exit={} dist={:.3f} fov={:.3f} fade={:.3f} main_tl={:.3f} map_drift={:.3f} drag_sq={:.3f} allowed={}/{} menu_start=({}) default_map=({}) touch_start=({}) touch_end=({}) "
+        "main={} story={} skills={} inv={} map={} menusRoot={} tween={} drift={} gray={} white={} worldMap={} dupCam={} mapWidget={} baseSkills={} baseModifiers={} baseInventory={} baseStory={} baseMap={} mega={} start={} selector={} {} {} {} {}",
+        daysgone_describe_uobject(menu3d),
+        current_menu,
+        next_menu,
+        last_menu,
+        previous_menu,
+        selected_menu,
+        override_menu,
+        (touch_flags & 1) != 0,
+        (use_player_camera & 1) != 0,
+        (tearing_down & 1) != 0,
+        tearing_down_frames,
+        (tutorial_active & 1) != 0,
+        (has_run_once & 1) != 0,
+        (exit_transition & 1) != 0,
+        distance_from_camera,
+        camera_fov,
+        timeline_fade,
+        timeline_main,
+        map_drift_scale,
+        drag_threshold_sq,
+        allowed_menus.count,
+        allowed_menus.max,
+        daysgone_format_vec3(menu_start_location),
+        daysgone_format_vec3(default_map_location),
+        daysgone_format_vec3(touch_start),
+        daysgone_format_vec3(touch_end),
+        daysgone_describe_uobject(main),
+        daysgone_describe_uobject(storylines),
+        daysgone_describe_uobject(skills),
+        daysgone_describe_uobject(inventory),
+        daysgone_describe_uobject(map),
+        daysgone_describe_uobject(menus),
+        daysgone_describe_uobject(current_tween),
+        daysgone_describe_uobject(current_drift),
+        daysgone_describe_uobject(gray_background),
+        daysgone_describe_uobject(white_background),
+        daysgone_describe_uobject(world_map),
+        daysgone_describe_uobject(duplicate_camera),
+        daysgone_describe_uobject(map_widget),
+        daysgone_describe_uobject(skill_menu),
+        daysgone_describe_uobject(modifiers_menu),
+        daysgone_describe_uobject(inventory_menu),
+        daysgone_describe_uobject(storylines_menu),
+        daysgone_describe_uobject(map_menu),
+        daysgone_describe_uobject(mega_menu),
+        daysgone_describe_uobject(start_menu),
+        daysgone_describe_uobject(selector_menu),
+        daysgone_describe_scene_component_transform(default_scene_root, "defaultRoot"),
+        daysgone_describe_scene_component_transform(root1, "root1"),
+        daysgone_describe_bend_widget_component(bend_widget_main, "bendWidgetMain"),
+        daysgone_describe_bend_widget_component(bend_widget_bike_info, "bendWidgetBike"));
+}
+
+std::string daysgone_describe_base_menu_widget(sdk::UObjectBase* widget, const char* label) {
+    if (!daysgone_object_pointer_is_readable(widget)) {
+        return fmt::format("{}={}", label, daysgone_describe_uobject(widget));
+    }
+
+    uint8_t flags{};
+    int32_t z_order{};
+    sdk::UObjectBase* popup{};
+    sdk::UObjectBase* owning_menu{};
+
+    daysgone_read_value((uintptr_t)widget + 0x330, flags);
+    daysgone_read_value((uintptr_t)widget + 0x338, popup);
+    daysgone_read_value((uintptr_t)widget + 0x340, owning_menu);
+    daysgone_read_value((uintptr_t)widget + 0x348, z_order);
+
+    return fmt::format(
+        "{}={} flags=0x{:02X} z={} popup={} owning={}",
+        label,
+        daysgone_describe_uobject(widget),
+        flags,
+        z_order,
+        daysgone_describe_uobject(popup),
+        daysgone_describe_uobject(owning_menu));
+}
+}
+
+void FFakeStereoRenderingHook::attempt_hook_daysgone_slate_intermediate_buffer() {
+    if (m_attempted_hook_daysgone_slate_intermediate_buffer) {
+        return;
+    }
+
+    if (!daysgone_is_current_game() || g_framework == nullptr || !g_framework->is_dx11()) {
+        return;
+    }
+
+    m_attempted_hook_daysgone_slate_intermediate_buffer = true;
+
+    // Days Gone's BendTemporalAA creates a real SlateIntermediateBuffer, then
+    // composites it into the scene. Capturing that texture gives UEVR a true UI
+    // target instead of treating the scene RT as UI.
+    constexpr uintptr_t kBendTemporalAASlateIntermediatePostCallRva = 0x200CD9F;
+    constexpr std::array<uint8_t, 8> kExpectedBytes{
+        0x33, 0xD2,                         // xor edx, edx
+        0xB9, 0x00, 0x01, 0x00, 0x00,       // mov ecx, 100h
+        0xE8                                // call ...
+    };
+
+    const auto module = (uintptr_t)utility::get_executable();
+    if (module == 0) {
+        SPDLOG_WARN("[DaysGone][SlateUI] Cannot hook SlateIntermediateBuffer: executable module unavailable");
+        return;
+    }
+
+    const auto hook_address = module + kBendTemporalAASlateIntermediatePostCallRva;
+    if (!is_executable_process_range(hook_address, kExpectedBytes.size()) ||
+        std::memcmp((void*)hook_address, kExpectedBytes.data(), kExpectedBytes.size()) != 0)
+    {
+        SPDLOG_WARN(
+            "[DaysGone][SlateUI] Refusing SlateIntermediateBuffer hook at {:x}: byte signature mismatch",
+            hook_address);
+        return;
+    }
+
+    auto hook_result = safetyhook::create_mid((void*)hook_address, &FFakeStereoRenderingHook::daysgone_slate_intermediate_buffer_hook);
+    if (!hook_result) {
+        SPDLOG_WARN("[DaysGone][SlateUI] Failed to hook SlateIntermediateBuffer post-call at {:x}", hook_address);
+        return;
+    }
+
+    m_daysgone_slate_intermediate_buffer_hook = std::move(hook_result);
+    SPDLOG_INFO("[DaysGone][SlateUI] Hooked Bend SlateIntermediateBuffer post-call at {:x}", hook_address);
+}
+
+void FFakeStereoRenderingHook::daysgone_slate_intermediate_buffer_hook(safetyhook::Context& ctx) {
+    if (g_hook == nullptr || !daysgone_is_current_game() || g_framework == nullptr || !g_framework->is_dx11()) {
+        return;
+    }
+
+    auto* const rtm = g_hook->get_render_target_manager();
+    if (rtm == nullptr) {
+        return;
+    }
+
+    constexpr uintptr_t kSlateIntermediateLocalRspOffset = 0x60;
+    const auto local_address = ctx.rsp + kSlateIntermediateLocalRspOffset;
+    if (!is_readable_process_range(local_address, sizeof(FRHITexture2D*))) {
+        return;
+    }
+
+    auto* slate_texture = *(FRHITexture2D**)local_address;
+    if (slate_texture == nullptr || !is_readable_process_range((uintptr_t)slate_texture, sizeof(void*))) {
+        return;
+    }
+
+    if (slate_texture == rtm->get_render_target()) {
+        SPDLOG_WARN_ONCE("[DaysGone][SlateUI] Ignoring SlateIntermediateBuffer candidate because it matches the scene RT");
+        return;
+    }
+
+    DaysGoneD3D11TextureCandidate candidate{};
+    if (!daysgone_try_get_d3d11_texture_candidate(slate_texture, candidate)) {
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[DaysGone][SlateUI] SlateIntermediateBuffer candidate {:x} is not a readable nested D3D11 texture yet",
+            (uintptr_t)slate_texture);
+        return;
+    }
+
+    if (!daysgone_is_plausible_slate_ui_desc(candidate.desc)) {
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[DaysGone][SlateUI] Rejected non-UI SlateIntermediateBuffer candidate: wrapper={:x} native={:x} [{}x{} fmt={} bind=0x{:X}]",
+            (uintptr_t)slate_texture,
+            (uintptr_t)candidate.native,
+            candidate.desc.Width,
+            candidate.desc.Height,
+            (uint32_t)candidate.desc.Format,
+            candidate.desc.BindFlags);
+        return;
+    }
+
+    const auto last_target = g_hook->m_daysgone_slate_intermediate_last_target.load();
+    const auto last_native = g_hook->m_daysgone_slate_native_ui_target.load();
+    if (last_target == (uintptr_t)slate_texture && last_native == (uintptr_t)candidate.native) {
+        return;
+    }
+
+    // Store the captured texture so the opt-in D3D11 overlay path can draw it
+    // into UEVR's UI layer without forcing global 2D screen mode.
+    (void)rtm;
+    g_hook->m_daysgone_slate_intermediate_last_target.store((uintptr_t)slate_texture);
+    g_hook->m_daysgone_slate_native_ui_target.store((uintptr_t)candidate.native);
+    g_hook->m_daysgone_slate_native_ui_width.store(candidate.desc.Width);
+    g_hook->m_daysgone_slate_native_ui_height.store(candidate.desc.Height);
+
+    SPDLOG_INFO_EVERY_N_SEC(
+        5,
+        "[DaysGone][SlateUI] Captured Bend SlateIntermediateBuffer native UI target: wrapper={:x} native={:x} path=+0x{:X}/+0x{:X} [{}x{} fmt={} bind=0x{:X}]",
+        (uintptr_t)slate_texture,
+        (uintptr_t)candidate.native,
+        candidate.outer_offset == std::numeric_limits<uintptr_t>::max() ? 0 : candidate.outer_offset,
+        candidate.inner_offset == std::numeric_limits<uintptr_t>::max() ? 0 : candidate.inner_offset,
+        candidate.desc.Width,
+        candidate.desc.Height,
+        (uint32_t)candidate.desc.Format,
+        candidate.desc.BindFlags);
+}
+
+void FFakeStereoRenderingHook::attempt_hook_daysgone_bend_taa_composite() {
+    if (m_attempted_hook_daysgone_bend_taa_composite) {
+        return;
+    }
+
+    if (!daysgone_is_current_game() || g_framework == nullptr || !g_framework->is_dx11()) {
+        return;
+    }
+
+    m_attempted_hook_daysgone_bend_taa_composite = true;
+
+    // Days Gone's visible UI is not a normal Slate overlay. BendTemporalAA
+    // composites SlateIntermediateBuffer into the scene in this execute
+    // routine; the crop flag at pass+0x76 is what pushes the menu/HUD toward
+    // a bad HMD-sized quadrant in VR.
+    constexpr uintptr_t kBendTemporalAACompositeExecuteRva = 0x2008550;
+    constexpr std::array<uint8_t, 10> kExpectedBytes{
+        0x4C, 0x89, 0x4C, 0x24, 0x20, // mov [rsp+20h], r9
+        0x48, 0x89, 0x4C, 0x24, 0x08  // mov [rsp+08h], rcx
+    };
+
+    const auto module = (uintptr_t)utility::get_executable();
+    if (module == 0) {
+        SPDLOG_WARN("[DaysGone][BendTAA] Cannot hook BendTemporalAA composite: executable module unavailable");
+        return;
+    }
+
+    const auto hook_address = module + kBendTemporalAACompositeExecuteRva;
+    if (!is_executable_process_range(hook_address, kExpectedBytes.size()) ||
+        std::memcmp((void*)hook_address, kExpectedBytes.data(), kExpectedBytes.size()) != 0)
+    {
+        SPDLOG_WARN(
+            "[DaysGone][BendTAA] Refusing composite hook at {:x}: byte signature mismatch",
+            hook_address);
+        return;
+    }
+
+    auto hook_result = safetyhook::create_mid((void*)hook_address, &FFakeStereoRenderingHook::daysgone_bend_taa_composite_hook);
+    if (!hook_result) {
+        SPDLOG_WARN("[DaysGone][BendTAA] Failed to hook BendTemporalAA composite at {:x}", hook_address);
+        return;
+    }
+
+    m_daysgone_bend_taa_composite_hook = std::move(hook_result);
+    SPDLOG_INFO("[DaysGone][BendTAA] Hooked BendTemporalAA Slate composite at {:x}", hook_address);
+}
+
+void FFakeStereoRenderingHook::daysgone_bend_taa_composite_hook(safetyhook::Context& ctx) {
+    if (g_hook == nullptr || !daysgone_is_current_game() || g_framework == nullptr || !g_framework->is_dx11()) {
+        return;
+    }
+
+    const auto pass = (uintptr_t)ctx.rcx;
+    if (!is_readable_process_range(pass, 0xD8)) {
+        return;
+    }
+
+    auto vr = VR::get();
+    const bool compatibility_enabled = vr != nullptr && vr->is_daysgone_bend_ui_placement_fix_enabled();
+    const bool extracted_overlay_enabled = g_hook->m_daysgone_bend_ui_use_slate_overlay->value();
+    const bool suppress_in_scene_composite = g_hook->m_daysgone_bend_ui_suppress_in_scene_composite->value();
+    if (!compatibility_enabled ||
+        !g_hook->m_daysgone_bend_ui_disable_taa_crop->value() ||
+        !extracted_overlay_enabled ||
+        !suppress_in_scene_composite)
+    {
+        return;
+    }
+
+    uint8_t crop_flag{};
+    if (!daysgone_read_value(pass + 0x76, crop_flag)) {
+        return;
+    }
+
+    const bool had_crop = (crop_flag & 1) != 0;
+    g_hook->m_daysgone_bend_taa_composite_seen.fetch_add(1);
+
+    if (had_crop && daysgone_write_value<uint8_t>(pass + 0x76, 0)) {
+        g_hook->m_daysgone_bend_taa_composite_crop_suppressed.fetch_add(1);
+    }
+
+    SPDLOG_INFO_EVERY_N_SEC(
+        5,
+        "[DaysGone][BendTAA] crop suppression active pass={:x} had_crop={} seen={} suppressed={}",
+        pass,
+        had_crop,
+        (unsigned long long)g_hook->m_daysgone_bend_taa_composite_seen.load(),
+        (unsigned long long)g_hook->m_daysgone_bend_taa_composite_crop_suppressed.load());
+}
+
+void FFakeStereoRenderingHook::update_daysgone_ui_telemetry() {
+    if (!daysgone_is_current_game() || g_framework == nullptr || !g_framework->is_dx11()) {
+        return;
+    }
+
+    auto vr = VR::get();
+    if (vr == nullptr || !vr->is_daysgone_bend_ui_placement_fix_enabled()) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (m_daysgone_ui_telemetry_last_queue.time_since_epoch().count() != 0 &&
+        now - m_daysgone_ui_telemetry_last_queue < std::chrono::seconds(5))
+    {
+        return;
+    }
+
+    if (m_daysgone_ui_telemetry_queued.exchange(true)) {
+        return;
+    }
+
+    m_daysgone_ui_telemetry_last_queue = now;
+
+    auto log_telemetry = [this]() {
+        utility::ScopeGuard reset{[this]() {
+            m_daysgone_ui_telemetry_queued.store(false);
+        }};
+
+        if (g_hook != this || !daysgone_is_current_game() || g_framework == nullptr || !g_framework->is_dx11()) {
+            return;
+        }
+
+        log_daysgone_ui_telemetry_game_thread();
+    };
+
+    if (GameThreadWorker::get().is_same_thread()) {
+        log_telemetry();
+        return;
+    }
+
+    GameThreadWorker::get().enqueue(std::move(log_telemetry));
+}
+
+void FFakeStereoRenderingHook::log_daysgone_ui_telemetry_game_thread() {
+    auto* ui_manager = daysgone_find_first_tracked_object(L"Class /Script/BendGame.UIManager");
+    auto* bend_hud = daysgone_find_first_tracked_object(L"Class /Script/BendGame.BendHUD");
+    auto* slate_hud = daysgone_find_first_tracked_object(L"Class /Script/BendGame.SlateHUD");
+    auto* menu3d_class_instance = daysgone_find_first_tracked_object(L"Class /Script/BendGame.Menu3D");
+
+    int32_t frame_count = -1;
+    uint8_t options_menu_flags = 0;
+    uint8_t menu3d_actor_flags = 0;
+    float menu3d_flick_angle = 0.0f;
+    sdk::UObjectBase* menu3d{};
+    sdk::UObjectBase* map3d{};
+    sdk::UObjectBase* subtitle_widget{};
+    sdk::UObjectBase* devinfo_widget{};
+    sdk::UObjectBase* bend_slate_hud{};
+    sdk::UObjectBase* slate_widget{};
+    sdk::UObjectBase* slate_hud_widget{};
+
+    if (daysgone_object_pointer_is_readable(ui_manager)) {
+        daysgone_read_value((uintptr_t)ui_manager + 0x46C, frame_count);
+        daysgone_read_value((uintptr_t)ui_manager + 0x528, options_menu_flags);
+        daysgone_read_value((uintptr_t)ui_manager + 0x530, menu3d);
+        daysgone_read_value((uintptr_t)ui_manager + 0x538, map3d);
+        daysgone_read_value((uintptr_t)ui_manager + 0x518, subtitle_widget);
+        daysgone_read_value((uintptr_t)ui_manager + 0x520, devinfo_widget);
+    }
+
+    if (daysgone_object_pointer_is_readable(bend_hud)) {
+        daysgone_read_value((uintptr_t)bend_hud + 0x480, bend_slate_hud);
+    }
+
+    if (!daysgone_object_pointer_is_readable(slate_hud) && daysgone_object_pointer_is_readable(bend_slate_hud)) {
+        slate_hud = bend_slate_hud;
+    }
+
+    if (daysgone_object_pointer_is_readable(slate_hud)) {
+        daysgone_read_value((uintptr_t)slate_hud + 0x80, slate_widget);
+        daysgone_read_value((uintptr_t)slate_hud + 0xB0, slate_hud_widget);
+    }
+
+    if (!daysgone_object_pointer_is_readable(menu3d) && daysgone_object_pointer_is_readable(menu3d_class_instance)) {
+        menu3d = menu3d_class_instance;
+    }
+
+    if (daysgone_object_pointer_is_readable(menu3d)) {
+        daysgone_read_value((uintptr_t)menu3d + 0x8, menu3d_actor_flags);
+        daysgone_read_value((uintptr_t)menu3d + 0x358, menu3d_flick_angle);
+    }
+
+    auto* const rtm = get_render_target_manager();
+    const auto scene_rt = rtm != nullptr ? (uintptr_t)rtm->get_render_target() : 0;
+    const auto fallback_ui = rtm != nullptr ? (uintptr_t)rtm->get_fallback_ui_target_ref() : 0;
+    const auto dedicated_ui = rtm != nullptr ? (uintptr_t)rtm->get_dedicated_ui_target() : 0;
+    const auto dedicated_ui_w = rtm != nullptr ? rtm->get_dedicated_ui_width() : 0;
+    const auto dedicated_ui_h = rtm != nullptr ? rtm->get_dedicated_ui_height() : 0;
+    const auto last_slate_intermediate = m_daysgone_slate_intermediate_last_target.load();
+
+    uint8_t current_menu_sig{};
+    uint8_t next_menu_sig{};
+    uint8_t last_menu_sig{};
+    uint8_t selected_menu_sig{};
+    sdk::UObjectBase* bend_widget_main_sig{};
+    sdk::UObjectBase* bend_widget_bike_sig{};
+    sdk::UObjectBase* bend_widget_main_rt_sig{};
+    DaysGoneIntPoint bend_widget_main_draw_size_sig{};
+    float bend_widget_main_draw_scale_sig{};
+
+    if (daysgone_object_pointer_is_readable(menu3d)) {
+        daysgone_read_value((uintptr_t)menu3d + 0x5A1, current_menu_sig);
+        daysgone_read_value((uintptr_t)menu3d + 0x5A2, next_menu_sig);
+        daysgone_read_value((uintptr_t)menu3d + 0x688, last_menu_sig);
+        daysgone_read_value((uintptr_t)menu3d + 0x690, selected_menu_sig);
+        daysgone_read_value((uintptr_t)menu3d + 0x408, bend_widget_main_sig);
+        daysgone_read_value((uintptr_t)menu3d + 0x500, bend_widget_bike_sig);
+    }
+
+    if (daysgone_object_pointer_is_readable(bend_widget_main_sig)) {
+        daysgone_read_value((uintptr_t)bend_widget_main_sig + 0x634, bend_widget_main_draw_size_sig);
+        daysgone_read_value((uintptr_t)bend_widget_main_sig + 0x63C, bend_widget_main_draw_scale_sig);
+        daysgone_read_value((uintptr_t)bend_widget_main_sig + 0x728, bend_widget_main_rt_sig);
+    }
+
+    const auto hmd_width = VR::get() != nullptr ? VR::get()->get_hmd_width() : 0;
+    const auto hmd_height = VR::get() != nullptr ? VR::get()->get_hmd_height() : 0;
+    const auto bp_menu3d_state = daysgone_describe_bp_menu3d_state(menu3d);
+
+    const auto signature = fmt::format(
+        "ui={:x}|frame={}|opt=0x{:02X}|hud={:x}|slate={:x}|widget={:x}|hudwidget={:x}|menu3d={:x}|map3d={:x}|menus={}|hudmenus={}|created={}|m={}/{}/{}/{}|bw={:x}/{:x}/{:x}/{}x{}/{:.3f}|rt={:x}/{:x}/{:x}/{}x{}|hmd={}x{}",
+        (uintptr_t)ui_manager,
+        frame_count,
+        options_menu_flags,
+        (uintptr_t)bend_hud,
+        (uintptr_t)slate_hud,
+        (uintptr_t)slate_widget,
+        (uintptr_t)slate_hud_widget,
+        (uintptr_t)menu3d,
+        (uintptr_t)map3d,
+        daysgone_array_count_string(ui_manager, 0x480),
+        daysgone_array_count_string(ui_manager, 0x470),
+        daysgone_array_count_string(ui_manager, 0x490),
+        current_menu_sig,
+        next_menu_sig,
+        last_menu_sig,
+        selected_menu_sig,
+        (uintptr_t)bend_widget_main_sig,
+        (uintptr_t)bend_widget_bike_sig,
+        (uintptr_t)bend_widget_main_rt_sig,
+        bend_widget_main_draw_size_sig.x,
+        bend_widget_main_draw_size_sig.y,
+        bend_widget_main_draw_scale_sig,
+        scene_rt,
+        fallback_ui,
+        dedicated_ui,
+        dedicated_ui_w,
+        dedicated_ui_h,
+        hmd_width,
+        hmd_height);
+
+    ++m_daysgone_ui_telemetry_log_counter;
+    if (signature == m_daysgone_ui_telemetry_last_signature && (m_daysgone_ui_telemetry_log_counter % 6) != 0) {
+        return;
+    }
+
+    m_daysgone_ui_telemetry_last_signature = signature;
+
+    SPDLOG_INFO(
+        "[DaysGone][UITelemetry] ui={} frame={} opt_flags=0x{:02X} hmd={}x{} postprocess_raw=[{:016x},{:016x}] {} {} {} menu3d={} actor_flags=0x{:02X} flick={} map3d={} subtitle={} devinfo={} bend_hud={} bend_slate_hud={} slate_hud={} slate_widget={} slate_hud_widget={} {} {} {} scene_rt={:x} fallback_ui={:x} dedicated_ui={:x} dedicated_ui_size={}x{} slate_intermediate_last={:x}",
+        daysgone_describe_uobject(ui_manager),
+        frame_count,
+        options_menu_flags,
+        hmd_width,
+        hmd_height,
+        daysgone_object_pointer_is_readable(ui_manager) && is_readable_process_range((uintptr_t)ui_manager + 0x4C0, sizeof(uintptr_t))
+            ? *(uintptr_t*)((uintptr_t)ui_manager + 0x4C0)
+            : 0,
+        daysgone_object_pointer_is_readable(ui_manager) && is_readable_process_range((uintptr_t)ui_manager + 0x4C8, sizeof(uintptr_t))
+            ? *(uintptr_t*)((uintptr_t)ui_manager + 0x4C8)
+            : 0,
+        daysgone_describe_uobject_array(ui_manager, 0x470, "hudMenus"),
+        daysgone_describe_uobject_array(ui_manager, 0x480, "menus"),
+        daysgone_describe_uobject_array(ui_manager, 0x490, "createdThisFrame"),
+        daysgone_describe_uobject(menu3d),
+        menu3d_actor_flags,
+        menu3d_flick_angle,
+        daysgone_describe_uobject(map3d),
+        daysgone_describe_uobject(subtitle_widget),
+        daysgone_describe_uobject(devinfo_widget),
+        daysgone_describe_uobject(bend_hud),
+        daysgone_describe_uobject(bend_slate_hud),
+        daysgone_describe_uobject(slate_hud),
+        daysgone_describe_base_menu_widget(slate_widget, "slateWidget"),
+        daysgone_describe_base_menu_widget(slate_hud_widget, "slateHudWidget"),
+        daysgone_describe_raw_pointer_field(slate_widget, 0x340, "widgetOwningMenu"),
+        daysgone_describe_raw_pointer_field(slate_hud_widget, 0x340, "hudWidgetOwningMenu"),
+        bp_menu3d_state,
+        scene_rt,
+        fallback_ui,
+        dedicated_ui,
+        dedicated_ui_w,
+        dedicated_ui_h,
+        last_slate_intermediate);
+}
+
+void FFakeStereoRenderingHook::update_daysgone_bend_ui_placement_fix() {
+    if (!daysgone_is_current_game() || g_framework == nullptr || !g_framework->is_dx11()) {
+        return;
+    }
+
+    auto vr = VR::get();
+    const bool enabled = vr != nullptr && vr->is_daysgone_bend_ui_placement_fix_enabled();
+    if (!enabled && !m_daysgone_bend_ui_originals.captured && !daysgone_has_slate_widget_originals() &&
+        !g_daysgone_slate_composite_cvar.forced)
+    {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (enabled) {
+        const auto apply_signature = fmt::format(
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}|{:.3f}",
+            m_daysgone_bend_ui_manual_apply_generation.load(),
+            m_daysgone_bend_ui_mode->value(),
+            m_daysgone_bend_ui_force_player_camera->value(),
+            m_daysgone_bend_ui_override_widget_transform->value(),
+            m_daysgone_bend_ui_override_root_transform->value(),
+            m_daysgone_bend_ui_force_widget_refresh->value(),
+            m_daysgone_bend_ui_viewport_slot_fix->value(),
+            m_daysgone_bend_ui_apply_child_render_transform->value(),
+            m_daysgone_bend_ui_use_slate_overlay->value(),
+            m_daysgone_bend_ui_suppress_in_scene_composite->value(),
+            m_daysgone_bend_ui_viewport_slot_offset_x->value(),
+            m_daysgone_bend_ui_viewport_slot_offset_y->value(),
+            m_daysgone_bend_ui_viewport_slot_scale->value(),
+            m_daysgone_bend_ui_viewport_slot_opacity->value(),
+            m_daysgone_bend_ui_distance_from_camera->value(),
+            m_daysgone_bend_ui_camera_fov->value(),
+            m_daysgone_bend_ui_widget_loc_x->value(),
+            m_daysgone_bend_ui_widget_loc_y->value(),
+            m_daysgone_bend_ui_widget_loc_z->value(),
+            m_daysgone_bend_ui_widget_rot_pitch->value(),
+            m_daysgone_bend_ui_widget_rot_yaw->value(),
+            m_daysgone_bend_ui_widget_rot_roll->value(),
+            m_daysgone_bend_ui_widget_scale->value(),
+            m_daysgone_bend_ui_screen_offset_x->value(),
+            m_daysgone_bend_ui_screen_offset_y->value(),
+            m_daysgone_bend_ui_screen_scale->value(),
+            m_daysgone_bend_ui_draw_scale->value(),
+            m_daysgone_bend_ui_root_loc_x->value(),
+            m_daysgone_bend_ui_root_loc_y->value(),
+            m_daysgone_bend_ui_root_loc_z->value(),
+            m_daysgone_bend_ui_key_opacity->value());
+        const bool settings_changed = apply_signature != m_daysgone_bend_ui_last_apply_signature;
+        const bool watchdog_due =
+            m_daysgone_bend_ui_live_watchdog->value() &&
+            m_daysgone_bend_ui_last_apply.time_since_epoch().count() != 0 &&
+            now - m_daysgone_bend_ui_last_apply >= std::chrono::seconds(5);
+
+        if (!settings_changed && !watchdog_due) {
+            return;
+        }
+
+        constexpr auto apply_interval = std::chrono::milliseconds(75);
+        if (m_daysgone_bend_ui_last_apply.time_since_epoch().count() != 0 &&
+            now - m_daysgone_bend_ui_last_apply < apply_interval)
+        {
+            return;
+        }
+
+        if (m_daysgone_bend_ui_fix_queued.exchange(true)) {
+            return;
+        }
+
+        m_daysgone_bend_ui_last_apply = now;
+        m_daysgone_bend_ui_last_apply_signature = apply_signature;
+    } else {
+        m_daysgone_bend_ui_last_apply = {};
+        m_daysgone_bend_ui_last_apply_signature.clear();
+        if (m_daysgone_bend_ui_fix_queued.exchange(true)) {
+            return;
+        }
+    }
+
+    auto apply_or_restore = [this]() {
+        utility::ScopeGuard reset{[this]() {
+            m_daysgone_bend_ui_fix_queued.store(false);
+        }};
+
+        if (g_hook != this || !daysgone_is_current_game() || g_framework == nullptr || !g_framework->is_dx11()) {
+            return;
+        }
+
+        auto vr = VR::get();
+        if (vr != nullptr && vr->is_daysgone_bend_ui_placement_fix_enabled()) {
+            apply_daysgone_bend_ui_placement_fix_game_thread();
+        } else {
+            restore_daysgone_bend_ui_placement_fix_game_thread();
+        }
+    };
+
+    if (GameThreadWorker::get().is_same_thread()) {
+        apply_or_restore();
+        return;
+    }
+
+    GameThreadWorker::get().enqueue(std::move(apply_or_restore));
+}
+
+void FFakeStereoRenderingHook::restore_daysgone_bend_ui_placement_fix_game_thread() {
+    daysgone_set_disable_slate_composite(false);
+    daysgone_restore_slate_widget_originals();
+    daysgone_restore_viewport_root_slots();
+
+    auto& original = m_daysgone_bend_ui_originals;
+    if (!original.captured) {
+        return;
+    }
+
+    auto* menu3d = reinterpret_cast<sdk::UObjectBase*>(original.menu3d);
+    auto* widget = reinterpret_cast<sdk::UObjectBase*>(original.widget_main);
+    auto* root = reinterpret_cast<sdk::UObjectBase*>(original.default_root);
+
+    if (daysgone_object_pointer_is_readable(menu3d)) {
+        daysgone_write_value((uintptr_t)menu3d + 0x5B0, original.distance_from_camera);
+        daysgone_write_bool_bit((uintptr_t)menu3d + 0x5B4, (original.use_player_camera & 1) != 0);
+        daysgone_write_value((uintptr_t)menu3d + 0x5E0, original.camera_fov);
+    }
+
+    if (daysgone_object_pointer_is_readable(widget)) {
+        daysgone_write_value((uintptr_t)widget + 0x170, DaysGoneVec3{original.widget_location.x, original.widget_location.y, original.widget_location.z});
+        daysgone_write_value((uintptr_t)widget + 0x17C, DaysGoneVec3{original.widget_rotation.x, original.widget_rotation.y, original.widget_rotation.z});
+        daysgone_write_value((uintptr_t)widget + 0x1B0, DaysGoneVec3{original.widget_scale.x, original.widget_scale.y, original.widget_scale.z});
+        daysgone_write_value((uintptr_t)widget + 0x624, original.screen_scale);
+        daysgone_write_value((uintptr_t)widget + 0x628, DaysGoneVec2{original.screen_offset.x, original.screen_offset.y});
+        daysgone_write_value((uintptr_t)widget + 0x63C, original.draw_scale);
+        daysgone_write_value((uintptr_t)widget + 0x668, DaysGoneVec2{original.pivot.x, original.pivot.y});
+        daysgone_write_bool_bit((uintptr_t)widget + 0x651, (original.disable_occlusion & 1) != 0);
+        daysgone_write_bool_bit((uintptr_t)widget + 0x693, (original.tick_when_offscreen & 1) != 0);
+        daysgone_write_bool_bit((uintptr_t)widget + 0x739, (original.tick_override & 1) != 0);
+        daysgone_write_bool_bit((uintptr_t)widget + 0x73A, (original.tick_enabled & 1) != 0);
+    }
+
+    if (daysgone_object_pointer_is_readable(root)) {
+        daysgone_write_value((uintptr_t)root + 0x170, DaysGoneVec3{original.root_location.x, original.root_location.y, original.root_location.z});
+        daysgone_write_value((uintptr_t)root + 0x17C, DaysGoneVec3{original.root_rotation.x, original.root_rotation.y, original.root_rotation.z});
+        daysgone_write_value((uintptr_t)root + 0x1B0, DaysGoneVec3{original.root_scale.x, original.root_scale.y, original.root_scale.z});
+    }
+
+    SPDLOG_INFO(
+        "[DaysGone][BendUIFix] Restored original placement menu={:x} widget={:x} root={:x}",
+        original.menu3d,
+        original.widget_main,
+        original.default_root);
+
+    m_daysgone_bend_ui_restore_count.fetch_add(1);
+    m_daysgone_bend_ui_last_menu3d.store(0);
+    m_daysgone_bend_ui_last_widget_main.store(0);
+    original = {};
+}
+
+void FFakeStereoRenderingHook::apply_daysgone_bend_ui_placement_fix_game_thread() {
+    const bool overlay_requested = m_daysgone_bend_ui_use_slate_overlay->value();
+    const bool use_extracted_overlay = should_use_daysgone_slate_ui_overlay();
+    const bool suppress_in_scene =
+        use_extracted_overlay &&
+        m_daysgone_bend_ui_suppress_in_scene_composite->value();
+    if (overlay_requested && suppress_in_scene) {
+        if (m_daysgone_bend_ui_originals.captured || daysgone_has_slate_widget_originals()) {
+            restore_daysgone_bend_ui_placement_fix_game_thread();
+        }
+
+        daysgone_set_disable_slate_composite(true);
+
+        m_daysgone_bend_ui_last_menu3d.store(0);
+        m_daysgone_bend_ui_last_widget_main.store(0);
+
+        SPDLOG_INFO_EVERY_N_SEC(
+            10,
+            "[DaysGone][SlateOverlay] requested target={} suppress_in_scene=true key=({:.3f},{:.3f},{:.3f}) offset=({:.1f},{:.1f}) scale={:.3f}; using extracted overlay only",
+            use_extracted_overlay,
+            m_daysgone_bend_ui_key_threshold->value(),
+            m_daysgone_bend_ui_key_softness->value(),
+            m_daysgone_bend_ui_key_opacity->value(),
+            m_daysgone_bend_ui_screen_offset_x->value(),
+            m_daysgone_bend_ui_screen_offset_y->value(),
+            m_daysgone_bend_ui_screen_scale->value() * m_daysgone_bend_ui_draw_scale->value());
+        return;
+    }
+
+    if (overlay_requested) {
+        daysgone_set_disable_slate_composite(false);
+        SPDLOG_INFO_EVERY_N_SEC(
+            10,
+            "[DaysGone][SlateOverlay] requested target={} suppress_in_scene=false key=({:.3f},{:.3f},{:.3f}) offset=({:.1f},{:.1f}) scale={:.3f}; keeping live UMG root tuning active",
+            use_extracted_overlay,
+            m_daysgone_bend_ui_key_threshold->value(),
+            m_daysgone_bend_ui_key_softness->value(),
+            m_daysgone_bend_ui_key_opacity->value(),
+            m_daysgone_bend_ui_screen_offset_x->value(),
+            m_daysgone_bend_ui_screen_offset_y->value(),
+            m_daysgone_bend_ui_screen_scale->value() * m_daysgone_bend_ui_draw_scale->value());
+    }
+
+    daysgone_set_disable_slate_composite(false);
+
+    const auto slate_widgets = daysgone_collect_active_slate_widgets();
+    auto apply_slate_widgets = [this, &slate_widgets]() {
+        const DaysGoneVec2 child_translation{
+            m_daysgone_bend_ui_screen_offset_x->value(),
+            m_daysgone_bend_ui_screen_offset_y->value()};
+        const auto child_scale = std::max(0.01f, m_daysgone_bend_ui_screen_scale->value() * m_daysgone_bend_ui_draw_scale->value());
+        const DaysGoneVec2 viewport_translation{
+            m_daysgone_bend_ui_viewport_slot_offset_x->value(),
+            m_daysgone_bend_ui_viewport_slot_offset_y->value()};
+        const auto viewport_scale = std::max(0.01f, m_daysgone_bend_ui_viewport_slot_scale->value());
+        const auto viewport_opacity = std::clamp(m_daysgone_bend_ui_viewport_slot_opacity->value(), 0.0f, 2.0f);
+
+        size_t viewport_roots_applied{};
+        size_t child_transforms_applied{};
+        for (auto* widget : slate_widgets) {
+            if (m_daysgone_bend_ui_viewport_slot_fix->value() &&
+                daysgone_apply_user_widget_viewport_slot(widget, viewport_translation, viewport_scale, viewport_opacity))
+            {
+                ++viewport_roots_applied;
+                continue;
+            }
+
+            if (m_daysgone_bend_ui_apply_child_render_transform->value()) {
+                daysgone_apply_slate_widget_transform(widget, child_translation, child_scale);
+                ++child_transforms_applied;
+            }
+        }
+
+        if (!slate_widgets.empty()) {
+            SPDLOG_INFO_EVERY_N_SEC(
+                5,
+                "[DaysGone][SlateWidgetFix] candidates={} viewport_roots={} child_transforms={} viewport_offset=({:.1f},{:.1f}) viewport_scale={:.3f} viewport_opacity={:.3f} child_offset=({:.1f},{:.1f}) child_scale={:.3f} total_apply={} total_restore={}",
+                slate_widgets.size(),
+                viewport_roots_applied,
+                child_transforms_applied,
+                viewport_translation.x,
+                viewport_translation.y,
+                viewport_scale,
+                viewport_opacity,
+                child_translation.x,
+                child_translation.y,
+                child_scale,
+                g_daysgone_slate_widget_apply_count,
+                g_daysgone_slate_widget_restore_count);
+        }
+    };
+
+    auto* menu3d = daysgone_find_menu3d_object();
+    sdk::UObjectBase* widget{};
+    if (!daysgone_read_bend_widget_main(menu3d, widget)) {
+        apply_slate_widgets();
+        return;
+    }
+
+    sdk::UObjectBase* default_root{};
+    daysgone_read_value((uintptr_t)menu3d + 0x4F0, default_root);
+
+    auto& original = m_daysgone_bend_ui_originals;
+    if (original.captured &&
+        (original.menu3d != (uintptr_t)menu3d || original.widget_main != (uintptr_t)widget))
+    {
+        restore_daysgone_bend_ui_placement_fix_game_thread();
+    }
+
+    if (!original.captured) {
+        DaysGoneVec3 v3{};
+        DaysGoneVec2 v2{};
+
+        original.menu3d = (uintptr_t)menu3d;
+        original.widget_main = (uintptr_t)widget;
+        original.default_root = (uintptr_t)default_root;
+        daysgone_read_value((uintptr_t)menu3d + 0x5B0, original.distance_from_camera);
+        daysgone_read_value((uintptr_t)menu3d + 0x5B4, original.use_player_camera);
+        daysgone_read_value((uintptr_t)menu3d + 0x5E0, original.camera_fov);
+
+        if (daysgone_read_value((uintptr_t)widget + 0x170, v3)) { original.widget_location = {v3.x, v3.y, v3.z}; }
+        if (daysgone_read_value((uintptr_t)widget + 0x17C, v3)) { original.widget_rotation = {v3.x, v3.y, v3.z}; }
+        if (daysgone_read_value((uintptr_t)widget + 0x1B0, v3)) { original.widget_scale = {v3.x, v3.y, v3.z}; }
+        daysgone_read_value((uintptr_t)widget + 0x624, original.screen_scale);
+        if (daysgone_read_value((uintptr_t)widget + 0x628, v2)) { original.screen_offset = {v2.x, v2.y}; }
+        daysgone_read_value((uintptr_t)widget + 0x63C, original.draw_scale);
+        if (daysgone_read_value((uintptr_t)widget + 0x668, v2)) { original.pivot = {v2.x, v2.y}; }
+        daysgone_read_value((uintptr_t)widget + 0x651, original.disable_occlusion);
+        daysgone_read_value((uintptr_t)widget + 0x693, original.tick_when_offscreen);
+        daysgone_read_value((uintptr_t)widget + 0x739, original.tick_override);
+        daysgone_read_value((uintptr_t)widget + 0x73A, original.tick_enabled);
+
+        if (daysgone_object_pointer_is_readable(default_root)) {
+            if (daysgone_read_value((uintptr_t)default_root + 0x170, v3)) { original.root_location = {v3.x, v3.y, v3.z}; }
+            if (daysgone_read_value((uintptr_t)default_root + 0x17C, v3)) { original.root_rotation = {v3.x, v3.y, v3.z}; }
+            if (daysgone_read_value((uintptr_t)default_root + 0x1B0, v3)) { original.root_scale = {v3.x, v3.y, v3.z}; }
+        }
+
+        original.captured = true;
+
+        SPDLOG_INFO(
+            "[DaysGone][BendUIFix] Captured original placement menu={:x} widget={:x} root={:x}",
+            original.menu3d,
+            original.widget_main,
+            original.default_root);
+    }
+
+    const int mode = std::clamp(m_daysgone_bend_ui_mode->value(), 0, 2);
+    const bool apply_player_camera = mode == 0 || mode == 2;
+    const bool apply_widget = (mode == 1 || mode == 2) && m_daysgone_bend_ui_override_widget_transform->value();
+
+    if (apply_player_camera) {
+        daysgone_write_bool_bit((uintptr_t)menu3d + 0x5B4, m_daysgone_bend_ui_force_player_camera->value());
+        daysgone_write_value((uintptr_t)menu3d + 0x5B0, m_daysgone_bend_ui_distance_from_camera->value());
+        daysgone_write_value((uintptr_t)menu3d + 0x5E0, m_daysgone_bend_ui_camera_fov->value());
+    }
+
+    if (apply_widget) {
+        const auto scale = std::max(0.01f, m_daysgone_bend_ui_widget_scale->value());
+        daysgone_write_value((uintptr_t)widget + 0x170, DaysGoneVec3{
+            m_daysgone_bend_ui_widget_loc_x->value(),
+            m_daysgone_bend_ui_widget_loc_y->value(),
+            m_daysgone_bend_ui_widget_loc_z->value()});
+        daysgone_write_value((uintptr_t)widget + 0x17C, DaysGoneVec3{
+            m_daysgone_bend_ui_widget_rot_pitch->value(),
+            m_daysgone_bend_ui_widget_rot_yaw->value(),
+            m_daysgone_bend_ui_widget_rot_roll->value()});
+        daysgone_write_value((uintptr_t)widget + 0x1B0, DaysGoneVec3{scale, scale, scale});
+        daysgone_write_value((uintptr_t)widget + 0x624, std::max(0.01f, m_daysgone_bend_ui_screen_scale->value()));
+        daysgone_write_value((uintptr_t)widget + 0x628, DaysGoneVec2{
+            m_daysgone_bend_ui_screen_offset_x->value(),
+            m_daysgone_bend_ui_screen_offset_y->value()});
+        daysgone_write_value((uintptr_t)widget + 0x63C, std::max(0.01f, m_daysgone_bend_ui_draw_scale->value()));
+        daysgone_write_value((uintptr_t)widget + 0x668, DaysGoneVec2{0.5f, 0.5f});
+    }
+
+    if (m_daysgone_bend_ui_override_root_transform->value() && daysgone_object_pointer_is_readable(default_root)) {
+        daysgone_write_value((uintptr_t)default_root + 0x170, DaysGoneVec3{
+            m_daysgone_bend_ui_root_loc_x->value(),
+            m_daysgone_bend_ui_root_loc_y->value(),
+            m_daysgone_bend_ui_root_loc_z->value()});
+    }
+
+    if (m_daysgone_bend_ui_force_widget_refresh->value()) {
+        daysgone_write_bool_bit((uintptr_t)widget + 0x651, true); // bDisableOcclusion
+        daysgone_write_bool_bit((uintptr_t)widget + 0x653, true); // bRedrawRequested
+        daysgone_write_bool_bit((uintptr_t)widget + 0x654, true); // bForceRedrawRequested
+        daysgone_write_bool_bit((uintptr_t)widget + 0x693, true); // TickWhenOffscreen
+        daysgone_write_bool_bit((uintptr_t)widget + 0x739, true); // bShouldOverrideComponentTick
+    }
+
+    m_daysgone_bend_ui_last_menu3d.store((uintptr_t)menu3d);
+    m_daysgone_bend_ui_last_widget_main.store((uintptr_t)widget);
+    m_daysgone_bend_ui_apply_count.fetch_add(1);
+
+    SPDLOG_INFO_EVERY_N_SEC(
+        5,
+        "[DaysGone][BendUIFix] applied mode={} player={} widget={} menu={:x} widget={:x} loc=({:.1f},{:.1f},{:.1f}) rot=({:.1f},{:.1f},{:.1f}) scale={:.3f} screen_offset=({:.1f},{:.1f})",
+        mode,
+        apply_player_camera,
+        apply_widget,
+        (uintptr_t)menu3d,
+        (uintptr_t)widget,
+        m_daysgone_bend_ui_widget_loc_x->value(),
+        m_daysgone_bend_ui_widget_loc_y->value(),
+        m_daysgone_bend_ui_widget_loc_z->value(),
+        m_daysgone_bend_ui_widget_rot_pitch->value(),
+        m_daysgone_bend_ui_widget_rot_yaw->value(),
+        m_daysgone_bend_ui_widget_rot_roll->value(),
+        m_daysgone_bend_ui_widget_scale->value(),
+        m_daysgone_bend_ui_screen_offset_x->value(),
+        m_daysgone_bend_ui_screen_offset_y->value());
+
+    apply_slate_widgets();
+}
+
+void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, void* a2, void* a3,
+                                                                void* a4, void* params, void* unk1, void* unk2)
 {
 #ifdef FFAKE_STEREO_RENDERING_LOG_ALL_CALLS
     SPDLOG_INFO("SlateRHIRenderer::DrawWindow_RenderThread called!");
@@ -5792,36 +15303,52 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
     SPDLOG_INFO_ONCE("SlateRHIRenderer::DrawWindow_RenderThread called!");
 #endif
 
+    g_framework->notify_render_activity();
+
     if (!g_framework->is_game_data_intialized() || a2 == nullptr) {
         return g_hook->m_slate_thread_hook.call<void*>(renderer, a2, a3, a4, params, unk1, unk2);
     }
 
     auto viewport_info = (sdk::FViewportInfo*)a3;
     sdk::ISlateViewport* slate_viewport = nullptr; // UE5.5+
-    void** a4_ptr = (void**)a4;
+    UE55SlateDrawWindowPassInputsHead ue55_inputs{};
+    UE55SlateDrawWindowPassInputs ue55_inputs_full{};
+    bool a4_is_ue_5_5_variant = try_read_ue55_slate_draw_inputs(a4, renderer, ue55_inputs);
+    bool a4_has_ue_5_5_full_inputs = a4_is_ue_5_5_variant && try_read_ue55_slate_draw_inputs_full(a4, renderer, ue55_inputs_full);
+    bool ue55_inputs_are_from_windows_array = false;
+    void* ue55_draw_window_outputs_ptr = a2;
 
-    static bool a4_is_ue_5_5_variant = [&]() -> bool {
-        SPDLOG_INFO("[SlateRHIRenderer::DrawWindow_RenderThread] Checking if a4 is UE 5.5 variant...");
+    if (!a4_is_ue_5_5_variant && try_read_ue55_slate_draw_inputs(a4, a2, ue55_inputs)) {
+        // Some UE5.5 builds return FSlateDrawWindowPassOutputs by hidden sret
+        // pointer, so RCX is the output struct and RDX is the renderer.
+        a4_is_ue_5_5_variant = true;
+        a4_has_ue_5_5_full_inputs = try_read_ue55_slate_draw_inputs_full(a4, a2, ue55_inputs_full);
+        ue55_draw_window_outputs_ptr = renderer;
+        SPDLOG_INFO_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] Using UE 5.5 sret FSlateDrawWindowPassInputs layout");
+    }
 
-        __try {
-            if (a4_ptr[0] == renderer) {
-                SPDLOG_INFO("[SlateRHIRenderer::DrawWindow_RenderThread] a4 is UE 5.5 variant!");
-                return true;
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            SPDLOG_WARN("Exception occurred while checking if a4 is UE 5.5 variant!");
-        }
+    if (!a4_is_ue_5_5_variant &&
+        everwind_is_current_game() &&
+        try_read_ue55_slate_draw_windows_first_input(a3, renderer, ue55_inputs, ue55_inputs_full, a4_has_ue_5_5_full_inputs))
+    {
+        // Everwind/UE5.5.2's SlateOutputTexture string scan lands on
+        // DrawWindows_RenderThread, whose R8 is a TConstArrayView of inputs.
+        a4_is_ue_5_5_variant = true;
+        ue55_inputs_are_from_windows_array = true;
+        ue55_draw_window_outputs_ptr = nullptr;
+        SPDLOG_INFO_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] Using UE 5.5 DrawWindows array-view layout");
+    }
 
-        SPDLOG_INFO("[SlateRHIRenderer::DrawWindow_RenderThread] a4 is not UE 5.5 variant!");
-
-        return false;
-    }();
+    if (a4_is_ue_5_5_variant) {
+        SPDLOG_INFO_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] Using UE 5.5 FSlateDrawWindowPassInputs layout");
+        viewport_info = ue55_inputs.viewport_info;
+    }
 
     if (!a4_is_ue_5_5_variant) {
         // How are we going to fix this on UE5.5?
         g_hook->get_slate_thread_worker()->execute((FRHICommandListImmediate*)a2);
-    } else {
-        const auto window = (uintptr_t)a4_ptr[2];
+    } else if (!supports_ue55_dedicated_ui_target_for_current_game()) {
+        const auto window = (uintptr_t)ue55_inputs.window;
 
         static std::optional<size_t> viewport_offset = [&]() -> std::optional<size_t> {
             std::optional<size_t> result{};
@@ -5836,7 +15363,7 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
                 return result;
             }
 
-            SPDLOG_INFO("[SlateRHIRenderer::DrawWindow_RenderThread] Module within: {:x}", (uintptr_t)*module_within);
+            SPDLOG_DEBUG("[SlateRHIRenderer::DrawWindow_RenderThread] Module within: {:x}", (uintptr_t)*module_within);
 
             if (!g_hook->m_slate_thread_hook.disable().has_value()) {
                 SPDLOG_ERROR("[SlateRHIRenderer::DrawWindow_RenderThread] Failed to disable slate thread hook!");
@@ -5844,7 +15371,7 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
             }
 
             utility::ScopeGuard guard{[&]() {
-                SPDLOG_INFO("[SlateRHIRenderer::DrawWindow_RenderThread] Re-enabling slate thread hook!");
+                SPDLOG_DEBUG("[SlateRHIRenderer::DrawWindow_RenderThread] Re-enabling slate thread hook");
                 if (!g_hook->m_slate_thread_hook.enable().has_value()) {
                     SPDLOG_ERROR("[SlateRHIRenderer::DrawWindow_RenderThread] Failed to re-enable slate thread hook!");
                 }
@@ -5862,7 +15389,7 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
             std::span<uint8_t> window_bounds{(uint8_t*)window, (uint8_t*)window + 0x1000};
 
             utility::emulate(*module_within, ctx.ctx->Registers.RegRip, 1000, ctx, [&](const utility::ShemuContextExtended& ctx) -> utility::ExhaustionResult {
-                SPDLOG_INFO("[SlateRHIRenderer::DrawWindow_RenderThread] Emulating instruction: {:x} ({:X})", ctx.ctx->ctx->Registers.RegRip, ctx.ctx->ctx->Registers.RegRip - (uintptr_t)*module_within);
+                SPDLOG_DEBUG("[SlateRHIRenderer::DrawWindow_RenderThread] Emulating instruction: {:x} ({:X})", ctx.ctx->ctx->Registers.RegRip, ctx.ctx->ctx->Registers.RegRip - (uintptr_t)*module_within);
 
                 auto is_within_stack = [&](uintptr_t addr) -> bool {
                     return addr >= ctx.ctx->ctx->StackBase && addr < ctx.ctx->ctx->StackBase + ctx.ctx->ctx->StackSize;
@@ -6019,7 +15546,13 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
         }();
 
         if (viewport_offset) {
-            slate_viewport = *(sdk::ISlateViewport**)((uintptr_t)window + *viewport_offset);
+            sdk::ISlateViewport* candidate{};
+
+            if (safe_read_value((uintptr_t)window + *viewport_offset, candidate) && looks_like_vtable_object(candidate)) {
+                slate_viewport = candidate;
+            } else {
+                SPDLOG_WARN_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] UE 5.5 Slate viewport candidate was not a valid vtable object");
+            }
         }
     }
 
@@ -6051,33 +15584,305 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
         return call_orig();
     }
 
-    const auto ui_target = g_hook->get_render_target_manager()->get_ui_target();
+    sdk::FSlateResource* slate_resource = nullptr;
+    sdk::FSlateResource* provider_resource = nullptr;
+    FRHITexture2D* provider_texture = nullptr;
+    auto rtm = g_hook->get_render_target_manager();
+
+    if (supports_ue55_dedicated_ui_target_for_current_game() && a4_is_ue_5_5_variant) {
+        g_hook->note_stable_slate_draw();
+        g_hook->attempt_hook_ue55_slate_output_texture_register();
+
+        const auto expected_extent = a4_has_ue_5_5_full_inputs ? ue55_get_slate_expected_extent(ue55_inputs_full) : std::nullopt;
+
+        if (expected_extent) {
+            SPDLOG_INFO_EVERY_N_SEC(2,
+                "[UE5.5][SlateUI] DrawWindow trusted Slate extent [{}x{}] scene_rect min=[{},{}] max=[{},{}] scale={:.3f}",
+                expected_extent->width,
+                expected_extent->height,
+                ue55_inputs_full.scene_view_rect.min.x,
+                ue55_inputs_full.scene_view_rect.min.y,
+                ue55_inputs_full.scene_view_rect.max.x,
+                ue55_inputs_full.scene_view_rect.max.y,
+                ue55_inputs_full.viewport_scale_ui);
+
+            if (everwind_is_current_game() || is_deadzone_ue56_executable()) {
+                // Some UE5.5/5.6 titles already expose the correct UI texture
+                // through the D3D12 path while Slate's viewport resource path is
+                // unavailable. Reuse that target instead of clipping Slate through
+                // the scene or creating an unstable UObject RT.
+                const auto promoted_fallback =
+                    ue55_try_promote_fallback_ui_target(
+                        rtm,
+                        expected_extent,
+                        is_deadzone_ue56_executable() ? "Deadzone D3D12 UI fallback" : "Everwind D3D12 UI fallback");
+
+                if (!promoted_fallback && rtm->get_dedicated_ui_target() == nullptr) {
+                    SPDLOG_INFO_EVERY_N_SEC(2,
+                        "[UE5.5][SlateUI] {} waiting for D3D12 UI fallback target before rerouting SlateOutputTexture",
+                        is_deadzone_ue56_executable() ? "Deadzone" : "Everwind");
+                }
+            } else if (everspace2_is_current_game() &&
+                       rtm->get_dedicated_ui_width() != 0 &&
+                       rtm->get_dedicated_ui_height() != 0)
+            {
+                if (rtm->get_dedicated_ui_width() != expected_extent->width ||
+                    rtm->get_dedicated_ui_height() != expected_extent->height)
+                {
+                    SPDLOG_INFO_EVERY_N_SEC(
+                        2,
+                        "[Everspace2][UE5.5][SlateUI] Preserving stable UI extent [{}x{}] across DrawWindow extent [{}x{}]",
+                        rtm->get_dedicated_ui_width(),
+                        rtm->get_dedicated_ui_height(),
+                        expected_extent->width,
+                        expected_extent->height);
+                }
+
+                rtm->get_fallback_ui_target_ref() = nullptr;
+                rtm->ensure_dedicated_ui_target((uintptr_t)a2);
+            } else {
+                rtm->get_fallback_ui_target_ref() = nullptr;
+                rtm->request_dedicated_ui_target(expected_extent->width, expected_extent->height);
+                rtm->ensure_dedicated_ui_target((uintptr_t)a2);
+            }
+        } else {
+            SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.5][SlateUI] No trusted Slate extent yet; dedicated UI creation is deferred");
+        }
+
+        if (slate_viewport != nullptr) {
+            bool use_separate{};
+            bool stereo{};
+            const auto have_use_separate = try_call_slate_viewport_bool_slot(slate_viewport, 7, use_separate);
+            const auto have_stereo = try_call_slate_viewport_bool_slot(slate_viewport, 6, stereo);
+
+            SPDLOG_INFO_EVERY_N_SEC(2,
+                "[UE5.5][SlateUI] ISlateViewport={:x} UseSeparate={}{} IsStereoscopic3D={}{}",
+                (uintptr_t)slate_viewport,
+                have_use_separate ? "" : "unreadable/",
+                have_use_separate ? use_separate : false,
+                have_stereo ? "" : "unreadable/",
+                have_stereo ? stereo : false);
+
+            if (have_use_separate && use_separate) {
+                bool slate_viewport_faulted = false;
+                auto* direct_resource = try_get_slate_viewport_render_target_texture(slate_viewport, slate_viewport_faulted);
+                auto* direct_texture = direct_resource != nullptr ? direct_resource->get_mutable_resource() : nullptr;
+
+                if (slate_viewport_faulted) {
+                    SPDLOG_WARN_ONCE("[UE5.5][SlateUI] GetViewportRenderTargetTexture faulted; relying on DrawWindow outputs and dedicated target");
+                } else if (!everspace2_is_current_game() &&
+                           ue55_is_valid_ui_texture_candidate(rtm, direct_texture, expected_extent, "ISlateViewport direct texture"))
+                {
+                    rtm->set_dedicated_ui_target(direct_texture, expected_extent->width, expected_extent->height);
+                    rtm->get_fallback_ui_target_ref() = nullptr;
+                    if (should_preserve_promoted_ue55_slate_target()) {
+                        rtm->cancel_dedicated_ui_creation_preserving_target("UE5.5 promoted ISlateViewport direct texture");
+                    }
+                    SPDLOG_WARN_ONCE("[UE5.5][SlateUI] promoted ISlateViewport direct texture as dedicated UI target");
+                }
+            }
+        }
+
+        const auto ret = call_orig();
+        if (!ue55_inputs_are_from_windows_array && ue55_draw_window_outputs_ptr != nullptr) {
+            ue55_promote_slate_outputs(rtm, ue55_draw_window_outputs_ptr, expected_extent);
+        }
+        return ret;
+    }
+
+    if (slate_viewport != nullptr) {
+        bool slate_viewport_faulted = false;
+        slate_resource = try_get_slate_viewport_render_target_texture(slate_viewport, slate_viewport_faulted);
+
+        if (slate_viewport_faulted) {
+            SPDLOG_WARN_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] UE 5.5 Slate viewport resource call faulted; deferring to fallback path");
+        }
+    }
+
+    bool skip_ue56_viewport_provider = false;
+
+    if (viewport_info != nullptr && !a4_is_ue_5_5_variant && !is_ue_5_7_or_newer()) {
+        FRHITexture2D* known_texture = nullptr;
+
+        if (g_framework != nullptr && g_framework->is_dx12() && dune_awakening_is_current_game() && slate_resource != nullptr) {
+            // Dune's adopted scene RT and Slate provider resource can differ during startup.
+            // Prefer the actual Slate resource when resolving FViewportInfo so the provider
+            // scan is not poisoned by a known scene texture that the UI provider never owns.
+            known_texture = slate_resource->get_mutable_resource();
+        }
+
+        if (known_texture == nullptr) {
+            known_texture = rtm->get_render_target() != nullptr ? rtm->get_render_target() : (slate_resource != nullptr ? slate_resource->get_mutable_resource() : nullptr);
+        }
+
+        const auto known_texture_is_safe =
+            known_texture == nullptr ||
+            !is_ue_5_6_dx12_backend() ||
+            ue56_dx12_try_get_native_resource(known_texture, "FViewportInfo known texture");
+
+        if (!known_texture_is_safe) {
+            skip_ue56_viewport_provider = true;
+            SPDLOG_WARNING_EVERY_N_SEC(2,
+                "[UE5.6][RT] Skipping FViewportInfo::GetRenderTargetProvider probing because the known texture cannot expose a stable native resource; deferring to D3D12 hooks");
+        }
+
+        const auto viewport_rt_provider = known_texture != nullptr && known_texture_is_safe ? viewport_info->get_rt_provider(known_texture) : nullptr;
+
+        if (viewport_rt_provider != nullptr) {
+            provider_resource = viewport_rt_provider->get_viewport_render_target_texture();
+
+            if (provider_resource != nullptr) {
+                provider_texture = provider_resource->get_mutable_resource();
+            }
+        } else if (slate_viewport == nullptr && rtm->get_render_target() == nullptr) {
+            SPDLOG_INFO_EVERY_N_SEC(1, "No viewport RT provider, skipping!");
+            return call_orig();
+        }
+    } else if (viewport_info != nullptr && a4_is_ue_5_5_variant) {
+        SPDLOG_INFO_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] Skipping FViewportInfo RT provider probing on UE 5.5 direct Slate inputs");
+    } else if (viewport_info != nullptr && is_ue_5_7_or_newer()) {
+        SPDLOG_WARN_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] Skipping FViewportInfo RT provider probing on UE 5.7+ for stability");
+    }
+
+    if (slate_resource == nullptr) {
+        slate_resource = provider_resource;
+    }
+
+    if (slate_resource == nullptr) {
+        if (is_ue_5_8()) {
+            if (!g_hook->m_hooked_ue58_slate_output_texture_register) {
+                g_hook->attempt_hook_ue58_slate_output_texture_register();
+            }
+
+            if (rtm != nullptr) {
+                rtm->ensure_dedicated_ui_target((uintptr_t)a2);
+            }
+        }
+
+        SPDLOG_INFO_EVERY_N_SEC(1, "No slate resource, skipping!");
+        return call_orig();
+    }
+
+    const auto engine_texture = slate_resource->get_mutable_resource();
+    bool engine_texture_native_ok = true;
+    bool provider_texture_native_ok = true;
+    const auto vr_state = VR::get();
+    const bool ue56_d3d12_targets_ready =
+        is_ue_5_6_dx12_backend() &&
+        vr_state != nullptr &&
+        vr_state->has_d3d12_game_ui_textures() &&
+        rtm->get_render_target() != nullptr &&
+        rtm->get_ui_target() != nullptr;
+
+    if (engine_texture != nullptr && !IsBadReadPtr(engine_texture, sizeof(void*))) {
+        engine_texture_native_ok =
+            !is_ue_5_6_dx12_backend() ||
+            ue56_dx12_try_get_native_resource(engine_texture, "Slate viewport texture");
+
+        if (engine_texture_native_ok) {
+            FRHITexture2D::set_vtable(*(void**)engine_texture);
+            g_hook->note_stable_slate_draw();
+        } else if (!ue56_d3d12_targets_ready) {
+            SPDLOG_WARNING_EVERY_N_SEC(2,
+                "[UE5.6][RT] Not adopting Slate viewport texture because native-resource discovery failed; waiting for D3D12 texture/backbuffer hooks");
+        }
+
+        if (engine_texture_native_ok && rtm->get_render_target() == nullptr) {
+            SPDLOG_WARN_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] Adopting Slate viewport texture as render target fallback");
+            rtm->set_render_target(engine_texture);
+        }
+    }
+
+    if (provider_texture != nullptr && !IsBadReadPtr(provider_texture, sizeof(void*))) {
+        provider_texture_native_ok =
+            !is_ue_5_6_dx12_backend() ||
+            ue56_dx12_try_get_native_resource(provider_texture, "Viewport RT provider texture");
+    }
+
+    if (is_ue_5_7_or_newer()) {
+        if (is_ue_5_8()) {
+            if (!g_hook->m_hooked_ue58_slate_output_texture_register) {
+                g_hook->attempt_hook_ue58_slate_output_texture_register();
+            }
+        }
+
+        rtm->ensure_dedicated_ui_target((uintptr_t)a2);
+
+        if (!is_ue_5_8_or_newer() && !rtm->has_dedicated_ui_target() && !g_hook->m_hooked_ue57_slate_elements_pass) {
+            const auto now = std::chrono::steady_clock::now();
+
+            if (g_hook->m_ue57_dedicated_ui_missing_since.time_since_epoch().count() == 0) {
+                g_hook->m_ue57_dedicated_ui_missing_since = now;
+                g_hook->m_ue57_dedicated_ui_missing_frames = 0;
+            }
+
+            ++g_hook->m_ue57_dedicated_ui_missing_frames;
+
+            if (g_hook->m_ue57_dedicated_ui_missing_frames > 180 &&
+                now - g_hook->m_ue57_dedicated_ui_missing_since > std::chrono::seconds(3))
+            {
+                g_hook->attempt_hook_ue57_slate_elements_pass();
+            }
+        } else if (rtm->has_dedicated_ui_target()) {
+            g_hook->m_ue57_dedicated_ui_missing_since = {};
+            g_hook->m_ue57_dedicated_ui_missing_frames = 0;
+        }
+    }
+
+    auto ui_target = rtm->get_ui_target();
+    const auto render_target_fallback = rtm->get_render_target();
+    const auto daysgone_dx11_no_scene_as_ui = daysgone_is_current_game() && g_framework->is_dx11();
+
+    if (is_ue_5_7_or_newer()) {
+        if (rtm->has_dedicated_ui_target()) {
+            SPDLOG_WARN_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] Using explicit dedicated UI target on UE 5.7+");
+        }
+
+        auto& fallback_ui_target = rtm->get_fallback_ui_target_ref();
+
+        if (fallback_ui_target == render_target_fallback) {
+            fallback_ui_target = nullptr;
+        }
+
+        ui_target = rtm->get_ui_target();
+    } else {
+        if (daysgone_dx11_no_scene_as_ui && ui_target == render_target_fallback) {
+            SPDLOG_WARN_ONCE("[DaysGone] Clearing scene render target UI fallback before Slate DrawWindow");
+            rtm->get_fallback_ui_target_ref() = nullptr;
+            ui_target = nullptr;
+        }
+
+        if (ui_target == nullptr && provider_texture_native_ok && provider_texture != nullptr && !IsBadReadPtr(provider_texture, sizeof(void*)) && provider_texture != render_target_fallback) {
+            SPDLOG_WARN_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] Adopting viewport RT provider texture as dedicated UI target fallback");
+            ui_target = provider_texture;
+            rtm->get_fallback_ui_target_ref() = provider_texture;
+        }
+
+        if (ui_target == nullptr && engine_texture_native_ok && engine_texture != nullptr && !IsBadReadPtr(engine_texture, sizeof(void*)) && engine_texture != render_target_fallback) {
+            SPDLOG_WARN_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] Adopting Slate viewport texture as dedicated UI target fallback");
+            ui_target = engine_texture;
+            rtm->get_fallback_ui_target_ref() = engine_texture;
+        }
+
+        if (ui_target == nullptr && render_target_fallback != nullptr && !skip_ue56_viewport_provider && !daysgone_dx11_no_scene_as_ui) {
+            SPDLOG_WARN_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] Falling back to render target because no dedicated UI target was recovered");
+            ui_target = render_target_fallback;
+            rtm->get_fallback_ui_target_ref() = render_target_fallback;
+        } else if (ui_target == nullptr && render_target_fallback != nullptr && daysgone_dx11_no_scene_as_ui) {
+            SPDLOG_WARN_ONCE("[DaysGone] Not replacing Slate viewport with the scene RT; using Bend's in-scene Slate composite");
+        }
+    }
 
     if (ui_target == nullptr) {
+        if (is_ue_5_7_or_newer()) {
+            SPDLOG_INFO_EVERY_N_SEC(1, "[SlateRHIRenderer::DrawWindow_RenderThread] No dedicated UI target yet");
+            return call_orig();
+        }
+
         SPDLOG_INFO_EVERY_N_SEC(1, "No UI target, skipping!");
         return call_orig();
     }
 
-    sdk::FSlateResource* slate_resource = nullptr;
-
-    if (slate_viewport != nullptr) {
-        slate_resource = slate_viewport->GetViewportRenderTargetTexture();
-    } else {
-        const auto viewport_rt_provider = viewport_info->get_rt_provider(g_hook->get_render_target_manager()->get_render_target());
-
-        if (viewport_rt_provider == nullptr) {
-            SPDLOG_INFO_EVERY_N_SEC(1, "No viewport RT provider, skipping!");
-            return call_orig();
-        }
-    
-        slate_resource = viewport_rt_provider->get_viewport_render_target_texture();
-    }
-
-    if (slate_resource == nullptr) {
-        SPDLOG_INFO_EVERY_N_SEC(1, "No slate resource, skipping!");
-        return call_orig();
-    }
-    
     // Replace the texture with one we have control over.
     // This isolates the UI to render on our own texture separate from the scene.
     const auto old_texture = slate_resource->get_mutable_resource();
@@ -6146,6 +15951,14 @@ __declspec(noinline) bool VRRenderTargetManager::NeedReAllocateShadingRateTextur
     return false;
 }
 
+bool VRRenderTargetManager_Base::should_use_separate_render_target() const {
+    if (dune_should_preserve_native_viewport_target()) {
+        return false;
+    }
+
+    return true;
+}
+
 void VRRenderTargetManager_Base::update_viewport(bool use_separate_rt, const sdk::FViewport& vp, class SViewport* vp_widget) {
     SPDLOG_INFO_ONCE("VRRenderTargetManager_Base::update_viewport called! {} {:x} {:x}", use_separate_rt, (uintptr_t)&vp, (uintptr_t)vp_widget);
 
@@ -6153,7 +15966,68 @@ void VRRenderTargetManager_Base::update_viewport(bool use_separate_rt, const sdk
         return;
     }
 
+    shf_force_scene_viewport_separate_rt(vp, "RenderTargetManager::UpdateViewport");
+
     //SPDLOG_INFO("Widget: {:x}", (uintptr_t)ViewportWidget);
+}
+
+bool VRRenderTargetManager_Base::publish_everspace2_scene_target_snapshot(
+    FRHITexture2D* source_texture,
+    ID3D12Resource* resource,
+    const D3D12_RESOURCE_DESC& desc,
+    const char* source)
+{
+    if (source_texture == nullptr ||
+        resource == nullptr ||
+        desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        desc.Width == 0 ||
+        desc.Height == 0)
+    {
+        return false;
+    }
+
+    const auto current = everspace2_scene_target_snapshot.load(std::memory_order_acquire);
+    if (current != nullptr &&
+        current->source_texture == (uintptr_t)source_texture &&
+        current->resource.Get() == resource &&
+        current->desc.Width == desc.Width &&
+        current->desc.Height == desc.Height &&
+        current->desc.Format == desc.Format)
+    {
+        return true;
+    }
+
+    auto next = std::make_shared<Everspace2D3D12SceneTargetSnapshot>();
+    next->resource = resource;
+    next->desc = desc;
+    next->source_texture = (uintptr_t)source_texture;
+    next->generation = everspace2_scene_target_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+    next->source = source;
+
+    if (next->resource == nullptr) {
+        return false;
+    }
+
+    const auto previous =
+        everspace2_scene_target_snapshot.exchange(next, std::memory_order_acq_rel);
+
+    SPDLOG_INFO(
+        "[Everspace2][SceneTargetSnapshot] publish generation={} source={} "
+        "frhi={:x} native={:x} previous_generation={} previous_frhi={:x} previous_native={:x} "
+        "size={}x{} format={} flags=0x{:x}",
+        next->generation,
+        source != nullptr ? source : "<unknown>",
+        (uintptr_t)source_texture,
+        (uintptr_t)resource,
+        previous != nullptr ? previous->generation : 0,
+        previous != nullptr ? previous->source_texture : 0,
+        previous != nullptr ? (uintptr_t)previous->resource.Get() : 0,
+        desc.Width,
+        desc.Height,
+        (uint32_t)desc.Format,
+        (uint32_t)desc.Flags);
+
+    return true;
 }
 
 void VRRenderTargetManager_Base::calculate_render_target_size(const sdk::FViewport& viewport, uint32_t& x, uint32_t& y) {
@@ -6167,18 +16041,42 @@ void VRRenderTargetManager_Base::calculate_render_target_size(const sdk::FViewpo
         return;
     }
 
-    SPDLOG_INFO("RenderTargetSize Before: {}x{}", x, y);
+    if (dune_should_preserve_native_viewport_target()) {
+        SPDLOG_INFO_EVERY_N_SEC(
+            2,
+            "[Dune][CustomPresent] Preserving the game's native viewport extent {}x{}",
+            x,
+            y);
+        return;
+    }
+
+    if (is_ue_5_7_or_newer() && x > 0 && y > 0) {
+        // UE 5.7 still reports the pre-VR Slate/window size here before we overwrite it
+        // with the stereo render target size. Keep it so the UI path can stay full-width.
+        this->request_dedicated_ui_target(x, y);
+    }
 
     x = VR::get()->get_hmd_width() * 2;
     y = VR::get()->get_hmd_height();
 
-    SPDLOG_INFO("RenderTargetSize After: {}x{}", x, y);
+    SPDLOG_DEBUG("RenderTargetSize After: {}x{}", x, y);
 }
 
 bool VRRenderTargetManager_Base::need_reallocate_view_target(const sdk::FViewport& Viewport) {
     SPDLOG_INFO_ONCE("VRRenderTargetManager_Base::need_reallocate_view_target called!");
 
     if (!g_framework->is_game_data_intialized()) {
+        return false;
+    }
+
+    if (dune_should_preserve_native_viewport_target()) {
+        if (g_hook->should_recreate_textures()) {
+            SPDLOG_WARN("[Dune][CustomPresent] Reallocating the viewport once for Dune's native custom-present target");
+            this->destroy_scene_capture();
+            g_hook->set_should_recreate_textures(false);
+            return true;
+        }
+
         return false;
     }
 
@@ -6303,7 +16201,174 @@ bool VRRenderTargetManager_Base::need_reallocate_depth_texture(const void* Depth
 }
 
 void VRRenderTargetManager_Base::pre_texture_hook_callback(safetyhook::Context& ctx, bool from_second) {
-    SPDLOG_INFO("PreTextureHook called! {}", ctx.r8);
+    if (g_framework->is_dx12() && shf_is_current_game()) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[SHf] PreTextureHook summary last_desc={:x}", ctx.r8);
+    } else if (is_ue_5_1_dx12_backend()) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.1][RTChurn] PreTextureHook summary last_desc={:x}", ctx.r8);
+    } else {
+        SPDLOG_INFO("PreTextureHook called! {}", ctx.r8);
+    }
+
+    auto rtm = g_hook->get_render_target_manager();
+
+    if (g_framework->is_dx12() && dune_awakening_is_current_game()) {
+        SPDLOG_WARN_ONCE(
+            "[Dune][RT] Allowing separate render-target texture creation; "
+            "D3D12 descriptor-cache guard remains responsible for the old SetRenderTargets crash path");
+    }
+
+    if (g_framework->is_dx12() && pitpanic_is_current_game() && is_ue_5_7_or_newer()) {
+        // Pit Panic 5.7.2's resolved texture-desc helper copies an internal
+        // TArray<EPixelFormat>. Replaying it into UEVR's scratch byte buffer can
+        // trip UE's sized-allocation assert. Let the engine allocation run and
+        // adopt the resulting texture refs in the post hook instead.
+        SPDLOG_WARN_ONCE("[PitPanic] Skipping UE 5.7 DX12 pre-texture duplicate creation; using engine-created RT refs");
+        return;
+    }
+
+    if (g_framework->is_dx12() && everspace2_is_current_game() && is_ue_5_5_runtime()) {
+        // ES2's UE5.5.4 cutscene transitions recycle pooled render targets.
+        // Replaying RHICreateTexture here creates an extra engine RHI object
+        // whose lifetime is not represented safely in that pool. Track the
+        // original output ref and let the dedicated Slate path own UI instead.
+        if (!rtm->is_pre_texture_call_e8 &&
+            ctx.rdx != 0 &&
+            !IsBadReadPtr((void*)ctx.rdx, sizeof(FTexture2DRHIRef)))
+        {
+            rtm->texture_hook_ref = (FTexture2DRHIRef*)ctx.rdx;
+        }
+
+        SPDLOG_WARN_ONCE(
+            "[Everspace2][UE5.5][TextureReplay] Skipping duplicate RHICreateTexture call; "
+            "tracking the engine scene target and using dedicated Slate UI routing");
+        return;
+    }
+
+    if (g_framework->is_dx12() && is_ue_5_7_or_newer()) {
+        if (rtm->texture_desc_prepare_func == 0 || rtm->texture_create_wrapper_func == 0 || rtm->texture_finalize_func == 0) {
+            SPDLOG_WARN_ONCE("Skipping pre-texture duplication on UE 5.7+ DX12 because the real texture wrapper/finalize sequence was not resolved");
+            return;
+        }
+
+        if (!rtm->allocate_texture_called) {
+            SPDLOG_ERROR("AllocateTexture not called yet! (UE 5.7 PreTextureHook)");
+            return;
+        }
+
+        if (ctx.r8 == 0 || IsBadReadPtr((void*)ctx.r8, sizeof(void*))) {
+            SPDLOG_WARN_ONCE("Skipping UE 5.7 pre-texture duplication because the texture desc pointer is invalid");
+            return;
+        }
+
+        using PrepareDescFn = void(*)(void*, const void*);
+        using CreateTextureWrapperFn = void*(*)(void*, void*, const void*);
+        using FinalizeTextureFn = void(*)(void*, FTexture2DRHIRef*);
+
+        alignas(16) std::array<uint8_t, 0x80> copied_desc{};
+        alignas(16) std::array<uint8_t, 0x90> texture_initializer{};
+        static FTexture2DRHIRef duplicated_ui_texture{};
+
+        ((PrepareDescFn)rtm->texture_desc_prepare_func)(copied_desc.data(), (const void*)ctx.r8);
+
+        const auto scan_x = VR::get()->get_hmd_width() * 2;
+        const auto scan_y = VR::get()->get_hmd_height();
+        const auto requested_width = rtm->get_dedicated_ui_width() != 0 ? rtm->get_dedicated_ui_width() : (uint32_t)g_framework->get_d3d12_rt_size().x;
+        const auto requested_height = rtm->get_dedicated_ui_height() != 0 ? rtm->get_dedicated_ui_height() : (uint32_t)g_framework->get_d3d12_rt_size().y;
+
+        bool patched_desc = false;
+
+        for (auto i = 0; i < 0x60; ++i) {
+            auto& x = *(int32_t*)(copied_desc.data() + i);
+            auto& y = *(int32_t*)(copied_desc.data() + i + 4);
+
+            if (x == (int32_t)scan_x && y == (int32_t)scan_y) {
+                SPDLOG_INFO("UE 5.7: Found scene render target extent at desc offset 0x{:x}; duplicating UI extent as [{}x{}]", i, requested_width, requested_height);
+                x = (int32_t)requested_width;
+                y = (int32_t)requested_height;
+
+                auto* format = copied_desc.data() + i + 15;
+                if (*format == 18) {
+                    *format = 2;
+                }
+
+                patched_desc = true;
+                break;
+            }
+        }
+
+        if (!patched_desc) {
+            SPDLOG_WARN_ONCE("Skipping UE 5.7 pre-texture duplication because the texture desc width/height pair could not be found");
+            return;
+        }
+
+        duplicated_ui_texture.texture = nullptr;
+
+        ((CreateTextureWrapperFn)rtm->texture_create_wrapper_func)((void*)ctx.rcx, texture_initializer.data(), copied_desc.data());
+        ((FinalizeTextureFn)rtm->texture_finalize_func)(texture_initializer.data(), &duplicated_ui_texture);
+
+        if (duplicated_ui_texture.texture == nullptr || IsBadReadPtr(duplicated_ui_texture.texture, sizeof(void*))) {
+            SPDLOG_WARN_ONCE("UE 5.7 UI duplication ran but did not produce a texture");
+            return;
+        }
+
+        FRHITexture2D::set_vtable(*(void**)duplicated_ui_texture.texture);
+        rtm->set_dedicated_ui_target(duplicated_ui_texture.texture, requested_width, requested_height);
+        rtm->get_fallback_ui_target_ref() = nullptr;
+
+        SPDLOG_WARN_ONCE("UE 5.7 created a dedicated UI texture through the real texture wrapper path");
+        SPDLOG_INFO("UE 5.7 dedicated UI texture: {:x} [{}x{}]", (uintptr_t)duplicated_ui_texture.texture, requested_width, requested_height);
+
+        VR::get()->reinitialize_renderer();
+        return;
+    }
+
+    if (is_ue_5_1_dx12_backend() && rtm->allocate_texture_called) {
+        const auto size = g_framework->get_d3d12_rt_size();
+
+        if (ue51_can_reuse_current_ui_target(rtm, (uint32_t)size.x, (uint32_t)size.y)) {
+            // The engine allocation still continues after this pre-hook. Reusing the
+            // existing duplicate UI target avoids rebuilding UEVR's UI texture every
+            // frame when UE 5.1 repeatedly hits the same RT allocation path.
+            if (rtm->is_using_texture_desc && rtm->is_version_greq_5_1) {
+                if (!rtm->is_pre_texture_call_e8 &&
+                    ctx.rdx != 0 && !IsBadReadPtr((void*)ctx.rdx, sizeof(FTexture2DRHIRef)))
+                {
+                    rtm->texture_hook_ref = (FTexture2DRHIRef*)ctx.rdx;
+                } else if (rtm->is_pre_texture_call_e8 &&
+                    ctx.rcx != 0 && !IsBadReadPtr((void*)ctx.rcx, sizeof(FTexture2DRHIRef)))
+                {
+                    rtm->texture_hook_ref = (FTexture2DRHIRef*)ctx.rcx;
+                }
+            }
+
+            SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.1][RTChurn] Reusing stable UI texture; skipping duplicate UI texture creation");
+            return;
+        }
+    }
+
+    if (g_framework->is_dx12() && shf_is_current_game() && rtm->allocate_texture_called) {
+        const auto size = g_framework->get_d3d12_rt_size();
+
+        if (shf_can_reuse_current_ui_target(rtm, (uint32_t)size.x, (uint32_t)size.y)) {
+            if (rtm->is_using_texture_desc && rtm->is_version_greq_5_1 && !rtm->is_pre_texture_call_e8 &&
+                ctx.rdx != 0 && !IsBadReadPtr((void*)ctx.rdx, sizeof(FTexture2DRHIRef)))
+            {
+                rtm->texture_hook_ref = (FTexture2DRHIRef*)ctx.rdx;
+                SPDLOG_INFO_EVERY_N_SEC(2, "[SHf] Reusing stable UI texture; tracking current UE5 texture-desc output ref {:x}", ctx.rdx);
+            }
+
+            return;
+        }
+    }
+
+    if (g_framework->is_dx11() && daysgone_is_current_game()) {
+        // Days Gone is UE4.11/D3D11 and its Slate/RT path can fatal if UEVR
+        // replays the texture-create call with a forced UI format while keeping
+        // UAV-capable flags. Let the original engine allocation run and adopt
+        // the resulting refs in the post hook instead.
+        SPDLOG_WARN_ONCE("[DaysGone] Skipping D3D11 pre-texture duplicate creation; using engine-created RT refs");
+        return;
+    }
 
     // maybe do some work later to bruteforce the registers/offsets for these
     // a la emulation or something more rudimentary
@@ -6311,8 +16376,6 @@ void VRRenderTargetManager_Base::pre_texture_hook_callback(safetyhook::Context& 
     // refers to the current pixel format, which we can overwrite (which may not be safe)
     // so we could just follow how the global is being written to registers or the stack
     // and then just overwrite the registers/stack with our own values
-    auto rtm = g_hook->get_render_target_manager();
-
     if (!rtm->allocate_texture_called) {
         SPDLOG_ERROR("AllocateTexture not called yet! (PreTextureHook)");
         return;
@@ -6649,7 +16712,6 @@ void VRRenderTargetManager_Base::pre_texture_hook_callback(safetyhook::Context& 
 
             int32_t old_width{};
             int32_t old_height{};
-
             for (auto i = 0; i < 0x100; ++i) {
                 auto& x = *(int32_t*)(ctx.r9 + i);
                 auto& y = *(int32_t*)(ctx.r9 + i + 4);
@@ -6678,7 +16740,7 @@ void VRRenderTargetManager_Base::pre_texture_hook_callback(safetyhook::Context& 
             }
 
             func(ctx.rcx, &out, ctx.r8, ctx.r9,
-                stack_args[0], stack_args[1], 
+                stack_args[0], stack_args[1],
                 stack_args[2], stack_args[3],
                 stack_args[4],
                 stack_args[5], stack_args[6],
@@ -6790,7 +16852,17 @@ void VRRenderTargetManager_Base::pre_texture_hook_callback(safetyhook::Context& 
         rtm->ui_target = out.texture;
     } else {
         SPDLOG_INFO("Calling E8 version of texture create");
-        
+
+        if (is_ue57_dx11_backend() && rtm->is_using_texture_desc && rtm->is_version_greq_5_1) {
+            if (is_probable_ue57_dx11_texture_desc_prepare_function(func_ptr)) {
+                SPDLOG_WARN_ONCE("Skipping UE 5.7 D3D11 texture-desc prepare helper");
+                return;
+            }
+
+            SPDLOG_WARN_ONCE("Skipping UE 5.7 D3D11 texture-create replay; RHICmdList texture initializers are not safe to duplicate here");
+            return;
+        }
+
         // check if RCX is near the stack pointer
         // if it is then it's a different form of E8 call that takes the texture in the first parameter.
         if (ctx.rcx != 0 && std::abs((int64_t)ctx.rcx - (int64_t)ctx.rsp) <= 0x300) {
@@ -6976,6 +17048,7 @@ void VRRenderTargetManager_Base::pre_texture_hook_callback(safetyhook::Context& 
         SPDLOG_ERROR("Failed to create UI texture!");
     } else {
         SPDLOG_INFO("Created UI texture at {:x}", (uintptr_t)out.texture);
+        ue51_note_ui_created(out.texture, (uint32_t)size.x, (uint32_t)size.y);
     }
 
     //call_with_context((uintptr_t)func, out);
@@ -6989,14 +17062,19 @@ void VRRenderTargetManager_Base::pre_texture_hook_callback(safetyhook::Context& 
 void VRRenderTargetManager_Base::texture_hook_callback(safetyhook::Context& ctx, bool from_second) {
     auto rtm = g_hook->get_render_target_manager();
 
-    SPDLOG_INFO("Post texture hook called!");
-    SPDLOG_INFO(" Ref: {:x}", (uintptr_t)rtm->texture_hook_ref);
+    if (g_framework->is_dx12() && shf_is_current_game()) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[SHf] PostTextureHook summary last_ref={:x}", (uintptr_t)rtm->texture_hook_ref);
+    } else if (is_ue_5_1_dx12_backend()) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.1][RTChurn] PostTextureHook summary last_ref={:x}", (uintptr_t)rtm->texture_hook_ref);
+    } else {
+        SPDLOG_INFO("Post texture hook called!");
+        SPDLOG_INFO(" Ref: {:x}", (uintptr_t)rtm->texture_hook_ref);
+    }
 
     if (!rtm->allocate_texture_called) {
         g_hook->set_should_recreate_textures(true);
-        rtm->render_target = nullptr;
-        rtm->ui_target = nullptr;
         rtm->texture_hook_ref = nullptr;
+        rtm->shader_resource_hook_ref = nullptr;
 
         SPDLOG_INFO("[Post texture hook] Allocate texture was not called, skipping...");
         return;
@@ -7013,39 +17091,223 @@ void VRRenderTargetManager_Base::texture_hook_callback(safetyhook::Context& ctx,
         }
     }
 
+    auto is_valid_texture_candidate = [&](FRHITexture2D* candidate, const char* source) -> bool {
+        if (candidate == nullptr || IsBadReadPtr(candidate, sizeof(void*))) {
+            return false;
+        }
+
+        void* vtable{};
+
+        try {
+            vtable = *(void**)candidate;
+        } catch (...) {
+            return false;
+        }
+
+        if (vtable == nullptr || IsBadReadPtr(vtable, sizeof(void*))) {
+            SPDLOG_INFO_EVERY_N_SEC(1, " Rejected texture candidate from {} because the vtable is invalid", source);
+            return false;
+        }
+
+        if (!utility::get_module_within(vtable).has_value()) {
+            SPDLOG_INFO_EVERY_N_SEC(1, " Rejected texture candidate from {} because its vtable {:x} is not inside a module", source, (uintptr_t)vtable);
+            return false;
+        }
+
+        FRHITexture2D::set_vtable(vtable);
+        return true;
+    };
+
+    auto recover_texture_from_ref = [&](uintptr_t ref_ptr, const char* source) -> FRHITexture2D* {
+        if (ref_ptr == 0 || IsBadReadPtr((void*)ref_ptr, sizeof(FTexture2DRHIRef))) {
+            return nullptr;
+        }
+
+        const auto ref = (FTexture2DRHIRef*)ref_ptr;
+
+        if (!is_valid_texture_candidate(ref->texture, source)) {
+            return nullptr;
+        }
+
+        SPDLOG_INFO(" Recovered texture from {}: {:x}", source, (uintptr_t)ref->texture);
+        return ref->texture;
+    };
+
+    auto try_promote_dedicated_ui_candidate = [&](FRHITexture2D* candidate, const char* source) -> bool {
+        if (!is_ue_5_7_or_newer() || !g_framework->is_dx12()) {
+            return false;
+        }
+
+        if (!is_valid_texture_candidate(candidate, source) || candidate == rtm->get_render_target()) {
+            return false;
+        }
+
+        const auto native = (ID3D12Resource*)candidate->get_native_resource();
+
+        if (native == nullptr || IsBadReadPtr(native, sizeof(void*))) {
+            return false;
+        }
+
+        const auto desc = native->GetDesc();
+
+        if (desc.Width == 0 || desc.Height == 0) {
+            return false;
+        }
+
+        const auto requested_width = rtm->get_dedicated_ui_width();
+        const auto requested_height = rtm->get_dedicated_ui_height();
+
+        if (requested_width == 0 || requested_height == 0) {
+            return false;
+        }
+
+        if (desc.Width != requested_width || desc.Height != requested_height) {
+            SPDLOG_INFO_EVERY_N_SEC(1,
+                "[VRRenderTargetManager] Rejected UE 5.7 UI candidate from {} because size [{}x{}] != requested [{}x{}]",
+                source, desc.Width, desc.Height, requested_width, requested_height);
+            return false;
+        }
+
+        rtm->set_dedicated_ui_target(candidate, desc.Width, desc.Height);
+        rtm->get_fallback_ui_target_ref() = nullptr;
+
+        SPDLOG_WARN_ONCE("[VRRenderTargetManager] Promoted an engine-created texture to the dedicated UI target");
+        SPDLOG_INFO("[VRRenderTargetManager] dedicated UI target from {} [{:x}] [{}x{}]",
+            source, (uintptr_t)candidate, desc.Width, desc.Height);
+
+        return true;
+    };
+
     FRHITexture2D* texture = nullptr;
+    const char* texture_source = "unknown";
 
     if (rtm->texture_hook_ref != nullptr) {
         texture = rtm->texture_hook_ref->texture;
+        texture_source = "texture_hook_ref";
 
         // happens?
         if (texture == nullptr) {
-            SPDLOG_INFO(" Texture is null, trying to get it from RAX...");
-
-            const auto ref = (FTexture2DRHIRef*)ctx.rax;
-
-            if (!IsBadReadPtr(ref, sizeof(void*)) && !IsBadReadPtr(ref->texture, sizeof(void*))) {
-                texture = ref->texture;
+            if (g_framework->is_dx12() && is_ue_5_7_or_newer() && rtm->texture_finalize_func != 0) {
+                SPDLOG_INFO_EVERY_N_SEC(1, " Texture is null after UE 5.7 finalize hook; skipping unreliable RAX fallback");
             } else {
-                SPDLOG_ERROR(" RAX is bad! Can't get texture!");
+                SPDLOG_INFO(" Texture is null, trying to get it from RAX...");
+
+                const auto ref = (FTexture2DRHIRef*)ctx.rax;
+
+                if (!IsBadReadPtr(ref, sizeof(void*)) && is_valid_texture_candidate(ref->texture, "RAX")) {
+                    texture = ref->texture;
+                    texture_source = "RAX";
+                } else {
+                    SPDLOG_ERROR(" RAX is bad! Can't get texture!");
+                }
             }
         }
 
-        if (texture != nullptr) {
-            SPDLOG_INFO(" Resulting texture: {:x}", (uintptr_t)texture);
-            SPDLOG_INFO(" Real resource: {:x}", (uintptr_t)texture->get_native_resource());
-            
-            FRHITexture2D::set_vtable(*(void**)texture);
+        if (is_valid_texture_candidate(texture, "texture_hook_ref")) {
+            if (shf_is_current_game() && g_framework->is_dx12()) {
+                shf_log_rtm_candidate(rtm, texture, texture_source);
+            } else if (is_ue_5_1_dx12_backend()) {
+                SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.1][RTChurn] Resulting texture summary source={} tex={:x}",
+                    texture_source, (uintptr_t)texture);
+            } else {
+                SPDLOG_INFO(" Resulting texture: {:x}", (uintptr_t)texture);
+                SPDLOG_INFO(" Real resource: {:x}", (uintptr_t)texture->get_native_resource());
+            }
         } else {
+            texture = nullptr;
             SPDLOG_INFO(" Texture is still null!");
         }
     }
 
-    SPDLOG_INFO(" last texture index: {}", rtm->last_texture_index);
+    if ((!shf_is_current_game() || !g_framework->is_dx12()) && !is_ue_5_1_dx12_backend()) {
+        SPDLOG_INFO(" last texture index: {}", rtm->last_texture_index);
+    }
 
-    rtm->render_target = texture;
-    //rtm->ui_target = texture;
+    if (texture != nullptr) {
+        rtm->render_target = texture;
+    }
+
+    bool dedicated_ui_promoted = false;
+
+    if (rtm->shader_resource_hook_ref != nullptr && rtm->shader_resource_hook_ref->texture != nullptr) {
+        dedicated_ui_promoted = try_promote_dedicated_ui_candidate(rtm->shader_resource_hook_ref->texture, "shader_resource_hook_ref");
+    }
+
+    const auto daysgone_dx11_no_scene_as_ui = daysgone_is_current_game() && g_framework->is_dx11();
+    const auto everspace2_dx12_dedicated_ui_only =
+        everspace2_is_current_game() && g_framework->is_dx12() && is_ue_5_5_runtime();
+
+    if (!dedicated_ui_promoted &&
+        !everspace2_dx12_dedicated_ui_only &&
+        !is_ue_5_7_or_newer() &&
+        rtm->get_fallback_ui_target_ref() == nullptr &&
+        rtm->shader_resource_hook_ref != nullptr)
+    {
+        const auto shader_texture = rtm->shader_resource_hook_ref->texture;
+
+        if (shader_texture != nullptr && !(daysgone_dx11_no_scene_as_ui && shader_texture == rtm->get_render_target())) {
+            SPDLOG_INFO(" Falling back to original shader resource texture as UI target: {:x}", (uintptr_t)shader_texture);
+            FRHITexture2D::set_vtable(*(void**)shader_texture);
+            rtm->get_fallback_ui_target_ref() = shader_texture;
+        } else if (shader_texture != nullptr) {
+            SPDLOG_WARN_ONCE("[DaysGone] Refusing to use scene render target shader resource as a VR UI layer");
+        }
+    }
+
+    if (!dedicated_ui_promoted &&
+        !everspace2_dx12_dedicated_ui_only &&
+        rtm->get_fallback_ui_target_ref() == nullptr)
+    {
+        for (const auto& candidate : {
+                std::pair{(uintptr_t)rtm->shader_resource_hook_ref, "shader_resource_hook_ref"},
+                std::pair{ctx.rdx, "RDX"},
+                std::pair{ctx.rcx, "RCX"},
+                std::pair{ctx.r8, "R8"},
+                std::pair{ctx.r9, "R9"},
+                std::pair{ctx.rax, "RAX"},
+            })
+        {
+            const auto recovered = recover_texture_from_ref(candidate.first, candidate.second);
+
+            if (recovered != nullptr) {
+                if (try_promote_dedicated_ui_candidate(recovered, candidate.second)) {
+                    dedicated_ui_promoted = true;
+                    break;
+                }
+
+                if (!is_ue_5_7_or_newer()) {
+                    if (daysgone_dx11_no_scene_as_ui && recovered == rtm->get_render_target()) {
+                        SPDLOG_WARN_ONCE("[DaysGone] Refusing recovered scene render target as a VR UI layer");
+                        continue;
+                    }
+
+                    rtm->get_fallback_ui_target_ref() = recovered;
+                }
+                break;
+            }
+        }
+    }
+
+    if (!is_ue_5_7_or_newer() && rtm->get_fallback_ui_target_ref() == nullptr && texture != nullptr) {
+        if (daysgone_dx11_no_scene_as_ui) {
+            // Days Gone composites Slate through BendTemporalAA into the scene RT.
+            // Treating that scene RT as a separate VR UI layer duplicates/crops the
+            // full scene in the overlay and pushes the menu/HUD to the wrong place.
+            SPDLOG_WARN_ONCE("[DaysGone] Skipping render-target-as-UI fallback; leaving Bend Slate composite in the scene");
+        } else if (everspace2_dx12_dedicated_ui_only) {
+            SPDLOG_WARN_ONCE(
+                "[Everspace2][UE5.5][SlateUI] Refusing scene render target as UI fallback; "
+                "waiting for the rooted dedicated Slate target");
+        } else {
+            SPDLOG_WARN(" Falling back to render target texture as UI target: {:x}", (uintptr_t)texture);
+            rtm->get_fallback_ui_target_ref() = texture;
+        }
+    } else if (is_ue_5_7_or_newer() && rtm->get_fallback_ui_target_ref() == nullptr && texture != nullptr) {
+        SPDLOG_WARN_ONCE("Skipping render-target-as-UI fallback on UE 5.7+; waiting for a dedicated UI target");
+    }
+
     rtm->texture_hook_ref = nullptr;
+    rtm->shader_resource_hook_ref = nullptr;
     ++rtm->last_texture_index;
 }
 
@@ -7078,6 +17340,557 @@ void VRRenderTargetManager_Base::destroy_scene_capture() try {
     });
 } catch (...) {
     SPDLOG_ERROR("[VRRenderTargetManager] Unknown exception in destroy_scene_capture!");
+}
+
+void VRRenderTargetManager_Base::destroy_dedicated_ui_target() {
+    if (dedicated_ui_texture != nullptr && dedicated_ui_texture.valid()) {
+        auto rooted_texture = dedicated_ui_texture;
+
+        GameThreadWorker::get().enqueue([rooted_texture]() mutable {
+            if (rooted_texture != nullptr && rooted_texture.valid()) {
+                unroot_dedicated_ui_texture(rooted_texture.get());
+            }
+        });
+    }
+
+    if (in_flight_dedicated_ui_texture != nullptr) {
+        auto* rooted_texture = in_flight_dedicated_ui_texture;
+
+        GameThreadWorker::get().enqueue([rooted_texture]() {
+            if (rooted_texture != nullptr && !IsBadReadPtr(rooted_texture, sizeof(void*))) {
+                try {
+                    unroot_dedicated_ui_texture(rooted_texture);
+                } catch (...) {
+                }
+            }
+        });
+    }
+
+    owned_dedicated_ui_target.reset();
+    dedicated_ui_target = nullptr;
+    dedicated_ui_texture = nullptr;
+    in_flight_dedicated_ui_texture = nullptr;
+    reset_dedicated_ui_creation_state();
+}
+
+void VRRenderTargetManager_Base::cancel_dedicated_ui_creation_preserving_target(const char* reason) {
+    const bool had_pending_creation =
+        dedicated_ui_creation_pending ||
+        dedicated_ui_object_created ||
+        in_flight_dedicated_ui_generation != 0 ||
+        in_flight_dedicated_ui_texture != nullptr ||
+        dedicated_ui_texture != nullptr;
+
+    if (!had_pending_creation) {
+        return;
+    }
+
+    auto rooted_texture = dedicated_ui_texture;
+    auto* in_flight_texture = in_flight_dedicated_ui_texture;
+    auto* rooted_raw = rooted_texture.get();
+
+    if (rooted_texture != nullptr && rooted_texture.valid()) {
+        GameThreadWorker::get().enqueue([rooted_texture]() mutable {
+            if (rooted_texture != nullptr && rooted_texture.valid()) {
+                unroot_dedicated_ui_texture(rooted_texture.get());
+            }
+        });
+    }
+
+    if (in_flight_texture != nullptr && in_flight_texture != rooted_raw) {
+        GameThreadWorker::get().enqueue([in_flight_texture]() {
+            if (in_flight_texture != nullptr && !IsBadReadPtr(in_flight_texture, sizeof(void*))) {
+                try {
+                    unroot_dedicated_ui_texture(in_flight_texture);
+                } catch (...) {
+                }
+            }
+        });
+    }
+
+    dedicated_ui_texture = nullptr;
+    in_flight_dedicated_ui_texture = nullptr;
+    reset_dedicated_ui_creation_state();
+
+    SPDLOG_INFO(
+        "[VRRenderTargetManager] Cancelled in-flight dedicated UI UObject creation after {} promotion; preserving current FRHITexture target",
+        reason != nullptr ? reason : "external UI target");
+}
+
+void VRRenderTargetManager_Base::invalidate_resolution_dependent_targets() {
+    texture_hook_ref = nullptr;
+    shader_resource_hook_ref = nullptr;
+    allocate_texture_called = false;
+    last_texture_index = 0;
+    last_width = 0;
+    last_height = 0;
+    wants_depth_reallocate = true;
+
+    ui_target = nullptr;
+    destroy_dedicated_ui_target();
+
+    dedicated_ui_width = 0;
+    dedicated_ui_height = 0;
+    dedicated_ui_last_attempt = {};
+}
+
+void VRRenderTargetManager_Base::reset_dedicated_ui_creation_state() {
+    dedicated_ui_creation_pending = false;
+    dedicated_ui_object_created = false;
+    in_flight_dedicated_ui_generation = 0;
+    dedicated_ui_pending_since = {};
+    dedicated_ui_resource_pending_since = {};
+}
+
+void VRRenderTargetManager_Base::retain_everspace2_dedicated_ui_target(FRHITexture2D* rt) {
+    if (!everspace2_is_current_game() || !is_ue_5_5_dx12_backend() || rt == nullptr || IsBadReadPtr(rt, sizeof(void*))) {
+        return;
+    }
+
+    void* vtable{};
+
+    try {
+        vtable = *(void**)rt;
+    } catch (...) {
+        return;
+    }
+
+    if (vtable == nullptr || IsBadReadPtr(vtable, sizeof(void*))) {
+        return;
+    }
+
+    std::scoped_lock lock{everspace2_dedicated_ui_lifetime_mutex};
+
+    for (auto* retained : everspace2_retained_dedicated_ui_targets) {
+        if (retained == rt) {
+            return;
+        }
+    }
+
+    // ES2 can release the UTextureRenderTarget2D's FRHI texture while queued
+    // Slate render passes still reference it during cutscene transitions.
+    // Keep one bounded, process-lifetime reference instead of releasing it
+    // through the simplified SDK wrapper, whose deferred-delete semantics are
+    // intentionally incomplete.
+    rt->add_ref();
+    everspace2_retained_dedicated_ui_targets.emplace_back(rt);
+
+    SPDLOG_WARN(
+        "[Everspace2][UE5.5][SlateUI] Pinned dedicated UI FRHI texture {:x} for process lifetime (retained_count={})",
+        (uintptr_t)rt,
+        everspace2_retained_dedicated_ui_targets.size());
+}
+
+void VRRenderTargetManager_Base::set_dedicated_ui_target(FRHITexture2D* rt, uint32_t width, uint32_t height) {
+    if (rt != nullptr) {
+        FRHITexture2D::set_vtable(*(void**)rt);
+
+        if (everspace2_is_current_game() && is_ue_5_5_dx12_backend()) {
+            retain_everspace2_dedicated_ui_target(rt);
+            owned_dedicated_ui_target.reset();
+        } else {
+            owned_dedicated_ui_target = std::make_unique<FTexture2DRHIRef>(*rt);
+        }
+    } else {
+        owned_dedicated_ui_target.reset();
+    }
+
+    dedicated_ui_target = rt;
+    dedicated_ui_width = width;
+    dedicated_ui_height = height;
+    dedicated_ui_creation_pending = false;
+}
+
+void VRRenderTargetManager_Base::request_dedicated_ui_target(uint32_t width, uint32_t height) {
+    if (!supports_dedicated_ui_target_for_current_game() || width == 0 || height == 0) {
+        return;
+    }
+
+    const bool extent_changed = dedicated_ui_width != width || dedicated_ui_height != height;
+
+    dedicated_ui_width = width;
+    dedicated_ui_height = height;
+
+    if (extent_changed) {
+        if (get_dedicated_ui_target() != nullptr || dedicated_ui_texture != nullptr || in_flight_dedicated_ui_texture != nullptr) {
+            SPDLOG_INFO("[VRRenderTargetManager] Dedicated UI extent changed to [{}x{}], recreating", width, height);
+            destroy_dedicated_ui_target();
+        }
+
+        dedicated_ui_last_attempt = {};
+        reset_dedicated_ui_creation_state();
+    }
+
+    try_schedule_dedicated_ui_creation();
+}
+
+bool VRRenderTargetManager_Base::can_attempt_dedicated_ui_creation() const {
+    if (!supports_dedicated_ui_target_for_current_game() || dedicated_ui_width == 0 || dedicated_ui_height == 0) {
+        return false;
+    }
+
+    // ES2 initially reaches Slate before a trustworthy UE5.5 FRHITexture
+    // layout has been observed. Creating temporary render targets in that
+    // window caused two objects to be initialized and torn down immediately
+    // before the real target was available.
+    if (everspace2_is_current_game() && FRHITexture2D::get_vtable() == nullptr) {
+        return false;
+    }
+
+    if (!g_framework->is_game_data_intialized()) {
+        return false;
+    }
+
+    auto* engine = sdk::UGameEngine::get();
+
+    if (engine == nullptr) {
+        return false;
+    }
+
+    if (g_hook == nullptr || !g_hook->has_slate_hook() || !g_hook->has_seen_stable_slate_draw()) {
+        return false;
+    }
+
+    if (supports_ue55_dedicated_ui_target_for_current_game()) {
+        return true;
+    }
+
+    if (!g_hook->prefers_slate_thread_for_session()) {
+        return false;
+    }
+
+    if (!g_hook->has_seen_prerender_viewfamily()) {
+        return false;
+    }
+
+    if (!g_hook->has_scene_view_family_offsets_ready()) {
+        return false;
+    }
+
+    return true;
+}
+
+bool VRRenderTargetManager_Base::try_schedule_dedicated_ui_creation() {
+    if (!can_attempt_dedicated_ui_creation()) {
+        return false;
+    }
+
+    if (get_dedicated_ui_target() != nullptr || dedicated_ui_texture != nullptr || in_flight_dedicated_ui_texture != nullptr ||
+        dedicated_ui_creation_pending || in_flight_dedicated_ui_generation != 0)
+    {
+        return false;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (dedicated_ui_last_attempt.time_since_epoch().count() != 0 &&
+        now - dedicated_ui_last_attempt < std::chrono::seconds(2))
+    {
+        return false;
+    }
+
+    return create_dedicated_ui_texture();
+}
+
+bool VRRenderTargetManager_Base::create_dedicated_ui_texture() {
+    if (!supports_dedicated_ui_target_for_current_game()) {
+        return false;
+    }
+
+    if (dedicated_ui_width == 0 || dedicated_ui_height == 0) {
+        return false;
+    }
+
+    const auto width = dedicated_ui_width;
+    const auto height = dedicated_ui_height;
+    const auto generation = ++dedicated_ui_generation;
+    dedicated_ui_last_attempt = std::chrono::steady_clock::now();
+    dedicated_ui_creation_pending = true;
+    dedicated_ui_object_created = false;
+    in_flight_dedicated_ui_generation = generation;
+    dedicated_ui_pending_since = {};
+    dedicated_ui_resource_pending_since = {};
+
+    SPDLOG_INFO("[VRRenderTargetManager] Scheduling dedicated UI target creation for generation {} [{}x{}]", generation, width, height);
+
+    GameThreadWorker::get().enqueue([this, width, height, generation]() -> void {
+        try {
+            if (!this->is_dedicated_ui_generation_current(generation)) {
+                return;
+            }
+
+            if (this->in_flight_dedicated_ui_texture != nullptr || this->get_dedicated_ui_target() != nullptr || this->dedicated_ui_texture != nullptr) {
+                this->reset_dedicated_ui_creation_state();
+                return;
+            }
+
+            auto* engine = sdk::UGameEngine::get();
+
+            if (engine == nullptr) {
+                SPDLOG_INFO_EVERY_N_SEC(2, "[VRRenderTargetManager] Delaying dedicated UI texture creation because UGameEngine is not ready");
+                this->reset_dedicated_ui_creation_state();
+                return;
+            }
+
+            auto* world = engine->get_world();
+
+            if (world == nullptr) {
+                SPDLOG_INFO_EVERY_N_SEC(2, "[VRRenderTargetManager] Delaying dedicated UI texture creation because the world is not ready");
+                this->reset_dedicated_ui_creation_state();
+                return;
+            }
+
+            auto* kismet_rendering = sdk::UKismetRenderingLibrary::get();
+
+            if (kismet_rendering == nullptr) {
+                SPDLOG_INFO_EVERY_N_SEC(2, "[VRRenderTargetManager] Delaying dedicated UI texture creation because KismetRenderingLibrary is not ready");
+                this->reset_dedicated_ui_creation_state();
+                return;
+            }
+
+            // UKismetRenderingLibrary uses WorldContextObject as both the world
+            // lookup and the new render target's Outer. ES2 replaces UWorld
+            // during the opening cinematic, so a world-owned UI target is
+            // collected while Slate/RDG can still reference its RHI resource.
+            // UGameInstance resolves the same world but persists across travel.
+            auto* world_context = (sdk::UObject*)world;
+            if (everspace2_is_current_game()) {
+                world_context = engine->get_property<sdk::UObject*>(L"GameInstance");
+
+                if (world_context == nullptr || world_context->is_pending_kill_or_unreachable()) {
+                    SPDLOG_INFO_EVERY_N_SEC(
+                        2,
+                        "[Everspace2][UE5.5][SlateUI] Delaying dedicated UI creation until the persistent GameInstance is ready");
+                    this->reset_dedicated_ui_creation_state();
+                    return;
+                }
+            }
+
+            const float clear_color[4]{0.0f, 0.0f, 0.0f, 0.0f};
+            auto* tgt_raw = kismet_rendering->create_render_target_2d(
+                (sdk::UWorld*)world_context, width, height, 2, clear_color, false);
+
+            if (tgt_raw == nullptr) {
+                SPDLOG_WARNING_EVERY_N_SEC(2, "[VRRenderTargetManager] Failed to create dedicated UI texture [{}x{}] on the game thread", width, height);
+                this->reset_dedicated_ui_creation_state();
+                return;
+            }
+
+            root_dedicated_ui_texture(tgt_raw);
+
+            if (!this->is_dedicated_ui_generation_current(generation)) {
+                try {
+                    unroot_dedicated_ui_texture(tgt_raw);
+                } catch (...) {
+                }
+                return;
+            }
+
+            sdk::UObjectReference<sdk::UTexture> tgt{tgt_raw};
+            this->in_flight_dedicated_ui_texture = tgt_raw;
+            this->dedicated_ui_object_created = true;
+            this->dedicated_ui_pending_since = std::chrono::steady_clock::now();
+            this->dedicated_ui_resource_pending_since = this->dedicated_ui_pending_since;
+
+            SPDLOG_INFO("[VRRenderTargetManager] Created dedicated UI UObject for generation {}", generation);
+
+            RenderThreadWorker::get().enqueue_conditional(
+                [this, tgt, width, height, generation]() -> bool {
+                    try {
+                        if (!this->is_dedicated_ui_generation_current(generation)) {
+                            return true;
+                        }
+
+                        if (!tgt.valid()) {
+                            SPDLOG_ERROR("[VRRenderTargetManager] dedicated UI texture was destroyed before its render resource became valid");
+                            GameThreadWorker::get().enqueue([this, generation]() -> void {
+                                if (!this->is_dedicated_ui_generation_current(generation)) {
+                                    return;
+                                }
+
+                                this->in_flight_dedicated_ui_texture = nullptr;
+                                this->destroy_dedicated_ui_target();
+                            });
+                            return true;
+                        }
+
+                        if (!sdk::UTexture::update_render_resource_offset_texture2d(tgt)) {
+                            return false;
+                        }
+
+                        auto* rsrc = (sdk::FTextureRenderTargetResource*)tgt->get_resource();
+                        if (rsrc == nullptr) {
+                            return false;
+                        }
+
+                        const bool updated_vtable_offset = sdk::FTextureRenderTargetResource::update_render_target_vtable_offset(rsrc);
+                        auto* frt = updated_vtable_offset ? rsrc->as_render_target() : nullptr;
+
+                        if (frt == nullptr) {
+                            return false;
+                        }
+
+                        sdk::FRenderTarget::update_offsets(frt);
+                        auto** frt_texture = frt->get_render_target_texture();
+
+                        if (frt_texture == nullptr || *frt_texture == nullptr || IsBadReadPtr(*frt_texture, sizeof(void*))) {
+                            return false;
+                        }
+
+                        if (!this->is_dedicated_ui_generation_current(generation)) {
+                            return true;
+                        }
+
+                        FRHITexture2D::set_vtable(*(void**)*frt_texture);
+                        this->set_dedicated_ui_target(*frt_texture, width, height);
+                        this->get_fallback_ui_target_ref() = nullptr;
+
+                        GameThreadWorker::get().enqueue([this, tgt, generation]() -> void {
+                            if (!this->is_dedicated_ui_generation_current(generation)) {
+                                return;
+                            }
+
+                            if (!tgt.valid()) {
+                                this->dedicated_ui_texture = nullptr;
+                                this->in_flight_dedicated_ui_texture = nullptr;
+                                this->destroy_dedicated_ui_target();
+                                return;
+                            }
+
+                            this->dedicated_ui_texture = tgt;
+                            this->in_flight_dedicated_ui_texture = nullptr;
+                            this->reset_dedicated_ui_creation_state();
+                        });
+
+                        SPDLOG_INFO("[VRRenderTargetManager] dedicated UI target ready for generation {} [{}x{}]", generation, width, height);
+                        return true;
+                    } catch (...) {
+                        SPDLOG_ERROR("[VRRenderTargetManager] Exception while waiting for the dedicated UI texture render resource");
+                        GameThreadWorker::get().enqueue([this, generation]() -> void {
+                            if (!this->is_dedicated_ui_generation_current(generation)) {
+                                return;
+                            }
+
+                            this->in_flight_dedicated_ui_texture = nullptr;
+                            this->dedicated_ui_texture = nullptr;
+                            this->destroy_dedicated_ui_target();
+                        });
+                        return true;
+                    }
+                },
+                [this, generation]() {
+                    if (!this->is_dedicated_ui_generation_current(generation)) {
+                        return;
+                    }
+
+                    SPDLOG_ERROR("[VRRenderTargetManager] dedicated UI target generation {} timed out waiting for the render resource", generation);
+                    GameThreadWorker::get().enqueue([this, generation]() -> void {
+                        if (!this->is_dedicated_ui_generation_current(generation)) {
+                            return;
+                        }
+
+                        this->in_flight_dedicated_ui_texture = nullptr;
+                        this->dedicated_ui_texture = nullptr;
+                        this->destroy_dedicated_ui_target();
+                    });
+                },
+                std::chrono::seconds(2));
+        } catch (...) {
+            SPDLOG_ERROR("[VRRenderTargetManager] Exception while scheduling dedicated UI texture creation");
+            this->in_flight_dedicated_ui_texture = nullptr;
+            this->reset_dedicated_ui_creation_state();
+        }
+    });
+
+    return true;
+}
+
+void VRRenderTargetManager_Base::ensure_dedicated_ui_target(uintptr_t command_list) {
+    (void)command_list;
+
+    if (!supports_dedicated_ui_target_for_current_game()) {
+        return;
+    }
+
+    if (dedicated_ui_width == 0 || dedicated_ui_height == 0) {
+        return;
+    }
+
+    auto existing_target = get_dedicated_ui_target();
+
+    if (existing_target != nullptr && !IsBadReadPtr(existing_target, sizeof(void*))) {
+        if (g_framework->is_dx11()) {
+            auto* native_resource = (ID3D11Texture2D*)existing_target->get_native_resource();
+
+            if (native_resource != nullptr && !IsBadReadPtr(native_resource, sizeof(void*))) {
+                D3D11_TEXTURE2D_DESC desc{};
+                native_resource->GetDesc(&desc);
+
+                if (desc.Width == dedicated_ui_width && desc.Height == dedicated_ui_height) {
+                    return;
+                }
+            }
+        } else {
+            auto* native_resource = (ID3D12Resource*)existing_target->get_native_resource();
+
+            if (native_resource != nullptr) {
+                const auto desc = native_resource->GetDesc();
+
+                if (desc.Width == dedicated_ui_width && desc.Height == dedicated_ui_height) {
+                    return;
+                }
+            }
+        }
+
+        SPDLOG_INFO("[VRRenderTargetManager] Recreating dedicated UI target [{}x{}]", dedicated_ui_width, dedicated_ui_height);
+        destroy_dedicated_ui_target();
+    }
+
+    if (existing_target == nullptr && owned_dedicated_ui_target != nullptr && owned_dedicated_ui_target->texture != nullptr &&
+        !IsBadReadPtr(owned_dedicated_ui_target->texture, sizeof(void*)))
+    {
+        FRHITexture2D::set_vtable(*(void**)owned_dedicated_ui_target->texture);
+        dedicated_ui_target = owned_dedicated_ui_target->texture;
+        existing_target = get_dedicated_ui_target();
+    }
+
+    if (dedicated_ui_texture != nullptr && dedicated_ui_texture.valid()) {
+        if (sdk::UTexture::update_render_resource_offset_texture2d(dedicated_ui_texture)) {
+            if (auto* rsrc = (sdk::FTextureRenderTargetResource*)dedicated_ui_texture->get_resource(); rsrc != nullptr) {
+                const bool updated_vtable_offset = sdk::FTextureRenderTargetResource::update_render_target_vtable_offset(rsrc);
+                auto* frt = updated_vtable_offset ? rsrc->as_render_target() : nullptr;
+
+                if (frt != nullptr) {
+                    sdk::FRenderTarget::update_offsets(frt);
+                    auto** frt_texture = frt->get_render_target_texture();
+
+                    if (frt_texture != nullptr && *frt_texture != nullptr && !IsBadReadPtr(*frt_texture, sizeof(void*))) {
+                        FRHITexture2D::set_vtable(*(void**)*frt_texture);
+                        set_dedicated_ui_target(*frt_texture, dedicated_ui_width, dedicated_ui_height);
+                        get_fallback_ui_target_ref() = nullptr;
+                        return;
+                    }
+                }
+            }
+        }
+
+        SPDLOG_INFO_EVERY_N_SEC(5, "[VRRenderTargetManager] dedicated UI UObject is alive but its render resource is not ready");
+    }
+
+    if (dedicated_ui_object_created &&
+        in_flight_dedicated_ui_texture != nullptr &&
+        in_flight_dedicated_ui_generation != 0 &&
+        dedicated_ui_resource_pending_since.time_since_epoch().count() != 0 &&
+        std::chrono::steady_clock::now() - dedicated_ui_resource_pending_since > std::chrono::seconds(5))
+    {
+        SPDLOG_WARN("[VRRenderTargetManager] dedicated UI target creation appears stuck; resetting and retrying");
+        destroy_dedicated_ui_target();
+    }
+
+    if (in_flight_dedicated_ui_texture != nullptr || dedicated_ui_creation_pending || in_flight_dedicated_ui_generation != 0) {
+        return;
+    }
+
+    try_schedule_dedicated_ui_creation();
 }
 
 FRHITexture2D* VRRenderTargetManager_Base::get_scene_capture_render_target() {
@@ -7565,11 +18378,16 @@ __declspec(noinline) void FFakeStereoRenderingHook::update_viewport_rhi_hook(voi
                         should_force_separate_rt = true;
                         use_separate_rt = true;
                         modified_use_separate_rt = true;
+                        if (dune_awakening_is_current_game() && g_dune_force_viewport_rhi_once.exchange(false)) {
+                            SPDLOG_WARN_ONCE("[Dune][RT] Allowing one UpdateViewportRHI call after forcing separate RT bools");
+                            call_orig();
+                            return;
+                        }
                         return; // NO!!!!!!!!!!!!!!!!!!!
                     }
                 }
             }
-        } else {      
+        } else {
             // We only want the last function to be called.
             // We don't need to call the original here because it will get called by the last function.
             // if we call the original here, it will cause performance issues.
@@ -7579,7 +18397,7 @@ __declspec(noinline) void FFakeStereoRenderingHook::update_viewport_rhi_hook(voi
         }
     }
 
-    
+
     if (!g_hook->m_rendertarget_manager_embedded_in_stereo_device) {
         call_orig();
         return;
@@ -7612,6 +18430,14 @@ __declspec(noinline) void FFakeStereoRenderingHook::update_viewport_rhi_hook(voi
     }
 
     if (!rtm.should_use_separate_rt_called) {
+        if (dune_awakening_is_current_game() && g_dune_force_viewport_rhi_once.exchange(false)) {
+            SPDLOG_WARN_ONCE("[Dune][RT] Allowing one embedded UpdateViewportRHI call without ShouldUseSeparateRenderTarget after forced separate RT");
+            call_orig();
+            rtm.should_use_separate_rt_called = false;
+            rtm.need_reallocate_viewport_render_target_called = false;
+            return;
+        }
+
         SPDLOG_INFO_ONCE("Skipping UpdateViewportRHI (embedded) because ShouldUseSeparateRenderTarget() was not called!");
         return; // Do not call at all.
     }
@@ -7620,6 +18446,14 @@ __declspec(noinline) void FFakeStereoRenderingHook::update_viewport_rhi_hook(voi
         const auto need_reallocate = g_hook->get_render_target_manager()->need_reallocate_view_target(*(sdk::FViewport*)viewport);
 
         if (!need_reallocate) {
+            if (dune_awakening_is_current_game() && g_dune_force_viewport_rhi_once.exchange(false)) {
+                SPDLOG_WARN_ONCE("[Dune][RT] Allowing one embedded UpdateViewportRHI call despite missing NeedReallocate after forced separate RT");
+                call_orig();
+                rtm.should_use_separate_rt_called = false;
+                rtm.need_reallocate_viewport_render_target_called = false;
+                return;
+            }
+
             SPDLOG_INFO_ONCE("Skipping UpdateViewportRHI (embedded) because NeedReallocateViewportRenderTarget() was not called and we don't need to reallocate anyway!");
             rtm.should_use_separate_rt_called = false;
             return; // Do not call at all.
@@ -7677,6 +18511,25 @@ void FFakeStereoRenderingHook::attempt_hook_update_viewport_rhi(uintptr_t return
 }
 
 bool VRRenderTargetManager_Base::allocate_render_target_texture(uintptr_t return_address, FTexture2DRHIRef* tex, FTexture2DRHIRef* shader_resource) {
+    if (everspace2_is_current_game() && is_ue_5_5_dx12_backend()) {
+        // Returning false leaves allocation and ownership entirely with
+        // FSceneViewport. Retaining these stack refs or replaying InitRHI's
+        // texture-create call leaves ES2 with stale pooled targets at cinematic
+        // reallocations.
+        this->texture_hook_ref = nullptr;
+        this->shader_resource_hook_ref = nullptr;
+        this->allocate_texture_called = false;
+
+        if (!this->set_up_texture_hook) {
+            this->set_up_texture_hook = true;
+            SPDLOG_INFO(
+                "[Everspace2][ViewportRT] Using direct engine-owned FSceneViewport observation; generic texture replay/midhooks disabled (caller={:x})",
+                return_address);
+        }
+
+        return false;
+    }
+
     this->texture_hook_ref = tex;
     this->shader_resource_hook_ref = shader_resource;
     this->allocate_texture_called = true;
@@ -7731,6 +18584,12 @@ bool VRRenderTargetManager_Base::allocate_render_target_texture(uintptr_t return
             SPDLOG_INFO("Found string ref for BufferedRT, this is UE5!");
             this->is_using_texture_desc = true;
             this->is_version_greq_5_1 = true;
+
+            if (is_ue57_dx11_backend()) {
+                SPDLOG_WARN_ONCE("Skipping UE 5.7 D3D11 BufferedRT texture-create replay hook; using the engine allocation path");
+                this->set_up_texture_hook = true;
+                return false;
+            }
         }
 
         // Present in a specific game or game(s), somewhere around 4.8-4.12 (?)
@@ -7761,6 +18620,40 @@ bool VRRenderTargetManager_Base::allocate_render_target_texture(uintptr_t return
             "B2 2B", // mov dl, 2Bh, (seen in UE4.25 debug/dev builds)
             "BA 2F 00 00 00", // mov edx, 2Fh (seen in UE5 debug/dev builds)
             "F6 85 ? ? ? ? 05", // test byte ptr [rbp+?], 5 (seen in UE5 debug/dev builds)
+        };
+
+        auto is_probable_ue57_texture_desc_prepare = [](uintptr_t fn) {
+            return utility::scan(fn, 0x80, "0F B6 42 32").has_value()
+                && utility::scan(fn, 0x80, "48 8B 42 24").has_value()
+                && utility::scan(fn, 0x80, "48 83 C2 38").has_value();
+        };
+
+        struct DirectCallInfo {
+            uintptr_t callsite{};
+            uintptr_t target{};
+            uint8_t length{};
+        };
+
+        auto find_next_direct_calls = [](uintptr_t start, size_t span, size_t max_calls) {
+            std::vector<DirectCallInfo> results{};
+
+            utility::exhaustive_decode((uint8_t*)start, span, [&](const utility::ExhaustionContext& decode_ctx) -> utility::ExhaustionResult {
+                if (std::string_view{decode_ctx.instrux.Mnemonic}.starts_with("CALL") && *(uint8_t*)decode_ctx.addr == 0xE8) {
+                    results.emplace_back(DirectCallInfo{
+                        .callsite = decode_ctx.addr,
+                        .target = utility::calculate_absolute(decode_ctx.addr + 1),
+                        .length = (uint8_t)decode_ctx.instrux.Length
+                    });
+
+                    if (results.size() >= max_calls) {
+                        return utility::ExhaustionResult::BREAK;
+                    }
+                }
+
+                return utility::ExhaustionResult::CONTINUE;
+            });
+
+            return results;
         };
 
         while(true) {
@@ -7817,7 +18710,75 @@ bool VRRenderTargetManager_Base::allocate_render_target_texture(uintptr_t return
                         const auto fn = utility::calculate_absolute(ip + 1);
                         SPDLOG_INFO("Analyzing call at {:x} to {:x}", ip, fn);
 
-                        if (auto result = utility::scan(fn, 10, "41 B8 30 00 00 00"); result.has_value() && *result == fn) {
+                        if (is_ue57_dx11_backend() && this->is_version_greq_5_1 &&
+                            is_probable_ue57_dx11_texture_desc_prepare_function(fn))
+                        {
+                            SPDLOG_INFO("Skipping UE 5.7 D3D11 texture-desc prepare helper at {:x}; continuing to the real texture-create wrapper", fn);
+                            next_call_is_not_the_right_one = true;
+                        } else if (g_framework->is_dx12() && is_ue_5_7_or_newer()) {
+                            const auto next_calls = find_next_direct_calls((uintptr_t)ip + decoded->Length, 0x80, 2);
+
+                            if (next_calls.size() >= 2) {
+                                this->texture_desc_prepare_func = fn;
+                                this->texture_create_wrapper_func = next_calls[0].target;
+                                this->texture_finalize_func = next_calls[1].target;
+                                this->texture_release_func = 0;
+                                this->texture_extract_func = 0;
+                                this->texture_finalize_callsite = 0;
+                                this->texture_extract_callsite = 0;
+
+                                SPDLOG_INFO("Resolved UE 5.7 texture-desc helper {:x}, wrapper {:x}, and finalize helper {:x}",
+                                    this->texture_desc_prepare_func,
+                                    this->texture_create_wrapper_func,
+                                    this->texture_finalize_func);
+
+                                const auto wrapper_call_ip = next_calls[0].callsite;
+                                const auto finalize_post_call = next_calls[1].callsite + next_calls[1].length;
+
+                                this->texture_create_insn_bytes.resize(next_calls[0].length);
+                                memcpy(this->texture_create_insn_bytes.data(), (void*)wrapper_call_ip, next_calls[0].length);
+
+                                auto texture_hook_result = safetyhook::MidHook::create((void*)finalize_post_call, +[](safetyhook::Context& ctx) -> void {
+                                    VRRenderTargetManager::texture_hook_callback(ctx, false);
+                                });
+
+                                if (!texture_hook_result.has_value()) {
+                                    const auto e = texture_hook_result.error();
+
+                                    if (e.type == safetyhook::MidHook::Error::BAD_ALLOCATION) {
+                                        SPDLOG_ERROR("Failed to create UE 5.7 post texture hook: BAD_ALLOCATION: {}", (uint8_t)e.allocator_error);
+                                    } else {
+                                        SPDLOG_ERROR("Failed to create UE 5.7 post texture hook: BAD_INLINE_HOOK: {}", (uint8_t)e.inline_hook_error.type);
+                                    }
+                                } else {
+                                    this->texture_hook = std::move(texture_hook_result.value());
+                                }
+
+                                auto pre_texture_hook_result = safetyhook::MidHook::create((void*)wrapper_call_ip, +[](safetyhook::Context& ctx) -> void {
+                                    VRRenderTargetManager::pre_texture_hook_callback(ctx, false);
+                                });
+
+                                if (!pre_texture_hook_result.has_value()) {
+                                    const auto e = pre_texture_hook_result.error();
+
+                                    if (e.type == safetyhook::MidHook::Error::BAD_ALLOCATION) {
+                                        SPDLOG_ERROR("Failed to create UE 5.7 pre texture hook: BAD_ALLOCATION: {}", (uint8_t)e.allocator_error);
+                                    } else {
+                                        SPDLOG_ERROR("Failed to create UE 5.7 pre texture hook: BAD_INLINE_HOOK: {}", (uint8_t)e.inline_hook_error.type);
+                                    }
+                                } else {
+                                    this->pre_texture_hook = std::move(pre_texture_hook_result.value());
+                                }
+
+                                this->is_pre_texture_call_e8 = true;
+                                this->set_up_texture_hook = true;
+                                return false;
+                            }
+
+                            if (is_probable_ue57_texture_desc_prepare(fn)) {
+                                SPDLOG_INFO("Detected UE 5.7 texture-desc prepare helper at {:x}, but failed to resolve the wrapper/finalize sequence", fn);
+                            }
+                        } else if (auto result = utility::scan(fn, 10, "41 B8 30 00 00 00"); result.has_value() && *result == fn) {
                             SPDLOG_INFO("First instruction is a mov r8d, 30h, skipping this call!");
                             next_call_is_not_the_right_one = true;
                         } else if (auto result = utility::scan(fn, 50, "B8 00 08 00 00 C3"); result.has_value()) {
@@ -8058,7 +19019,17 @@ bool VRRenderTargetManager::AllocateRenderTargetTexture(uint32_t Index, uint32_t
     OutShaderResourceTexture.texture = OutTargetableTexture.texture;*/
 
     m_last_allocate_render_target_return_address = (uintptr_t)_ReturnAddress();
-    SPDLOG_INFO("AllocateRenderTargetTexture called from: {:x}", m_last_allocate_render_target_return_address - (uintptr_t)*utility::get_module_within((void*)m_last_allocate_render_target_return_address));
+    const auto relative_allocate_render_target_return_address =
+        m_last_allocate_render_target_return_address - (uintptr_t)*utility::get_module_within((void*)m_last_allocate_render_target_return_address);
+
+    if (g_framework->is_dx12() && shf_is_current_game()) {
+        SPDLOG_INFO_EVERY_N_SEC(2, "[SHf] AllocateRenderTargetTexture summary last_caller={:x}", relative_allocate_render_target_return_address);
+    } else if (is_ue_5_1_dx12_backend()) {
+        ue51_note_rt_allocation(relative_allocate_render_target_return_address);
+        SPDLOG_INFO_EVERY_N_SEC(2, "[UE5.1][RTChurn] AllocateRenderTargetTexture summary last_caller={:x}", relative_allocate_render_target_return_address);
+    } else {
+        SPDLOG_INFO("AllocateRenderTargetTexture called from: {:x}", relative_allocate_render_target_return_address);
+    }
 
     // So, if CalculateRenderTargetSize was *never* called before this function
     // that means we have the virtual index of this function wrong, and we must swap the vtable out.
@@ -8088,6 +19059,18 @@ bool VRRenderTargetManager::AllocateRenderTargetTexture(uint32_t Index, uint32_t
     return this->allocate_render_target_texture((uintptr_t)_ReturnAddress(), &OutTargetableTexture, &OutShaderResourceTexture);
 
     //return true;
+}
+
+bool VRRenderTargetManager::AllocateRenderTargetTextures(uint32_t SizeX, uint32_t SizeY, uint8_t Format, uint32_t NumLayers,
+    ETextureCreateFlags Flags, ETextureCreateFlags TargetableTextureFlags, TArray<FTexture2DRHIRef>& OutTargetableTextures,
+    TArray<FTexture2DRHIRef>& OutShaderResourceTextures, uint32_t NumSamples)
+{
+    SPDLOG_INFO_ONCE("VRRenderTargetManager::AllocateRenderTargetTextures called!");
+
+    // Keep the engine on the deprecated single-texture allocation path for now.
+    // UEVR's 5.7 UI separation still depends on analyzing and midhooking the real
+    // texture creation sequence that happens after this returns false.
+    return false;
 }
 
 bool VRRenderTargetManager_418::AllocateRenderTargetTexture(uint32_t Index, uint32_t SizeX, uint32_t SizeY, uint8_t Format, uint32_t NumMips, uint32_t Flags,
