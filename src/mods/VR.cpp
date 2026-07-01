@@ -2851,7 +2851,7 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 ImGui::Spacing();
                 m_fix_object_motion_vector->draw("Fix Object Motion Vector");
                 m_fix_object_motion_range->draw("Fix Object Motion Rnage");
-                if (!rawVelocityDesc[0].pTexture) {
+                if (is_fix_object_motion_vector() && !rawVelocityDesc[0].pTexture) {
                     ImGui::TextWrapped("No UE Velocity Buffer found, can't use the object motion vector fix.");
                 }
                 ImGui::Spacing();
