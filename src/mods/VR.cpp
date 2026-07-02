@@ -93,6 +93,7 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         auto render_frame_count = vr->get_render_frame_count();
         EyeIndex nEye = (render_frame_count % 2 == 0) ? EyeLeft : EyeRight;
         EyeIndex nEyeOther = (render_frame_count % 2 == 0) ? EyeRight : EyeLeft;
+        vr->last_dlss_frame_count = render_frame_count;
         static int lastPausedFrame = render_frame_count;
         bool bufferValid = vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture;
         if (!bufferValid)
@@ -148,35 +149,48 @@ void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandLi
     const auto& vr = VR::get();
 
     // Only track barriers submitted in RHISubmissionThread
-    // Unless RHI.UseSubmissionThread is 0
+    // Unless there's no RHISubmissionThread
     auto threadID = std::this_thread::get_id();
     bool isRHIThread = RHIThreadID == threadID;
     static bool skip = false;
-    if (!vr->is_using_afw() || !vr->is_fix_object_motion_vector() || skip)
+    if (!vr->is_using_afw() || skip)
         return;
     static int lastRHIThreadFoundFrame = 0;
     static int lastRHISubmissionThreadFoundFrame = 0;
 
     ID3D12Resource* velocityCandidate = nullptr;
-    bool hasDLSSMV = false;
+    ID3D12Resource* motionVectorsCandidate = nullptr;
     auto render_frame_count = vr->get_render_frame_count();
     EyeIndex nEye = (render_frame_count % 2 == 0) ? EyeLeft : EyeRight;
+    bool isNoDLSS = (render_frame_count - vr->last_dlss_frame_count) > 10;
     for (int i = 0; i < NumBarriers; i++) {
         auto& barrier = pBarriers[i];
         if (barrier.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !barrier.Transition.pResource || 
-            vr->rawVelocityDesc[nEye].pTexture == barrier.Transition.pResource)
+            vr->rawVelocityDesc[nEye].pTexture == barrier.Transition.pResource ||
+            vr->rawMVDesc[nEye].pTexture == barrier.Transition.pResource)
             continue;
         auto desc = barrier.Transition.pResource->GetDesc();
-        if (desc.Format != DXGI_FORMAT_R16G16B16A16_UNORM)
-            continue;
-        if ((barrier.Transition.StateBefore & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE ||
-            barrier.Transition.StateAfter != D3D12_RESOURCE_STATE_RENDER_TARGET)
-            continue;
-        if ((desc.Width == vr->renderSize[0] || vr->renderSize[0] == 0) && (desc.Height == vr->renderSize[1] || vr->renderSize[1] == 0)) {
-            velocityCandidate = barrier.Transition.pResource;
+        if (desc.Format == DXGI_FORMAT_R16G16B16A16_UNORM) {
+            if ((barrier.Transition.StateAfter & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE &&
+                barrier.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET) {
+                if ((desc.Width == vr->renderSize[0] || vr->renderSize[0] == 0) &&
+                    (desc.Height == vr->renderSize[1] || vr->renderSize[1] == 0)) {
+                    velocityCandidate = barrier.Transition.pResource;
+                }
+            }
+        } else if (isNoDLSS && desc.Format == DXGI_FORMAT_R16G16_FLOAT) {
+            if (barrier.Transition.StateAfter == D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE &&
+                barrier.Transition.StateBefore == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+                if ((desc.Width == vr->renderSize[0] || vr->renderSize[0] == 0) &&
+                    (desc.Height == vr->renderSize[1] || vr->renderSize[1] == 0)) {
+                    motionVectorsCandidate = barrier.Transition.pResource;
+                    vr->mvScale[0] = 1.0f * vr->finalSize[0];
+                    vr->mvScale[1] = 1.0f * vr->finalSize[1];
+                }
+            }
         }
     }
-    if (velocityCandidate) {
+    if (velocityCandidate || motionVectorsCandidate) {
         if (isRHIThread)
             lastRHIThreadFoundFrame = render_frame_count;
         else
@@ -187,22 +201,88 @@ void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandLi
         bool RHIThreadPass = isRHIThread && !isRHISubmissionThreadFoundRecently;
         bool RHISubmissionThreadPass = !isRHIThread;
         if (RHIThreadPass || RHISubmissionThreadPass) {
-            auto desc = velocityCandidate->GetDesc();
-            if (vr->rawVelocityDesc[nEye].pTexture == NULL || vr->rawVelocityDesc[nEye].pTexture->GetDesc().Width != desc.Width ||
-                vr->rawVelocityDesc[nEye].pTexture->GetDesc().Height != desc.Height) {
-                vr->d3d12Renderer->CreateTexture(
-                    desc.Width, desc.Height, desc.Format, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, vr->rawVelocityDesc[nEye], true);
+            if (velocityCandidate) {
+                auto desc = velocityCandidate->GetDesc();
+                if (vr->rawVelocityDesc[nEye].pTexture == NULL || vr->rawVelocityDesc[nEye].pTexture->GetDesc().Width != desc.Width ||
+                    vr->rawVelocityDesc[nEye].pTexture->GetDesc().Height != desc.Height) {
+                    vr->d3d12Renderer->CreateTexture(
+                        desc.Width, desc.Height, desc.Format, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, vr->rawVelocityDesc[nEye], true);
+                }
+                static std::map<ID3D12Resource*, TextureDesc> rawVelocityDescMap;
+                if (!rawVelocityDescMap.contains(velocityCandidate)) {
+                    rawVelocityDescMap[velocityCandidate].pTexture = velocityCandidate;
+                    rawVelocityDescMap[velocityCandidate].initialState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                    vr->d3d12Renderer->SetupTextureDesc(rawVelocityDescMap[velocityCandidate]);
+                    // velocityCandidate->SetName(L"VelocityBuffer");
+                }
+                skip = true;
+                vr->d3d12Renderer->Copy(This, vr->rawVelocityDesc[nEye], rawVelocityDescMap[velocityCandidate]);
+                skip = false;
             }
-            static std::map<ID3D12Resource*, TextureDesc> rawVelocityDescMap;
-            if (!rawVelocityDescMap.contains(velocityCandidate)) {
-                rawVelocityDescMap[velocityCandidate].pTexture = velocityCandidate;
-                rawVelocityDescMap[velocityCandidate].initialState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-                vr->d3d12Renderer->SetupTextureDesc(rawVelocityDescMap[velocityCandidate]);
-                // velocityCandidate->SetName(L"VelocityBuffer");
+            if (motionVectorsCandidate) {
+                auto desc = motionVectorsCandidate->GetDesc();
+                if (vr->rawMotionVectorsTex != motionVectorsCandidate) {
+                    SAFE_RELEASE(vr->rawMotionVectorsTex);
+                    vr->rawMotionVectorsTex = motionVectorsCandidate;
+                    vr->rawMotionVectorsTex->AddRef();
+                }
+                if (vr->motionVectorsDesc[nEye].pTexture) {
+                    TextureDesc src;
+                    src.pTexture = motionVectorsCandidate;
+                    src.initialState = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+                    skip = true;
+                    vr->d3d12Renderer->Copy(This, vr->motionVectorsDesc[nEye], src);
+                    skip = false;
+                }
             }
-            skip = true;
-            vr->d3d12Renderer->Copy(This, vr->rawVelocityDesc[nEye], rawVelocityDescMap[velocityCandidate]);
-            skip = false;
+        }
+    }
+}
+
+static std::map<SIZE_T, ID3D12Resource*> DSVMap = {};
+decltype(&ID3D12Device::CreateDepthStencilView) ptrCreateDepthStencilView; // 21
+void WINAPI hk_ID3D12Device_CreateDepthStencilView(
+    ID3D12Device* This, ID3D12Resource* pResource, const D3D12_DEPTH_STENCIL_VIEW_DESC* pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) {
+    (This->*ptrCreateDepthStencilView)(pResource, pDesc, DestDescriptor);
+    DSVMap[DestDescriptor.ptr] = pResource;
+}
+
+decltype(&ID3D12GraphicsCommandList::ClearDepthStencilView) ptrClearDepthStencilView; // 47
+void WINAPI hk_ID3D12GraphicsCommandList_ClearDepthStencilView(ID3D12GraphicsCommandList* This, 
+    D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView, D3D12_CLEAR_FLAGS ClearFlags, FLOAT Depth, UINT8 Stencil, UINT NumRects, const D3D12_RECT* pRects) {
+
+    (This->*ptrClearDepthStencilView)(DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
+
+    const auto& vr = VR::get();
+
+    if (ClearFlags != D3D12_CLEAR_FLAG_STENCIL || !vr->is_hmd_active())
+        return;
+
+    auto render_frame_count = vr->get_render_frame_count();
+    EyeIndex nEye = (render_frame_count % 2 == 0) ? EyeLeft : EyeRight;
+    if ((render_frame_count - vr->last_dlss_frame_count) > 10 && DSVMap.contains(DepthStencilView.ptr)) {
+        auto depth = DSVMap[DepthStencilView.ptr];
+        auto desc = depth->GetDesc();
+        float aspectRatioX = float(desc.Width) / vr->finalSize[0];
+        float aspectRatioY = float(desc.Height) / vr->finalSize[1];
+        if (abs(aspectRatioX - aspectRatioY) < 0.01 && (abs(aspectRatioX - 0.333) < 0.01 || abs(aspectRatioX - 0.5) < 0.01 || abs(aspectRatioX - 0.666) < 0.01) || abs(aspectRatioX - 0.777) < 0.01) {
+            RHIThreadID = std::this_thread::get_id();
+            if (vr->rawDepthTex != depth) {
+                SAFE_RELEASE(vr->rawDepthTex);
+                vr->rawDepthTex = depth;
+                vr->rawDepthTex->AddRef();
+            }
+            if (depth) {
+                auto depthDesc = depth->GetDesc();
+                vr->renderSize[0] = depthDesc.Width;
+                vr->renderSize[1] = depthDesc.Height;
+            }
+            if (vr->depthDesc[nEye].pTexture) {
+                TextureDesc src;
+                src.pTexture = depth;
+                src.initialState = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+                vr->d3d12Renderer->Copy(This, vr->depthDesc[nEye], src);
+            }
         }
     }
 }
@@ -268,6 +348,8 @@ std::optional<std::string> VR::clean_initialize() try {
     // #############################
     // #Frame Warp Module Start
     // #############################
+    if (!g_framework->is_dx12())
+        return Mod::on_initialize();
 
     if (GetModuleHandleW(L"PDAFWPlugin.dll") == nullptr) {
         const auto current_path = utility::get_module_directoryw(GetModuleHandleW(L"UEVRBackend.dll"));
@@ -286,8 +368,11 @@ std::optional<std::string> VR::clean_initialize() try {
     params.d3d12Queue = hook->get_command_queue();
     d3d12Renderer = InitDevice(params);
 
+    *(uintptr_t*)&ptrCreateDepthStencilView = hookVtable(params.d3d12Device, 21, hk_ID3D12Device_CreateDepthStencilView);
+
     auto cmdList = d3d12Renderer->BeginCommandList(0);
     *(uintptr_t*)&ptrResourceBarrier = hookVtable(cmdList, 26, hk_ID3D12GraphicsCommandList_ResourceBarrier);
+    *(uintptr_t*)&ptrClearDepthStencilView = hookVtable(cmdList, 47, hk_ID3D12GraphicsCommandList_ClearDepthStencilView);
     d3d12Renderer->EndCommandList(0);
 
     auto dllNGX = GetModuleHandle("_nvngx.dll");

@@ -444,6 +444,9 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     const auto eye_width = static_cast<uint32_t>(bb_desc.Width / 2);
     const auto eye_height = static_cast<uint32_t>(bb_desc.Height);
 
+    vr->finalSize[0] = eye_width;
+    vr->finalSize[1] = eye_height;
+
     if (!vr->rawDepthTex) {
         auto& rt_pool = vr->get_render_target_pool_hook();
         scene_depth_tex = rt_pool->get_texture<ID3D12Resource>(L"SceneDepthZ");
@@ -530,7 +533,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         EvaluateFrameWarp(params);
     }
 
-    if (vr->mDebug3 && vr->rawVelocityDesc[nEye].pTexture) {
+    if (vr->mDebug3 && vr->is_fix_object_motion_vector() && vr->rawVelocityDesc[nEye].pTexture) {
         if (vr->rawVelocityDesc[nEye].shaderResourceViewHandle.ptr == 0) {
             vr->rawVelocityDesc[nEye].initialState = D3D12_RESOURCE_STATE_RENDER_TARGET;
             vr->d3d12Renderer->SetupTextureDesc(vr->rawVelocityDesc[nEye]);

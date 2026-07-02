@@ -45,8 +45,11 @@ public:
     TextureDesc motionVectorsDesc[2]{{}, {}};
 
     UINT renderSize[2] = {0, 0};
+    UINT finalSize[2] = {1, 1};
     float mvScale[2] = {1.0, 1.0};
     float jitterOffset[2] = {1.0, 1.0};
+
+    int last_dlss_frame_count = 0;
 
     bool mDebug1 = false;
     bool mDebug2 = false;

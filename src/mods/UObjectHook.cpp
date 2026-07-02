@@ -644,8 +644,7 @@ void UObjectHook::on_pre_calculate_stereo_view_offset(void* stereo_device, const
             }
         } // else todo?
     }
-
-    if ((view_index + 1) % 2 == 0) {
+    if (vr->is_using_afw() || (view_index + 1) % 2 == 0) {
         tick_attachments(view_rotation, world_to_meters, view_location, is_double);
     }
 }
