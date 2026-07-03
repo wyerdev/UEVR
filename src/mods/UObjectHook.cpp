@@ -124,7 +124,7 @@ bool is_ue_5_5_or_newer_uobjecthook() {
 }
 
 bool should_tick_motion_controller_attachments_for_view(int32_t view_index, bool is_double) {
-    if ((view_index + 1) % 2 == 0) {
+    if (VR::get()->is_using_afw() || (view_index + 1) % 2 == 0) {
         return true;
     }
 
