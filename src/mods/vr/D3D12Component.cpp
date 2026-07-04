@@ -1000,7 +1000,7 @@ void D3D12Component::draw_spectator_view(ID3D12GraphicsCommandList* command_list
 
     // Copy the previous right eye frame to the left eye frame
     const auto prev_index = (index + m_backbuffer_textures.size() - 1) % m_backbuffer_textures.size();
-    if ((vr->is_using_afr() || vr->is_using_afw()) && !is_right_eye_frame && m_backbuffer_textures[prev_index]->texture != nullptr) {
+    if ((vr->is_using_afr()) && !is_right_eye_frame && m_backbuffer_textures[prev_index]->texture != nullptr) {
         const auto& last_right_eye_buffer = m_backbuffer_textures[prev_index]->texture;
 
         if (backbuffer.Get() != last_right_eye_buffer.Get()) {
@@ -1068,7 +1068,7 @@ void D3D12Component::draw_spectator_view(ID3D12GraphicsCommandList* command_list
     RECT source_rect{};
 
     // Show left side when using AFR or native stereo fix
-    if (vr->is_using_afr() || vr->is_native_stereo_fix_enabled() || vr->is_using_afw()) {
+    if (vr->is_using_afr() || vr->is_native_stereo_fix_enabled()) {
         source_rect.left = 0;
         source_rect.top = 0;
         source_rect.right = m_backbuffer_size[0] / 2;

@@ -25,6 +25,9 @@ void OpenXR::on_draw_ui() {
     ImGui::SetNextItemOpen(true, ImGuiCond_Once);
     if (ImGui::TreeNode("OpenXR Options")) {
         this->resolution_scale->draw("Resolution Scale");
+        if (ImGui::Button("Reset", ImVec2(200, 0))) {
+            this->resolution_scale->value() = 1.0;
+        }
         //this->push_dummy_projection->draw("Virtual Desktop Fix");
 
         ImGui::Checkbox("Virtual Desktop Fix", &this->push_dummy_projection);

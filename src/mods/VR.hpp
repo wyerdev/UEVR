@@ -51,6 +51,9 @@ public:
 
     int last_dlss_frame_count = 0;
 
+    bool is_afw_last_frame = false;
+    int afw_switching_skip_frames = 0;
+
     bool mDebug1 = false;
     bool mDebug2 = false;
     bool mDebug3 = false;
@@ -470,7 +473,9 @@ public:
                (m_extreme_compat_mode->value() && m_rendering_method->value() == RenderingMethod::NATIVE_STEREO);
     }
 
-    bool is_using_afw() const { return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP; }
+    bool is_using_afw() const {
+        return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP;
+    }
 
 
     SynchronizeStage get_synchronize_stage() {

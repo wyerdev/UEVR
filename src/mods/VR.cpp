@@ -86,8 +86,11 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         }
         if (depth) {
             auto depthDesc = depth->GetDesc();
-            vr->renderSize[0] = depthDesc.Width;
-            vr->renderSize[1] = depthDesc.Height;
+            if (vr->renderSize[0] != depthDesc.Width || vr->renderSize[1] != depthDesc.Height) {
+                vr->renderSize[0] = depthDesc.Width;
+                vr->renderSize[1] = depthDesc.Height;
+                vr->afw_switching_skip_frames = 90;
+            }
         }
         RHIThreadID = std::this_thread::get_id();
         auto render_frame_count = vr->get_render_frame_count();
@@ -100,7 +103,7 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
             lastPausedFrame = render_frame_count;
         if (lastPausedFrame > render_frame_count)
             lastPausedFrame = render_frame_count;
-        if ((render_frame_count - lastPausedFrame > 30) && bufferValid) {
+        if (vr->afw_switching_skip_frames <= 0 && (render_frame_count - lastPausedFrame > 30) && bufferValid) {
             TextureDesc src;
             src.pTexture = depth;
             src.initialState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -2694,6 +2697,12 @@ void VR::on_present() {
             worker.detach();
         }
     }
+    if (afw_switching_skip_frames > 0)
+        afw_switching_skip_frames--;
+    if (is_afw_last_frame ^ is_using_afw()) {
+        afw_switching_skip_frames = 90;
+    }
+    is_afw_last_frame = is_using_afw();
 }
 
 void VR::on_post_present() {
