@@ -49,10 +49,12 @@ public:
     float mvScale[2] = {1.0, 1.0};
     float jitterOffset[2] = {1.0, 1.0};
 
+    int afw_since_inject_frame_count = 0;
     int last_dlss_frame_count = 0;
 
     bool is_afw_last_frame = false;
     int afw_switching_skip_frames = 0;
+    int afw_resolution_change_skip_frames = 0;
 
     bool mDebug1 = false;
     bool mDebug2 = false;
@@ -78,6 +80,9 @@ public:
 
     bool is_fix_object_motion_vector() { return m_fix_object_motion_vector->value(); };
     float get_fix_object_motion_range() { return m_fix_object_motion_range->value(); };
+
+    bool is_no_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10; };
+    bool is_never_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10 && last_dlss_frame_count == 0; };
 
 public:
     enum RenderingMethod {
@@ -470,11 +475,12 @@ public:
 
     bool is_using_synchronized_afr() const {
         return m_rendering_method->value() == RenderingMethod::SYNCHRONIZED ||
-               (m_extreme_compat_mode->value() && m_rendering_method->value() == RenderingMethod::NATIVE_STEREO);
+               (m_extreme_compat_mode->value() && m_rendering_method->value() == RenderingMethod::NATIVE_STEREO) ||
+               (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && (afw_since_inject_frame_count < 90 || afw_resolution_change_skip_frames > 0));
     }
 
-    bool is_using_afw() const {
-        return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP;
+    bool is_using_afw() {
+        return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && afw_since_inject_frame_count >= 90 && afw_switching_skip_frames == 0 && afw_resolution_change_skip_frames == 0;
     }
 
 

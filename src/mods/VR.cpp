@@ -54,7 +54,7 @@ static std::thread::id RHIThreadID = {};
 NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
     ID3D12GraphicsCommandList* InCmdList, const NVSDK_NGX_Handle* InFeatureHandle, NVSDK_NGX_Parameter* InParameters, void* InCallback) {
     const auto& vr = VR::get();
-    if (vr->is_using_afw() && !vr->vrNoneDLSSHandleMap.contains((NVSDK_NGX_Handle*)InFeatureHandle)) {
+    if (!vr->vrNoneDLSSHandleMap.contains((NVSDK_NGX_Handle*)InFeatureHandle)) {
         ID3D12Resource* color;
         ID3D12Resource* depth;
         ID3D12Resource* motionVectors;
@@ -89,7 +89,7 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
             if (vr->renderSize[0] != depthDesc.Width || vr->renderSize[1] != depthDesc.Height) {
                 vr->renderSize[0] = depthDesc.Width;
                 vr->renderSize[1] = depthDesc.Height;
-                vr->afw_switching_skip_frames = 90;
+                vr->afw_resolution_change_skip_frames = 90;
             }
         }
         RHIThreadID = std::this_thread::get_id();
@@ -103,7 +103,7 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
             lastPausedFrame = render_frame_count;
         if (lastPausedFrame > render_frame_count)
             lastPausedFrame = render_frame_count;
-        if (vr->afw_switching_skip_frames <= 0 && (render_frame_count - lastPausedFrame > 30) && bufferValid) {
+        if (vr->is_using_afw() && vr->afw_resolution_change_skip_frames <= 0 && (render_frame_count - lastPausedFrame > 30) && bufferValid) {
             TextureDesc src;
             src.pTexture = depth;
             src.initialState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -165,7 +165,7 @@ void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandLi
     ID3D12Resource* motionVectorsCandidate = nullptr;
     auto render_frame_count = vr->get_render_frame_count();
     EyeIndex nEye = (render_frame_count % 2 == 0) ? EyeLeft : EyeRight;
-    bool isNoDLSS = (render_frame_count - vr->last_dlss_frame_count) > 10;
+    bool isNeverDLSS = vr->is_never_dlss();
     for (int i = 0; i < NumBarriers; i++) {
         auto& barrier = pBarriers[i];
         if (barrier.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION || !barrier.Transition.pResource || 
@@ -181,7 +181,7 @@ void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandLi
                     velocityCandidate = barrier.Transition.pResource;
                 }
             }
-        } else if (isNoDLSS && desc.Format == DXGI_FORMAT_R16G16_FLOAT) {
+        } else if (isNeverDLSS && desc.Format == DXGI_FORMAT_R16G16_FLOAT) {
             if (barrier.Transition.StateAfter == D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE &&
                 barrier.Transition.StateBefore == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
                 if ((desc.Width == vr->renderSize[0] || vr->renderSize[0] == 0) &&
@@ -204,7 +204,8 @@ void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandLi
         bool RHIThreadPass = isRHIThread && !isRHISubmissionThreadFoundRecently;
         bool RHISubmissionThreadPass = !isRHIThread;
         if (RHIThreadPass || RHISubmissionThreadPass) {
-            if (velocityCandidate) {
+            if (velocityCandidate && vr->is_ghosting_fix_enabled() && vr->is_fix_object_motion_vector() &&
+                (render_frame_count - vr->last_dlss_frame_count) <= 1) {
                 auto desc = velocityCandidate->GetDesc();
                 if (vr->rawVelocityDesc[nEye].pTexture == NULL || vr->rawVelocityDesc[nEye].pTexture->GetDesc().Width != desc.Width ||
                     vr->rawVelocityDesc[nEye].pTexture->GetDesc().Height != desc.Height) {
@@ -262,13 +263,14 @@ void WINAPI hk_ID3D12GraphicsCommandList_ClearDepthStencilView(ID3D12GraphicsCom
         return;
 
     auto render_frame_count = vr->get_render_frame_count();
+    bool isNeverDLSS = vr->is_never_dlss();
     EyeIndex nEye = (render_frame_count % 2 == 0) ? EyeLeft : EyeRight;
-    if ((render_frame_count - vr->last_dlss_frame_count) > 10 && DSVMap.contains(DepthStencilView.ptr)) {
+    if (isNeverDLSS && DSVMap.contains(DepthStencilView.ptr)) {
         auto depth = DSVMap[DepthStencilView.ptr];
         auto desc = depth->GetDesc();
         float aspectRatioX = float(desc.Width) / vr->finalSize[0];
         float aspectRatioY = float(desc.Height) / vr->finalSize[1];
-        if (abs(aspectRatioX - aspectRatioY) < 0.01 && (abs(aspectRatioX - 0.333) < 0.01 || abs(aspectRatioX - 0.5) < 0.01 || abs(aspectRatioX - 0.666) < 0.01) || abs(aspectRatioX - 0.777) < 0.01) {
+        if (abs(aspectRatioX - aspectRatioY) < 0.01 && (abs(aspectRatioX - 0.333) < 0.01 || abs(aspectRatioX - 0.5) < 0.01|| abs(aspectRatioX - 0.58) < 0.01 || abs(aspectRatioX - 0.666) < 0.01) || abs(aspectRatioX - 0.777) < 0.01) {
             RHIThreadID = std::this_thread::get_id();
             if (vr->rawDepthTex != depth) {
                 SAFE_RELEASE(vr->rawDepthTex);
@@ -2697,12 +2699,15 @@ void VR::on_present() {
             worker.detach();
         }
     }
+    if (afw_resolution_change_skip_frames > 0)
+        afw_resolution_change_skip_frames--;
     if (afw_switching_skip_frames > 0)
         afw_switching_skip_frames--;
-    if (is_afw_last_frame ^ is_using_afw()) {
+    if (is_afw_last_frame ^ (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP)) {
         afw_switching_skip_frames = 90;
     }
-    is_afw_last_frame = is_using_afw();
+    is_afw_last_frame = (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP);
+    afw_since_inject_frame_count++;
 }
 
 void VR::on_post_present() {
@@ -2943,12 +2948,19 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 m_clear_before_framewarp->draw("Clear Before Framewarp");
                 m_framewarp_debug->draw("Debug Framewarp");
                 ImGui::Spacing();
-                m_fix_object_motion_vector->draw("Fix Object Motion Vector");
-                m_fix_object_motion_range->draw("Fix Object Motion Rnage");
-                if (is_fix_object_motion_vector() && !rawVelocityDesc[0].pTexture) {
-                    ImGui::TextWrapped("No UE Velocity Buffer found, can't use the object motion vector fix.");
+                if (is_ghosting_fix_enabled()) {
+                    m_fix_object_motion_vector->draw("Fix Object Motion Vector");
+                    m_fix_object_motion_range->draw("Fix Object Motion Rnage");
+                    if (is_fix_object_motion_vector() && !rawVelocityDesc[0].pTexture) {
+                        ImGui::TextWrapped("No UE Velocity Buffer found, can't use the object motion vector fix.");
+                    }
+                    ImGui::Spacing();
+                } else {
+                    ImGui::BeginDisabled(!is_ghosting_fix_enabled());
+                    m_fix_object_motion_vector->draw("Fix Object Motion Vector");
+                    ImGui::EndDisabled();
+                    ImGui::TextWrapped("Object Motion fix is only needed when ghosting fix is enabled.");
                 }
-                ImGui::Spacing();
                 m_ignore_motion_threshold->draw("Ignore Motion Threshold");
                 ImGui::TreePop();
             }
