@@ -131,9 +131,32 @@ public:
         ID3D12Resource* resource,
         const D3D12_RESOURCE_DESC& desc,
         const char* source);
+    std::shared_ptr<const Everspace2D3D12SceneTargetSnapshot>
+        retire_everspace2_scene_target_snapshot(const char* reason);
 
     FRHITexture2D* get_scene_capture_render_target();
     void set_render_target(FRHITexture2D* rt) { render_target = rt; }
+    void reset_ue58_scene_target_observation() {
+        ue58_pending_scene_target = nullptr;
+        ue58_pending_native_resource = nullptr;
+        ue58_pending_scene_target_observations = 0;
+    }
+    uint32_t observe_ue58_scene_target(FRHITexture2D* texture, ID3D12Resource* resource) {
+        if (ue58_pending_scene_target != texture ||
+            ue58_pending_native_resource != resource)
+        {
+            ue58_pending_scene_target = texture;
+            ue58_pending_native_resource = resource;
+            ue58_pending_scene_target_observations = 1;
+            return ue58_pending_scene_target_observations;
+        }
+
+        if (ue58_pending_scene_target_observations < 2) {
+            ++ue58_pending_scene_target_observations;
+        }
+
+        return ue58_pending_scene_target_observations;
+    }
     void set_dedicated_ui_target(FRHITexture2D* rt, uint32_t width = 0, uint32_t height = 0);
     void request_dedicated_ui_target(uint32_t width, uint32_t height);
     void destroy_dedicated_ui_target();
@@ -278,6 +301,9 @@ protected:
     uint64_t dedicated_ui_generation{0};
     uint64_t in_flight_dedicated_ui_generation{0};
     sdk::FViewport* last_viewport{nullptr};
+    FRHITexture2D* ue58_pending_scene_target{nullptr};
+    ID3D12Resource* ue58_pending_native_resource{nullptr};
+    uint32_t ue58_pending_scene_target_observations{0};
     std::atomic<std::shared_ptr<const Everspace2D3D12SceneTargetSnapshot>> everspace2_scene_target_snapshot{};
     std::atomic<uint64_t> everspace2_scene_target_generation{};
 };
@@ -319,6 +345,51 @@ public:
 
     // Allows signaling to the engine that depth texture reallocation is needed if return address analysis passed.
     bool depth_analysis_passed{false};
+};
+
+struct VRRenderTargetManager_58 : IStereoRenderTargetManager_58, VRRenderTargetManager_Base {
+    bool ShouldUseSeparateRenderTarget() const override {
+        return VRRenderTargetManager_Base::should_use_separate_render_target();
+    }
+
+    void CalculateRenderTargetSize(
+        const sdk::FViewport& Viewport,
+        uint32_t& InOutSizeX,
+        uint32_t& InOutSizeY) override
+    {
+        VRRenderTargetManager_Base::calculate_render_target_size(Viewport, InOutSizeX, InOutSizeY);
+    }
+
+    bool NeedReAllocateViewportRenderTarget(const sdk::FViewport& Viewport) override {
+        return VRRenderTargetManager_Base::need_reallocate_view_target(Viewport);
+    }
+
+    bool NeedReAllocateShadingRateTexture(const void* ShadingRateTarget) override {
+        return false;
+    }
+
+    bool AllocateRenderTargetTextures(
+        sdk::FRHICommandListBase& RHICmdList,
+        uint32_t SizeX,
+        uint32_t SizeY,
+        uint8_t Format,
+        uint32_t NumLayers,
+        ETextureCreateFlags Flags,
+        ETextureCreateFlags TargetableTextureFlags,
+        TArray<FTexture2DRHIRef>& OutTargetableTextures,
+        TArray<FTexture2DRHIRef>& OutShaderResourceTextures,
+        uint32_t NumSamples = 1) override;
+
+    bool AllocateRenderTargetTextures(
+        uint32_t SizeX,
+        uint32_t SizeY,
+        uint8_t Format,
+        uint32_t NumLayers,
+        ETextureCreateFlags Flags,
+        ETextureCreateFlags TargetableTextureFlags,
+        TArray<FTexture2DRHIRef>& OutTargetableTextures,
+        TArray<FTexture2DRHIRef>& OutShaderResourceTextures,
+        uint32_t NumSamples = 1) override;
 };
 
 struct VRRenderTargetManager_418 : IStereoRenderTargetManager_418, VRRenderTargetManager_Base {
@@ -374,6 +445,10 @@ public:
     FFakeStereoRenderingHook();
 
     VRRenderTargetManager_Base* get_render_target_manager() {
+        if (m_uses_ue58_rendertarget_manager) {
+            return static_cast<VRRenderTargetManager_Base*>(&m_rtm_58);
+        }
+
         if (m_uses_old_rendertarget_manager) {
             return static_cast<VRRenderTargetManager_Base*>(&m_rtm_418);
         }
@@ -791,6 +866,7 @@ private:
         uintptr_t scene{};
         uintptr_t pending_scene{};
         uint8_t pending_scene_observations[2]{};
+        bool pending_scene_has_unknown_state{};
         uint64_t first_seen_observation{};
         uint64_t last_seen_observation{};
         uint32_t generation{};
@@ -816,6 +892,14 @@ private:
         uint64_t ghosting_right_eye_remap_count{};
         std::chrono::steady_clock::time_point ghosting_last_right_eye_remap_time{};
         bool ghosting_logged_bootstrap_disabled{};
+        uintptr_t ghosting_bootstrap_scene{};
+        uint32_t ghosting_bootstrap_last_frame{};
+        uint32_t ghosting_bootstrap_stable_frames{};
+        uint32_t ghosting_bootstrap_next_attempt_frame{};
+        uint32_t ghosting_bootstrap_pulse_until_frame{};
+        uint8_t ghosting_bootstrap_attempts{};
+        bool ghosting_bootstrap_ready{};
+        bool ghosting_logged_bootstrap_deferred{};
 
         // For keeping track of what the states were before our modifications.
         std::unordered_map<sdk::FSceneViewStateInterface*, sdk::FSceneViewInitOptionsUE4> view_init_options_ue4{};
@@ -875,6 +959,7 @@ private:
     } m_viewport_rt_hook_data{};
 
     VRRenderTargetManager m_rtm{};
+    VRRenderTargetManager_58 m_rtm_58{};
     VRRenderTargetManager_418 m_rtm_418{};
     VRRenderTargetManager_Special m_rtm_special{};
 
@@ -962,6 +1047,7 @@ private:
     bool m_attempted_hook_update_viewport_rhi{false};
     bool m_attempted_hook_fsceneview_constructor{false};
     bool m_uses_old_rendertarget_manager{false};
+    bool m_uses_ue58_rendertarget_manager{false};
     bool m_rendertarget_manager_embedded_in_stereo_device{false}; // 4.17 and below...?
     bool m_special_detected{false};
     bool m_special_detected_4_18{false};
