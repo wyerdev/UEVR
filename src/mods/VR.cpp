@@ -270,7 +270,10 @@ void WINAPI hk_ID3D12GraphicsCommandList_ClearDepthStencilView(ID3D12GraphicsCom
         auto desc = depth->GetDesc();
         float aspectRatioX = float(desc.Width) / vr->finalSize[0];
         float aspectRatioY = float(desc.Height) / vr->finalSize[1];
-        if (abs(aspectRatioX - aspectRatioY) < 0.01 && (abs(aspectRatioX - 0.333) < 0.01 || abs(aspectRatioX - 0.5) < 0.01|| abs(aspectRatioX - 0.58) < 0.01 || abs(aspectRatioX - 0.666) < 0.01) || abs(aspectRatioX - 0.777) < 0.01) {
+        if (abs(aspectRatioX - aspectRatioY) < 0.01 && 
+            (abs(aspectRatioX - 0.333) < 0.01 || abs(aspectRatioX - 0.5) < 0.01 ||
+            abs(aspectRatioX - 0.58) < 0.01 || abs(aspectRatioX - 0.666) < 0.01) ||
+            abs(aspectRatioX - 0.777) < 0.01 || abs(aspectRatioX - 1.0) < 0.01) {
             RHIThreadID = std::this_thread::get_id();
             if (vr->rawDepthTex != depth) {
                 SAFE_RELEASE(vr->rawDepthTex);
@@ -639,8 +642,8 @@ std::optional<std::string> VR::initialize_openxr() {
                 }
 
                 const std::unordered_set<std::string> wanted_extensions{
-                    // XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME,
-                    // XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME
+                    XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME,
+                    XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME
                     // To be seen if we need more!
                 };
 
