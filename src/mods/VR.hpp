@@ -58,8 +58,16 @@ public:
     TextureDesc motionVectorsDesc[2]{{}, {}};
 
     UINT renderSize[2] = {0, 0};
+    UINT finalSize[2] = {1, 1};
     float mvScale[2] = {1.0, 1.0};
     float jitterOffset[2] = {1.0, 1.0};
+
+    int afw_since_inject_frame_count = 0;
+    int last_dlss_frame_count = 0;
+
+    bool is_afw_last_frame = false;
+    int afw_switching_skip_frames = 0;
+    int afw_resolution_change_skip_frames = 0;
 
     bool mDebug1 = false;
     bool mDebug2 = false;
@@ -85,6 +93,9 @@ public:
 
     bool is_fix_object_motion_vector() { return m_fix_object_motion_vector->value(); };
     float get_fix_object_motion_range() { return m_fix_object_motion_range->value(); };
+
+    bool is_no_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10; };
+    bool is_never_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10 && last_dlss_frame_count == 0; };
 
 public:
     ~VR() override;
@@ -539,10 +550,13 @@ public:
 
     bool is_using_synchronized_afr() const {
         return m_rendering_method->value() == RenderingMethod::SYNCHRONIZED ||
-               (m_extreme_compat_mode->value() && m_rendering_method->value() == RenderingMethod::NATIVE_STEREO);
+               (m_extreme_compat_mode->value() && m_rendering_method->value() == RenderingMethod::NATIVE_STEREO) ||
+               (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && (afw_since_inject_frame_count < 90 || afw_resolution_change_skip_frames > 0));
     }
 
-    bool is_using_afw() const { return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP; }
+    bool is_using_afw() {
+        return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && afw_since_inject_frame_count >= 90 && afw_switching_skip_frames == 0 && afw_resolution_change_skip_frames == 0;
+    }
 
 
     bool is_using_strict_synchronized_afr() const {
@@ -1360,7 +1374,7 @@ private:
         "Disable SingleLayerWater Fallback",
     };
 
-    const ModCombo::Ptr m_rendering_method{ ModCombo::create(generate_name("RenderingMethod"), s_rendering_method_names) };
+    const ModCombo::Ptr m_rendering_method{ ModCombo::create(generate_name("RenderingMethod"), s_rendering_method_names, RenderingMethod::ALTERNATE_FRAMEWARP) };
     const ModCombo::Ptr m_synced_afr_method{ ModCombo::create(generate_name("SyncedSequentialMethod"), s_synced_afr_method_names, 1) };
     const ModToggle::Ptr m_extreme_compat_mode{ ModToggle::create(generate_name("ExtremeCompatibilityMode"), false, true) };
     const ModToggle::Ptr m_uncap_framerate{ ModToggle::create(generate_name("UncapFramerate"), true) };
@@ -1534,7 +1548,7 @@ private:
     const ModSlider::Ptr m_world_scale{ ModSlider::create(generate_name("WorldScale"), 0.01f, 10.0f, 1.0f) };
     const ModSlider::Ptr m_depth_scale{ ModSlider::create(generate_name("DepthScale"), 0.01f, 1.0f, 1.0f) };
 
-    const ModToggle::Ptr m_ghosting_fix{ ModToggle::create(generate_name("GhostingFix"), false) };
+    const ModToggle::Ptr m_ghosting_fix{ ModToggle::create(generate_name("GhostingFix"), true) };
     const ModToggle::Ptr m_ghosting_fix_bootstrap_view_states{ ModToggle::create(generate_name("GhostingFixBootstrapViewStates"), false) };
     const ModToggle::Ptr m_native_stereo_fix{ ModToggle::create(generate_name("NativeStereoFix"), false) };
     const ModToggle::Ptr m_native_stereo_fix_same_pass{ ModToggle::create(generate_name("NativeStereoFixSamePass"), true) };

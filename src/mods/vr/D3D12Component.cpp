@@ -2105,6 +2105,9 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     const auto eye_width = static_cast<uint32_t>(bb_desc.Width / 2);
     const auto eye_height = static_cast<uint32_t>(bb_desc.Height);
 
+    vr->finalSize[0] = eye_width;
+    vr->finalSize[1] = eye_height;
+
     if (!vr->rawDepthTex) {
         auto& rt_pool = vr->get_render_target_pool_hook();
         scene_depth_tex = rt_pool->get_texture<ID3D12Resource>(L"SceneDepthZ");
@@ -2191,7 +2194,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         EvaluateFrameWarp(params);
     }
 
-    if (vr->mDebug3 && vr->rawVelocityDesc[nEye].pTexture) {
+    if (vr->mDebug3 && vr->is_fix_object_motion_vector() && vr->rawVelocityDesc[nEye].pTexture) {
         if (vr->rawVelocityDesc[nEye].shaderResourceViewHandle.ptr == 0) {
             vr->rawVelocityDesc[nEye].initialState = D3D12_RESOURCE_STATE_RENDER_TARGET;
             vr->d3d12Renderer->SetupTextureDesc(vr->rawVelocityDesc[nEye]);
@@ -3065,7 +3068,7 @@ void D3D12Component::draw_spectator_view(ID3D12GraphicsCommandList* command_list
 
     // Copy the previous right eye frame to the left eye frame
     const auto prev_index = (index + m_backbuffer_textures.size() - 1) % m_backbuffer_textures.size();
-    if ((vr->is_using_afr() || vr->is_using_afw()) && !is_right_eye_frame && m_backbuffer_textures[prev_index]->texture != nullptr) {
+    if ((vr->is_using_afr()) && !is_right_eye_frame && m_backbuffer_textures[prev_index]->texture != nullptr) {
         const auto& last_right_eye_buffer = m_backbuffer_textures[prev_index]->texture;
 
         if (backbuffer.Get() != last_right_eye_buffer.Get()) {
@@ -3135,7 +3138,7 @@ void D3D12Component::draw_spectator_view(ID3D12GraphicsCommandList* command_list
     RECT source_rect{};
 
     // Show left side when using AFR or native stereo fix
-    if (vr->is_using_afr() || vr->is_native_stereo_fix_enabled() || vr->is_using_afw()) {
+    if (vr->is_using_afr() || vr->is_native_stereo_fix_enabled()) {
         source_rect.left = 0;
         source_rect.top = 0;
         source_rect.right = m_backbuffer_size[0] / 2;

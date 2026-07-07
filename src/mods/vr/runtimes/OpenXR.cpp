@@ -352,6 +352,9 @@ void OpenXR::on_draw_ui() {
                 "Resolution scale is saved, but this engine path cannot safely rebuild OpenXR swapchains live. Reinject/restart to apply it.");
         }
 
+        if (ImGui::Button("Reset", ImVec2(200, 0))) {
+            this->resolution_scale->value() = 1.0;
+        }
         //this->push_dummy_projection->draw("Virtual Desktop Fix");
 
         ImGui::Checkbox("Virtual Desktop Fix", &this->push_dummy_projection);
