@@ -2305,6 +2305,15 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                     desc.Width, desc.Height, desc.Format, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, vr->depthDesc[i], true);
             }
         }
+        if (!vr->rawMotionVectorsTex) {
+            for (int i = 0; i < 2; i++) {
+                if (vr->motionVectorsDesc[i].pTexture == NULL || vr->motionVectorsDesc[i].pTexture->GetDesc().Width != desc.Width ||
+                    vr->motionVectorsDesc[i].pTexture->GetDesc().Height != desc.Height) {
+                    vr->d3d12Renderer->CreateTexture(desc.Width, desc.Height, DXGI_FORMAT_R16G16_FLOAT,
+                        D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, vr->motionVectorsDesc[i], true);
+                }
+            }
+        }
     }
     if (vr->rawMotionVectorsTex) {
         auto desc = vr->rawMotionVectorsTex->GetDesc();

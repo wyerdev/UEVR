@@ -7953,7 +7953,7 @@ void VR::on_present() {
     }
     if (GetAsyncKeyState(VK_NUMPAD4) == 0 && btn4 == true) {
         btn4 = false;
-        m_fix_object_motion_vector->toggle();
+        //m_fix_object_motion_vector->toggle();
     }
 
     m_present_thread_id = GetCurrentThreadId();
@@ -8050,7 +8050,7 @@ void VR::on_present() {
     }
     if (GetAsyncKeyState(VK_NUMPAD7) == 0 && btn7 == true) {
         btn7 = false;
-        m_clear_before_framewarp->toggle();
+        //m_clear_before_framewarp->toggle();
     }
     static bool btn8 = false;
     if (GetAsyncKeyState(VK_NUMPAD8) < 0 && btn8 == false) {
