@@ -3,9 +3,6 @@
 
 #include "Framework.hpp"
 
-// [fork] shader-plugin: SEH-protected execute() body lives in pluginloader/
-#include "../../pluginloader/D3D12Helpers.hpp"
-
 #include "TextureContext.hpp"
 #include "CommandContext.hpp"
 
@@ -337,7 +334,21 @@ void CommandContext::clear_rtv(d3d12::TextureContext& tex, const float* color, D
 }
 
 void CommandContext::execute() {
-    // [fork] shader-plugin: route submit through SEH-protected helper (pluginloader/D3D12Helpers.cpp)
-    uevr::d3d12_helpers::execute_safe(*this);
+    std::scoped_lock _{this->mtx};
+    
+    if (this->has_commands) {
+        if (FAILED(this->cmd_list->Close())) {
+            spdlog::error("[VR] Failed to close command list. ({})", utility::narrow(this->internal_name));
+            return;
+        }
+        
+        auto command_queue = g_framework->get_d3d12_hook()->get_command_queue();
+        ID3D12CommandList* const cmd_lists[] = {this->cmd_list.Get()};
+        command_queue->ExecuteCommandLists(1, cmd_lists);
+        command_queue->Signal(this->fence.Get(), ++this->fence_value);
+        this->fence->SetEventOnCompletion(this->fence_value, this->fence_event);
+        this->waiting_for_fence = true;
+        this->has_commands = false;
+    }
 }
 }

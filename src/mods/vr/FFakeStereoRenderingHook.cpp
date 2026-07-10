@@ -5,6 +5,7 @@
 
 #include <asmjit/asmjit.h>
 #include <future>
+// [fork] VEH: synchronize enhanced handler state across crash paths
 #include <mutex>
 
 #include <spdlog/spdlog.h>
@@ -66,6 +67,7 @@
 FFakeStereoRenderingHook* g_hook = nullptr;
 uint32_t g_frame_count{};
 
+// [fork] VEH: read Lua script-call depth when classifying access violations
 namespace uevr {
     extern thread_local uint32_t g_is_in_script_call;
 }
@@ -105,6 +107,7 @@ FFakeStereoRenderingHook::FFakeStereoRenderingHook() {
     setup_options();
 }
 
+// [fork] VEH: collect lock-free crash-handler diagnostics and crash dumps
 // VEH handler diagnostic counters — atomic for lock-free access from any thread.
 // Counters are incremented in the VEH handler (no mutex) and read/reset in on_frame (safe).
 namespace veh_stats {
@@ -232,6 +235,7 @@ namespace veh_stats {
 }
 
 void FFakeStereoRenderingHook::on_frame() {
+    // [fork] VEH: reset transition state and periodically emit crash diagnostics
     // Update tick so VEH handler knows rendering is alive
     veh_stats::last_on_frame_tick.store(GetTickCount64(), std::memory_order_relaxed);
     veh_stats::on_frame_count.fetch_add(1, std::memory_order_relaxed);
@@ -317,6 +321,7 @@ void FFakeStereoRenderingHook::on_draw_ui() {
 
     ImGui::SetNextItemOpen(true, ImGuiCond_Once);
     if (ImGui::TreeNode("Stereo Hook Options")) {
+        // [fork] VEH: expose the crash-handler mode selector
         m_asynchronous_scan->draw("Asynchronous Code Scanning");
         m_recreate_textures_on_reset->draw("Recreate Textures on Reset");
         m_frame_delay_compensation->draw("Frame Delay Compensation");
@@ -4022,6 +4027,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
     m_tracking_system_hook = std::make_unique<IXRTrackingSystemHook>(this, potential_hmd_device_offset);
     m_components.push_back(m_tracking_system_hook.get());
 
+    // [fork] VEH: selectable original/enhanced XR null-dereference handlers
     // Add a vectored exception handler that catches attempted dereferences of a null XRSystem or HMDDevice.
     // When UEVR nullifies the engine's XR/HMD device pointers, engine code that dereferences them will
     // trigger an access violation. This handler verifies the crash is caused by our nullification (by
@@ -4170,6 +4176,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             spdlog::info("[VR] Registering enhanced (experimental) VEH crash handler (mode={}). Restart to switch mode.",
                          crash_handler_mode == CRASH_HANDLER_ENHANCED_DEBUG ? "Enhanced Experimental Debug" : "Enhanced Experimental");
             AddVectoredExceptionHandler(1, [](PEXCEPTION_POINTERS exception) -> LONG {
+        // [fork] VEH: enhanced handler state and game-module classification
         static std::vector<Patch::Ptr> xrsystem_patches{};
         static std::unordered_set<uintptr_t> handled_addresses{};
         static std::atomic<bool> handler_active{false};
@@ -4199,6 +4206,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             return mod_path->starts_with(game_exe_dir);
         };
 
+        // [fork] VEH: filter non-AV exceptions and capture fatal diagnostics
         veh_stats::total_veh_invocations.fetch_add(1, std::memory_order_relaxed);
 
         const auto exc_code = exception->ExceptionRecord->ExceptionCode;
@@ -4237,6 +4245,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
+        // [fork] VEH: classify transition crashes and fast-path ordinary faults
         veh_stats::total_av_count.fetch_add(1, std::memory_order_relaxed);
 
         const auto fault_address = exception->ExceptionRecord->ExceptionInformation[1];
@@ -4311,6 +4320,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             }
         }
 
+        // [fork] VEH: cache temporary dynamic-code fixups and guard re-entry
         // Fast path: temporary fixup cache for dynamic-code addresses.
         // These can't be permanently patched (heap memory may be freed/relocated).
         // Cache the decoded info for fast repeat handling without full re-analysis.
@@ -4464,6 +4474,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             }
         }
 
+        // [fork] VEH: use bounded register tracing plus game-module heuristic verification
         // Step B (stack walk verification) was removed — it decoded up to
         // 8 callers × 500 instructions per VEH exception, causing severe stutter
         // when many crash sites are discovered simultaneously. The heuristic
@@ -4530,6 +4541,7 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
+        // [fork] VEH: apply permanent patches or temporary context fixups
         // --- REMEDIATION ---
         // All game-module XR crash sites get permanent patches:
         // - REG-dest (mov rax,[null_chain]): xor reg,reg + NOP — load from null = null

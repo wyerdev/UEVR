@@ -32,10 +32,13 @@ public:
     std::string_view get_name() const override { return "PluginLoader"; }
     bool is_advanced_mod() const override { return true; }
     std::optional<std::string> on_initialize_d3d_thread() override;
+    // [fork] shader-plugin: expose plugin-specific sidebar entries
     std::vector<SidebarEntryInfo> get_sidebar_entries() override;
     void on_draw_ui() override;
+    // [fork] shader-plugin: dispatch the selected plugin sidebar panel
     void on_draw_sidebar_entry(std::string_view name) override;
 
+    // [fork] shader-plugin: query preset-resolved plugin enablement
     bool is_shader_plugin_enabled(const std::string& plugin_dll_name) const;
 
     void on_present();
@@ -44,6 +47,7 @@ public:
     void on_xinput_get_state(uint32_t* retval, uint32_t user_index, XINPUT_STATE* state) override;
     void on_xinput_set_state(uint32_t* retval, uint32_t user_index, XINPUT_VIBRATION* vibration) override;
 
+    // [fork] shader-plugin: pre-render callback dispatch boundary
     void on_pre_render_vr_framework_dx11();
     void on_pre_render_vr_framework_dx12();
     void on_post_render_vr_framework_dx11(ID3D11DeviceContext* context, ID3D11Texture2D*, ID3D11RenderTargetView* rtv) override;
@@ -89,6 +93,7 @@ public:
     bool add_on_message(UEVR_OnMessageCb cb);
     bool add_on_xinput_get_state(UEVR_OnXInputGetStateCb cb);
     bool add_on_xinput_set_state(UEVR_OnXInputSetStateCb cb);
+    // [fork] shader-plugin: register pre-render and plugin UI callbacks
     bool add_on_pre_render_vr_framework_dx11(UEVR_OnPreRenderVRFrameworkDX11Cb cb);
     bool add_on_pre_render_vr_framework_dx12(UEVR_OnPreRenderVRFrameworkDX12Cb cb);
     bool add_on_post_render_vr_framework_dx11(UEVR_OnPostRenderVRFrameworkDX11Cb cb);
@@ -165,6 +170,7 @@ private:
     std::shared_mutex m_api_cb_mtx;
     std::vector<UEVR_OnPresentCb> m_on_present_cbs{};
     std::vector<UEVR_OnDeviceResetCb> m_on_device_reset_cbs{};
+    // [fork] shader-plugin: callback storage for pre-render and plugin UI hooks
     std::vector<UEVR_OnPreRenderVRFrameworkDX11Cb> m_on_pre_render_vr_framework_dx11_cbs{};
     std::vector<UEVR_OnPreRenderVRFrameworkDX12Cb> m_on_pre_render_vr_framework_dx12_cbs{};
     std::vector<UEVR_OnPostRenderVRFrameworkDX11Cb> m_on_post_render_vr_framework_dx11_cbs{};
@@ -174,6 +180,7 @@ private:
     std::vector<UEVR_OnXInputSetStateCb> m_on_xinput_set_state_cbs{};
     std::vector<UEVR_OnCustomEventCb> m_on_custom_event_cbs{};
     std::vector<UEVR_OnDrawUICb> m_on_draw_ui_cbs{};
+    // [fork] shader-plugin: pair UI callbacks with their owning plugin names
     std::vector<std::string> m_on_draw_ui_plugin_names{};
 
     std::vector<UEVR_Engine_TickCb> m_on_pre_engine_tick_cbs{};
@@ -188,6 +195,7 @@ private:
 
     using generic_std_function = void*;
 
+    // [fork] shader-plugin: include new callback lists in bulk removal
     std::vector<std::vector<generic_std_function>*> m_plugin_callback_lists{
         // Plugin
         (std::vector<generic_std_function>*)&m_on_present_cbs,
@@ -206,6 +214,7 @@ private:
 
         // Custom
         (std::vector<generic_std_function>*)&m_on_custom_event_cbs,
+        // [fork] shader-plugin: remove plugin UI callbacks with the other custom callbacks
         (std::vector<generic_std_function>*)&m_on_draw_ui_cbs,
 
         // SDK
@@ -225,6 +234,7 @@ private:
     std::map<std::string, HMODULE> m_plugins{};
     std::map<std::string, std::string> m_plugin_load_errors{};
     std::map<std::string, std::string> m_plugin_load_warnings{};
+    // [fork] shader-plugin: identify the plugin currently registering callbacks
     std::string m_current_loading_plugin{};
 
     // [fork] shader-plugin: preset save/load/list/delete + UI lives in pluginloader/PresetSystem.cpp

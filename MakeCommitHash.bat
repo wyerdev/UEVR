@@ -10,6 +10,7 @@ FOR /F "tokens=*" %%g IN ('git rev-parse HEAD') DO (SET UEVR_COMMIT_HASH=%%g)
 FOR /F "tokens=*" %%t IN ('git describe --tags --abbrev^=0') DO (SET UEVR_TAG=%%t)
 IF "%UEVR_TAG%"=="" (SET UEVR_TAG=no_tag)
 
+REM [fork] derive build metadata from the selected tag and PowerShell timestamp
 SET UEVR_TAG_LONG=%UEVR_TAG%
 IF NOT "%UEVR_TAG%"=="no_tag" (
 FOR /F "tokens=*" %%n IN ('git rev-list %UEVR_TAG%..HEAD --count') DO (SET UEVR_COMMITS_PAST_TAG=%%n)

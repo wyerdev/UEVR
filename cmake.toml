@@ -2,7 +2,7 @@
 # to build:
 # > cmake -B build
 # > cmake --build build --config Release
-#
+# [fork] shader-plugin: additive target definitions follow
 [project]
 name = "uevr-proj"
 cmake-before=""" 
@@ -137,6 +137,7 @@ compile-definitions = [
 type = "static"
 sources = ["examples/renderlib/**.cpp", "examples/renderlib/**.c"]
 headers = ["examples/renderlib/**.hpp", "examples/renderlib/**.h"]
+# [fork] shader-plugin: include stb for render-library texture loading
 include-directories = ["examples/renderlib", "include/", "dependencies/stb"]
 compile-options = ["/EHa", "/MP"]
 compile-features = ["cxx_std_23"]
@@ -157,6 +158,7 @@ type = "plugin"
 sources = ["examples/example_plugin/**.cpp", "examples/example_plugin/**.c"]
 headers = ["examples/example_plugin/**.hpp", "examples/example_plugin/**.h"]
 
+# [fork] shader-plugin: shader plugin targets
 [target.fakehdr_plugin]
 type = "plugin"
 sources = ["examples/fakehdr_plugin/FakeHDRPlugin.cpp"]

@@ -2125,6 +2125,7 @@ void VR::on_present() {
     std::scoped_lock _{m_openvr_mtx};
     m_submitted = false;
 
+    // [fork] diagnostics: log VR rendering-mode transitions for plugin/effect correlation
     // Log VR rendering-mode transitions so plugin/effect-runtime diagnostics
     // can be correlated with the active mode (Native Stereo / Synchronized
     // Sequential / Alternating-AFR, plus the native_stereo_fix flag and the

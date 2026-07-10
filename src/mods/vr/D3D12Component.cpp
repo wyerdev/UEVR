@@ -17,6 +17,7 @@
 #include "d3d12/DirectXTK.hpp"
 
 #include "D3D12Component.hpp"
+// [fork] shader-plugin: notify plugins when D3D12 resources are rebuilt
 #include "../PluginLoader.hpp"
 
 // [fork] shader-plugin: in-place TextureContext update lives in pluginloader/
@@ -29,6 +30,7 @@ constexpr auto ENGINE_SRC_COLOR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
 
 namespace vrmod {
 namespace {
+// [fork] diagnostics: track native render-target identity across D3D12 frames
 struct NativeRtTracking {
     ID3D12Resource* scene_rt{};
     ID3D12Resource* scene_capture_rt{};
@@ -67,6 +69,7 @@ bool safe_get_resource_desc(ID3D12Resource* resource, D3D12_RESOURCE_DESC& out_d
 }
 
 vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
+    // [fork] diagnostics: validate and rebuild render-target state during transitions
     if (m_force_reset || m_last_afr_state != vr->is_using_afr()) {
         if (!setup()) {
             SPDLOG_ERROR_EVERY_N_SEC(1, "[D3D12 VR] Could not set up, trying again next frame");
@@ -78,6 +81,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     }
 
     auto& hook = g_framework->get_d3d12_hook();
+    // [fork] diagnostics: reuse the fake-stereo hook for render-target invalidation
     const auto& ffsr = VR::get()->m_fake_stereo_hook;
 
     auto invalidate_rt_state = [&](const char* reason) {
@@ -188,6 +192,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         runtime->fix_frame();
     }
 
+    // [fork] diagnostics: validate the UI resource before descriptor and copy operations
     const auto ui_target = ffsr->get_render_target_manager()->get_ui_target();
     const auto ui_target_native = safe_get_native_resource(ui_target);
 
@@ -1159,6 +1164,7 @@ void D3D12Component::on_post_present(VR* vr) {
 }
 
 void D3D12Component::on_reset(VR* vr) {
+    // [fork] diagnostics: reset native resource identity tracking with D3D12 state
     m_force_reset = true;
     m_last_checked_native = nullptr;
     reset_native_rt_tracking();
@@ -1210,6 +1216,7 @@ void D3D12Component::on_reset(VR* vr) {
         bool needs_depth_resize = false;
 
         if (scene_depth_tex != nullptr) {
+            // [fork] diagnostics: guard SceneDepthZ descriptor access during reset
             D3D12_RESOURCE_DESC desc{};
             if (safe_get_resource_desc(scene_depth_tex.Get(), desc)) {
                 needs_depth_resize = vr->m_openxr->needs_depth_resize(desc.Width, desc.Height);
@@ -1244,6 +1251,7 @@ void D3D12Component::on_reset(VR* vr) {
     m_openvr.texture_counter = 0;
 }
 
+// [fork] diagnostics: safely query resources while rebuilding D3D12 component state
 bool D3D12Component::setup() {
     SPDLOG_INFO_EVERY_N_SEC(1, "[VR] Setting up d3d12 textures...");
 
@@ -1487,6 +1495,7 @@ std::optional<std::string> D3D12Component::OpenXR::create_swapchains() {
         auto ue4_texture = vr->m_fake_stereo_hook->get_render_target_manager()->get_render_target();
 
         if (ue4_texture != nullptr) {
+            // [fork] diagnostics: guard render-target access during OpenXR swapchain setup
             backbuffer = safe_get_native_resource(ue4_texture);
             has_actual_vr_backbuffer = backbuffer != nullptr;
         }

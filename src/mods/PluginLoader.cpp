@@ -34,6 +34,7 @@
 #include "pluginloader/FRHITexture2DFunctions.hpp"
 #include "pluginloader/FUObjectArrayFunctions.hpp"
 #include "pluginloader/UScriptStructFunctions.hpp"
+// [fork] shader-plugin: register and replay shared plugin settings
 #include "pluginloader/SettingsRegistry.hpp"
 // [fork] shader-plugin: shader infra helpers (PSO state, SEH wrapper, settings dir migration)
 #include "pluginloader/ShaderInfraRegistration.hpp"
@@ -189,6 +190,7 @@ bool on_post_render_vr_framework_dx12(UEVR_OnPostRenderVRFrameworkDX12Cb cb) {
     return PluginLoader::get()->add_on_post_render_vr_framework_dx12(cb);
 }
 
+// [fork] shader-plugin: expose pre-render and UI callback registration
 bool on_pre_render_vr_framework_dx11(UEVR_OnPreRenderVRFrameworkDX11Cb cb) {
     if (cb == nullptr) {
         return false;
@@ -222,6 +224,7 @@ bool on_draw_ui(UEVR_OnDrawUICb cb) {
 }
 }
 
+// [fork] shader-plugin: append new callback and settings API entries
 UEVR_PluginCallbacks g_plugin_callbacks {
     uevr::on_present,
     uevr::on_device_reset,
@@ -272,6 +275,7 @@ UEVR_PluginFunctions g_plugin_functions {
         return UEVR_TOTAL_COMMITS;
     },
     .dispatch_custom_event = uevr::dispatch_custom_event,
+    // [fork] shader-plugin: append settings persistence API entries
     .register_settings_serializer = uevr::settings_registry::register_settings_serializer,
     .notify_settings_changed = uevr::settings_registry::notify_settings_changed
 };
@@ -1887,6 +1891,7 @@ std::optional<std::string> PluginLoader::on_initialize_d3d_thread() {
             continue;
         }
 
+        // [fork] shader-plugin: associate serializer registrations with their DLL
         spdlog::info("[PluginLoader] Initializing {}...", name);
         m_current_loading_plugin = name;
         try {
@@ -1902,14 +1907,17 @@ std::optional<std::string> PluginLoader::on_initialize_d3d_thread() {
             m_plugin_load_errors.emplace(name, "Exception occurred in uevr_plugin_initialize");
             FreeLibrary(mod);
             it = m_plugins.erase(it);
+            // [fork] shader-plugin: clear callback-registration ownership after failed initialization
             m_current_loading_plugin.clear();
             continue;
         }
 
+        // [fork] shader-plugin: clear callback-registration ownership after initialization
         m_current_loading_plugin.clear();
         ++it;
     }
 
+    // [fork] shader-plugin: replay the shared preset after plugin serializers register
     // Phase B: now that every plugin's on_initialize() (and thus their
     // register_settings_serializer call) has run, replay auto.uevrpreset so
     // settings persist across the DLL reload that load_preset triggers.
@@ -1923,6 +1931,7 @@ void PluginLoader::attempt_unload_plugins() {
     {
         std::unique_lock _{m_api_cb_mtx};
 
+        // [fork] shader-plugin: flush and clear settings before unloading plugin DLLs
         // Flush any pending preset auto-save and drop the in-memory
         // settings registry before plugin DLLs are freed — the registry
         // holds raw function pointers into those DLLs.
@@ -1932,6 +1941,7 @@ void PluginLoader::attempt_unload_plugins() {
         for (auto& callbacks : m_plugin_callback_lists) {
             callbacks->clear();
         }
+        // [fork] shader-plugin: clear the plugin names paired with UI callbacks
         m_on_draw_ui_plugin_names.clear();
 
         {
@@ -1942,6 +1952,7 @@ void PluginLoader::attempt_unload_plugins() {
             }
         }
 
+        // [fork] shader-plugin: drain GPU work before unloading plugin-owned resources
         // Drain all in-flight GPU work that may reference plugin-owned
         // D3D12 resources (PSOs, textures, descriptor heaps, etc.).
         // Without this, FreeLibrary destroys ComPtrs while the GPU is
@@ -1980,6 +1991,7 @@ bool PluginLoader::is_shader_plugin_enabled(const std::string& name) const {
 }
 
 std::vector<SidebarEntryInfo> PluginLoader::get_sidebar_entries() {
+    // [fork] shader-plugin: expose one sidebar entry per plugin UI callback
     std::vector<SidebarEntryInfo> entries;
     entries.emplace_back("PluginLoader", false);
 
@@ -1992,6 +2004,7 @@ std::vector<SidebarEntryInfo> PluginLoader::get_sidebar_entries() {
     return entries;
 }
 
+// [fork] shader-plugin: dispatch the selected plugin sidebar entry
 void PluginLoader::on_draw_sidebar_entry(std::string_view name) {
     if (name == "PluginLoader") {
         on_draw_ui();
@@ -2013,6 +2026,7 @@ void PluginLoader::on_draw_sidebar_entry(std::string_view name) {
 void PluginLoader::on_draw_ui() {
     std::scoped_lock _{m_mux};
 
+    // [fork] shader-plugin: render the plugin panel header and status controls
     const auto renderer = g_framework->get_renderer_type();
     ImGui::Text("Renderer: %s", renderer == Framework::RendererType::D3D12 ? "D3D12" : "D3D11");
     ImGui::Separator();
@@ -2051,6 +2065,7 @@ void PluginLoader::on_draw_ui() {
         [this]() { attempt_unload_plugins(); },
         [this]() { reload_plugins(); });
 
+    // [fork] shader-plugin: show preset-resolved plugin status after preset UI
     // Plugin status display — drawn AFTER preset UI so loading a preset refreshes immediately
     if (!m_plugins.empty()) {
         ImGui::Spacing();
@@ -2096,6 +2111,7 @@ void PluginLoader::on_present() {
         }
     }
 
+    // [fork] shader-plugin: debounce settings auto-save from the present loop
     // Debounced auto-save of the .uevrpreset file (Phase A scaffold). Cheap
     // fast path: single relaxed atomic load when nothing is dirty.
     uevr::settings_registry::tick_debounce();
@@ -2116,6 +2132,7 @@ void PluginLoader::on_device_reset() {
     }
 }
 
+// [fork] shader-plugin: dispatch pre-render callbacks for each renderer
 void PluginLoader::on_pre_render_vr_framework_dx11() {
     std::shared_lock _{m_api_cb_mtx};
 
@@ -2378,6 +2395,7 @@ bool PluginLoader::add_on_post_render_vr_framework_dx12(UEVR_OnPostRenderVRFrame
 }
 
 bool PluginLoader::add_on_pre_render_vr_framework_dx11(UEVR_OnPreRenderVRFrameworkDX11Cb cb) {
+    // [fork] shader-plugin: store pre-render callbacks registered by plugins
     std::unique_lock _{m_api_cb_mtx};
 
     m_on_pre_render_vr_framework_dx11_cbs.push_back(cb);
@@ -2398,6 +2416,7 @@ bool PluginLoader::add_on_custom_event(UEVR_OnCustomEventCb cb) {
     return true;
 }
 
+// [fork] shader-plugin: store plugin UI callbacks with their owning plugin name
 bool PluginLoader::add_on_draw_ui(UEVR_OnDrawUICb cb) {
     std::unique_lock _{m_api_cb_mtx};
 

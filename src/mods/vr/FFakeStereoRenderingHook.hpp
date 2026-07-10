@@ -590,6 +590,7 @@ private:
     const ModToggle::Ptr m_asynchronous_scan{ ModToggle::create("VR_AsynchronousScan", true) };
     // Off by default because it can cause issues with some games
     const ModToggle::Ptr m_use_fmalloc_scene_view_extensions{ ModToggle::create("VR_UseFMallocSceneViewExtensions", false) };
+    // [fork] VEH: expose selectable XR null-dereference crash-handler modes
     // Crash handler mode for XR null-dereference patches. Requires restart to take effect.
     //   0 = Original (Nightly) — praydog's original simple handler (default)
     //   1 = Enhanced (Experimental) — heuristic patching, transition detection, no periodic stats logging

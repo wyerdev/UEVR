@@ -10,6 +10,7 @@
 #include <vector>
 
 namespace uevr {
+// [fork] VEH: track nested script execution so crash handling can reject script faults
 // Thread-local nesting counter for active script calls on the current thread.
 // The VEH handler consults this to distinguish access violations triggered by
 // script execution from legitimate XR/runtime crashes. This must be modified
@@ -102,6 +103,7 @@ public:
         }
     }
 
+    // [fork] VEH: guard Lua frame callbacks during crash-handler classification
     void frame() {
         std::scoped_lock _{m_mtx};
 
@@ -115,6 +117,7 @@ public:
         }
     }
 
+    // [fork] VEH: guard Lua UI callbacks during crash-handler classification
     void draw_ui() {
         std::scoped_lock _{m_mtx};
 

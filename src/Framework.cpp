@@ -3,6 +3,7 @@
 
 #include <windows.h>
 #include <ShlObj.h>
+// [fork] diagnostics: query game-module bounds for crash reporting
 #include <Psapi.h>
 
 #include <spdlog/sinks/basic_file_sink.h>
@@ -24,6 +25,7 @@
 
 #include "Mods.hpp"
 #include "mods/PluginLoader.hpp"
+// [fork] shader-plugin: resolve sidebar styling from the settings registry
 #include "mods/pluginloader/SettingsRegistry.hpp"
 #include "mods/VR.hpp"
 #include "mods/ImGuiThemeHelpers.hpp"
@@ -37,6 +39,7 @@
 namespace fs = std::filesystem;
 using namespace std::literals;
 
+// [fork] diagnostics: limit destructive D3D rehook attempts during transitions
 // D3D rehook attempt counter — file-scope to avoid changing Framework class layout.
 // Only accessed from hook_monitor (monitor thread) and on_post_present callbacks (render thread).
 // Set to 0: after init, NEVER rehook. The DXGI vtable hooks persist even when Present
@@ -123,6 +126,7 @@ void Framework::hook_monitor() {
                 // existing vtable hooks) and won't help if the game is genuinely in a
                 // loading screen. The hooks are global DXGI vtable hooks — if they worked
                 // before, they'll catch Present again when the game resumes rendering.
+                // [fork] diagnostics: stop repeated post-init D3D rehooks during stalled Present
                 if (m_initialized && s_consecutive_rehook_attempts >= MAX_POST_INIT_REHOOK_ATTEMPTS) {
                     // Just wait — don't keep tearing down and recreating hooks.
                     m_last_present_time = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -229,6 +233,7 @@ Framework::Framework(HMODULE framework_module)
     spdlog::set_default_logger(m_logger);
     spdlog::flush_on(spdlog::level::info);
 
+    // [fork] diagnostics: last-resort unhandled exception capture
     // Install an unhandled exception filter as a last-resort crash catcher.
     // This fires AFTER all VEH handlers have passed (EXCEPTION_CONTINUE_SEARCH)
     // and the OS is about to terminate the process. Writes crash info using
@@ -657,10 +662,12 @@ void Framework::on_post_present_d3d11() {
             m_last_present_time = std::chrono::steady_clock::now();
         }
 
+        // [fork] diagnostics: reset rehook-attempt tracking when D3D11 Present resumes
         s_consecutive_rehook_attempts = 0;
         return;
     }
 
+    // [fork] diagnostics: reset rehook-attempt tracking when D3D11 Present resumes
     for (auto& mod : m_mods->get_mods()) {
         mod->on_post_present();
     }
@@ -669,6 +676,7 @@ void Framework::on_post_present_d3d11() {
         m_last_present_time = std::chrono::steady_clock::now();
     }
 
+    // [fork] diagnostics: clear the D3D11 rehook-attempt counter after Present
     s_consecutive_rehook_attempts = 0;
 }
 
@@ -818,10 +826,12 @@ void Framework::on_post_present_d3d12() {
             m_last_present_time = std::chrono::steady_clock::now();
         }
 
+        // [fork] diagnostics: reset rehook-attempt tracking when D3D12 Present resumes
         s_consecutive_rehook_attempts = 0;
         return;
     }
     
+    // [fork] diagnostics: reset rehook-attempt tracking when D3D12 Present resumes
     for (auto& mod : m_mods->get_mods()) {
         mod->on_post_present();
     }
@@ -830,6 +840,7 @@ void Framework::on_post_present_d3d12() {
         m_last_present_time = std::chrono::steady_clock::now();
     }
 
+    // [fork] diagnostics: log and clear the D3D12 rehook counter after Present resumes
     if (s_consecutive_rehook_attempts > 0) {
         spdlog::info("D3D12 Present resumed after {} rehook attempt(s) — counter reset",
                      s_consecutive_rehook_attempts);
@@ -1324,6 +1335,7 @@ void Framework::draw_ui() {
         m_cursor_state_changed = false;
     }
     
+    // [fork] diagnostics: identify fork builds in the in-game UI
     static const auto UEVR_NAME = std::format("UEVR Patched [{}+{}-{:.8}]", UEVR_TAG, UEVR_COMMITS_PAST_TAG, UEVR_COMMIT_HASH);
 
     ImGui::SetNextWindowSize(ImVec2(window_w, window_h), ImGuiCond_::ImGuiCond_Once);
@@ -1387,6 +1399,7 @@ void Framework::draw_ui() {
         ImGui::TableSetColumnIndex(0); // Set to the first column
 
         ImGui::BeginChild("UEVRLeftPane", ImVec2(0, 0), true);
+        // [fork] shader-plugin: align sidebar labels for nested plugin entries
         auto dcs = [&](const char* label, int32_t page_value) -> bool {
             ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));
             if (ImGui::Selectable(label, m_sidebar_state.selected_entry == page_value)) {
@@ -1441,6 +1454,7 @@ void Framework::draw_ui() {
 
             for (size_t i = 1; i < sidebar_entries.size(); ++i) {
                 if (is_advanced_mode || !sidebar_entries[i].m_advanced_entry) {
+                    // [fork] shader-plugin: classify nested sidebar entries for custom visuals
                     bool is_sub_entry = false;
                     for (const auto& range : mod_sidebar_ranges) {
                         if (i == range.mn) {

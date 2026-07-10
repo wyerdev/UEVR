@@ -1693,6 +1693,7 @@ public:
             return (FRHITexture2D*)fn();
         }
 
+        // [fork] shader-plugin: C++ accessors for scene capture and pre-render targets
         static FRHITexture2D* get_scene_capture_render_target() {
             static const auto fn = initialize()->get_scene_capture_render_target;
             return fn != nullptr ? (FRHITexture2D*)fn() : nullptr;

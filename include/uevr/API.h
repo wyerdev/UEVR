@@ -36,6 +36,7 @@ SOFTWARE.
 #define UEVR_OUT
 
 #define UEVR_PLUGIN_VERSION_MAJOR 2
+/* [fork] shader-plugin: extend the public plugin ABI for render callbacks and settings */
 #define UEVR_PLUGIN_VERSION_MINOR 420
 #define UEVR_PLUGIN_VERSION_PATCH 0
 
@@ -156,6 +157,7 @@ typedef void (*UEVR_OnPresentCb)();
 typedef void (*UEVR_OnDeviceResetCb)();
 
 /* VR Specific renderer callbacks */
+/* [fork] shader-plugin: pre-render callback types */
 typedef void (*UEVR_OnPreRenderVRFrameworkDX11Cb)(); /* called before VR eye textures are copied/submitted */
 typedef void (*UEVR_OnPreRenderVRFrameworkDX12Cb)(); /* called before VR eye textures are copied/submitted */
 typedef void (*UEVR_OnPostRenderVRFrameworkDX11Cb)(void*, void*, void*); /* immediate_context, ID3D11Texture2D* resource, ID3D11RenderTargetView* rtv */
@@ -181,6 +183,7 @@ typedef bool (*UEVR_OnPresentFn)(UEVR_OnPresentCb);
 typedef bool (*UEVR_OnDeviceResetFn)(UEVR_OnDeviceResetCb);
 
 /* VR Renderer */
+/* [fork] shader-plugin: pre-render callback registration functions */
 typedef bool (*UEVR_OnPreRenderVRFrameworkDX11Fn)(UEVR_OnPreRenderVRFrameworkDX11Cb);
 typedef bool (*UEVR_OnPreRenderVRFrameworkDX12Fn)(UEVR_OnPreRenderVRFrameworkDX12Cb);
 typedef bool (*UEVR_OnPostRenderVRFrameworkDX11Fn)(UEVR_OnPostRenderVRFrameworkDX11Cb);
@@ -195,6 +198,7 @@ typedef bool (*UEVR_OnXInputSetStateFn)(UEVR_OnXInputSetStateCb);
 typedef void (*UEVR_OnCustomEventCb)(const char* evt, const char* evt_data);
 typedef bool (*UEVR_OnCustomEventFn)(UEVR_OnCustomEventCb);
 
+/* [fork] shader-plugin: plugin UI callback type */
 typedef void (*UEVR_OnDrawUICb)(void* imgui_context);
 typedef bool (*UEVR_OnDrawUIFn)(UEVR_OnDrawUICb);
 
@@ -209,6 +213,7 @@ typedef bool (*UEVR_UFunction_NativePostFn)(UEVR_UFunctionHandle, UEVR_UObjectHa
 
 typedef void (*UEVR_PluginRequiredVersionFn)(UEVR_PluginVersion*);
 
+/* [fork] shader-plugin: settings serializer contract */
 /* Settings serializer — used by register_settings_serializer.
  *
  * A plugin builds one of these (typically via the C++ adapter in
@@ -251,6 +256,7 @@ typedef struct {
     UEVR_OnPostRenderVRFrameworkDX11Fn on_post_render_vr_framework_dx11;
     UEVR_OnPostRenderVRFrameworkDX12Fn on_post_render_vr_framework_dx12;
     UEVR_OnCustomEventFn on_custom_event;
+    /* [fork] shader-plugin: append callback entries for ABI compatibility */
     /* New entries appended at end for ABI compatibility with existing plugins */
     UEVR_OnPreRenderVRFrameworkDX11Fn on_pre_render_vr_framework_dx11;
     UEVR_OnPreRenderVRFrameworkDX12Fn on_pre_render_vr_framework_dx12;
@@ -280,6 +286,7 @@ typedef struct {
     /* Intended for C plugins to listen to via on_custom_event */
     void (*dispatch_custom_event)(const char* event_name, const char* event_data);
 
+    /* [fork] shader-plugin: append settings persistence functions for ABI compatibility */
     /* New entries appended at end for ABI compatibility with existing plugins.
      *
      * register_settings_serializer:
@@ -492,6 +499,7 @@ typedef struct {
 typedef struct {
     UEVR_FRHITexture2DHandle (*get_scene_render_target)();
     UEVR_FRHITexture2DHandle (*get_ui_render_target)();
+    /* [fork] shader-plugin: native-stereo scene capture and pre-render command list */
     UEVR_FRHITexture2DHandle (*get_scene_capture_render_target)();
     /* Returns the open ID3D12GraphicsCommandList* for recording during on_pre_render_vr_framework_dx12.
        Returns NULL outside of that callback or when not using DX12.

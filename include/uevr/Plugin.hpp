@@ -53,6 +53,7 @@ public:
     virtual void on_dllmain() {}
     virtual void on_initialize() {}
     virtual void on_present() {}
+    // [fork] shader-plugin: pre-render callback extension points
     virtual void on_pre_render_vr_framework_dx11() {}
     virtual void on_pre_render_vr_framework_dx12() {}
     virtual void on_post_render_vr_framework_dx11(ID3D11DeviceContext* context, ID3D11Texture2D* texture, ID3D11RenderTargetView* rtv) {}
@@ -76,6 +77,7 @@ public:
     virtual void on_post_viewport_client_draw(UEVR_UGameViewportClientHandle viewport_client, UEVR_FViewportHandle viewport, UEVR_FCanvasHandle) {}
 
     virtual void on_custom_event(const char* event_name, const char* event_data) {}
+    // [fork] shader-plugin: plugin UI callback and ImGui context access
     virtual void on_draw_ui() {}
 
     // Access the UEVR ImGui context (set during on_draw_ui dispatch)
@@ -100,6 +102,7 @@ extern "C" __declspec(dllexport) bool uevr_plugin_initialize(const UEVR_PluginIn
     auto callbacks = param->callbacks;
     auto sdk_callbacks = param->sdk->callbacks;
 
+    // [fork] shader-plugin: register C++ plugin callbacks with the host
     callbacks->on_device_reset([]() {
         uevr::detail::g_plugin->on_device_reset();
     });
@@ -140,6 +143,7 @@ extern "C" __declspec(dllexport) bool uevr_plugin_initialize(const UEVR_PluginIn
         uevr::detail::g_plugin->on_custom_event(event_name, event_data);
     });
 
+    // [fork] shader-plugin: register the plugin UI callback with the host
     callbacks->on_draw_ui([](void* imgui_context) {
         uevr::detail::g_plugin->m_uevr_imgui_context = (ImGuiContext*)imgui_context;
         auto prev_ctx = ImGui::GetCurrentContext();

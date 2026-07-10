@@ -101,8 +101,7 @@ void PluginCommandListD3D12::end() {
     }
 
     // If any plugin recorded commands, close and submit on the game's queue.
-    // CommandContext::execute() handles has_commands check internally.
-    m_ctx.execute();
+    uevr::d3d12_helpers::execute_safe(m_ctx);
 }
 
 ID3D12GraphicsCommandList* PluginCommandListD3D12::get() {

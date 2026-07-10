@@ -34,6 +34,7 @@ git submodule update --init --recursive
 
 #### Command line
 
+<!-- [fork] build: correct the CMake configure command for this fork's build layout -->
 ```
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
 cmake --build ./build --config Release --target uevr
@@ -47,6 +48,7 @@ cmake --build ./build --config Release --target uevr
 4. When "Select a kit" appears, select `Visual Studio Community 2022 Release - amd64`
 5. Select the desired build config (usually `Release` or `RelWithDebInfo`)
 6. You should now be able to compile UEVR by pressing `Ctrl+Shift+P` and selecting `CMake: Build` or by pressing `F7`
+<!-- [fork] shader-plugin: document plugin build and deployment workflow -->
 ### Building plugins
 
 The post-processing plugins are defined in `cmake.toml` and built alongside UEVR:
@@ -63,6 +65,7 @@ To deploy plugins, licenses, and shipping presets:
 bash deploy.sh
 ```
 
+<!-- [fork] build: document stale-object protection and plugin-authoring pitfalls -->
 ## Build-system gotchas
 
 These are non-obvious failure modes that have cost real debugging cycles. Check them first when something compiles cleanly but behaves wrong at runtime.

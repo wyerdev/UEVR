@@ -5,6 +5,7 @@
 
 namespace uevr {
 
+// [fork] shader-plugin: allow plugin dispatch to target the active scene capture RT
 static UEVR_FRHITexture2DHandle s_scene_rt_override = nullptr;
 
 void stereo_hook::set_scene_render_target_override(UEVR_FRHITexture2DHandle override_rt) {
@@ -41,6 +42,7 @@ UEVR_FRHITexture2DHandle stereo_hook::get_ui_render_target() {
     return nullptr;
 }
 
+// [fork] shader-plugin: expose the native-stereo scene-capture render target
 UEVR_FRHITexture2DHandle stereo_hook::get_scene_capture_render_target() {
     const auto& vr = VR::get();
     if (auto& hook = vr->get_fake_stereo_hook(); hook != nullptr) {
@@ -52,6 +54,7 @@ UEVR_FRHITexture2DHandle stereo_hook::get_scene_capture_render_target() {
     return nullptr;
 }
 
+// [fork] shader-plugin: expose the dedicated DX12 pre-render command list
 void* stereo_hook::get_pre_render_command_list() {
     const auto& vr = VR::get();
     if (vr) {
@@ -60,6 +63,7 @@ void* stereo_hook::get_pre_render_command_list() {
     return nullptr;
 }
 
+// [fork] shader-plugin: register scene-capture and pre-render target accessors
 UEVR_FFakeStereoRenderingHookFunctions stereo_hook::functions {
     .get_scene_render_target = &stereo_hook::get_scene_render_target,
     .get_ui_render_target = &stereo_hook::get_ui_render_target,
