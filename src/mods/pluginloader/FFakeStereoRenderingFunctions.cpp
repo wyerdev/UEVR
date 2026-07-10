@@ -55,7 +55,7 @@ UEVR_FRHITexture2DHandle stereo_hook::get_scene_capture_render_target() {
 void* stereo_hook::get_pre_render_command_list() {
     const auto& vr = VR::get();
     if (vr) {
-        return (void*)vr->d3d12().get_plugin_command_list();
+        return (void*)vr->d3d12().plugin_cl().get();
     }
     return nullptr;
 }

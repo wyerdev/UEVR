@@ -12,8 +12,11 @@
 
 #include "uevr/API.h"
 
+#include <imgui.h>
+
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace uevr::settings_registry {
@@ -91,5 +94,20 @@ bool is_plugin_enabled(const std::string& dll_name);
 // Convenience: does the plugin (by DLL name) have custom non-default values
 // while disabled?
 bool plugin_has_custom_disabled_values(const std::string& dll_name);
+
+// Visual styling for a single sidebar entry, returned by the host UI walk.
+// Keeps shader-specific lookup (and any future per-entry styling) out of
+// Framework.cpp so that file stays close to upstream praydog/UEVR.
+struct SidebarItemVisuals {
+    bool   has_color{false};
+    ImVec4 color{};        // valid when has_color
+    float  indent{0.0f};   // 0 = no indent
+};
+
+// `label` is the sidebar entry label; `is_sub_entry` is true when the entry
+// falls inside a mod's sidebar range (i.e. is not the top-level mod entry).
+// Returns indent for any sub-entry and a green/yellow color for entries that
+// match a registered shader plugin (enabled / custom-disabled respectively).
+SidebarItemVisuals get_sidebar_item_visuals(std::string_view label, bool is_sub_entry);
 
 } // namespace uevr::settings_registry

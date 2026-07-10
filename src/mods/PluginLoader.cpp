@@ -1,10 +1,8 @@
 #include <filesystem>
-#include <fstream>
 
 #include <imgui.h>
 #include <spdlog/spdlog.h>
 
-#include <ShlObj.h>
 #include <openvr.h>
 
 #include "Framework.hpp"
@@ -37,6 +35,8 @@
 #include "pluginloader/FUObjectArrayFunctions.hpp"
 #include "pluginloader/UScriptStructFunctions.hpp"
 #include "pluginloader/SettingsRegistry.hpp"
+// [fork] shader-plugin: shader infra helpers (PSO state, SEH wrapper, settings dir migration)
+#include "pluginloader/ShaderInfraRegistration.hpp"
 
 #include "LuaLoader.hpp"
 #include "UObjectHook.hpp"
@@ -44,11 +44,6 @@
 
 #include "Mods.hpp"
 #include "PluginLoader.hpp"
-
-// Single source of truth for the shader settings subdirectory (host side).
-// Plugin DLLs mirror this via examples/renderlib/plugin_assets.hpp.
-// If this path changes, update that header too.
-static constexpr std::string_view SHADER_SETTINGS_DIR_NAME = "shader_settings";
 
 UEVR_PluginVersion g_plugin_version{
     UEVR_PLUGIN_VERSION_MAJOR, UEVR_PLUGIN_VERSION_MINOR, UEVR_PLUGIN_VERSION_PATCH};
@@ -1771,37 +1766,8 @@ void PluginLoader::early_init() try {
 
     spdlog::info("[PluginLoader] Loading plugins...");
 
-    // Migration: move shader settings from data/plugins/ to data/plugins/shader_settings/
-    // Runs every launch — handles partial migration (e.g. interrupted first run).
-    // Collect paths first to avoid iterator invalidation when renaming into a subdirectory.
-    {
-        const auto old_dir = Framework::get_persistent_dir() / "data" / "plugins";
-        const auto new_dir = old_dir / SHADER_SETTINGS_DIR_NAME;
-        if (fs::exists(old_dir)) {
-            std::vector<fs::path> to_migrate;
-            for (const auto& entry : fs::directory_iterator(old_dir)) {
-                if (!entry.is_regular_file()) continue;
-                auto fname = entry.path().filename().string();
-                if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
-                    to_migrate.push_back(entry.path());
-                }
-            }
-            if (!to_migrate.empty()) {
-                fs::create_directories(new_dir);
-                for (const auto& src : to_migrate) {
-                    const auto dest = new_dir / src.filename();
-                    if (fs::exists(dest)) {
-                        // Already migrated previously; remove orphan in old location.
-                        std::error_code ec; fs::remove(src, ec);
-                        if (!ec) spdlog::info("[PluginLoader] Removed orphan shader settings: {}", src.filename().string());
-                    } else {
-                        std::error_code ec; fs::rename(src, dest, ec);
-                        if (!ec) spdlog::info("[PluginLoader] Migrated shader settings: {}", src.filename().string());
-                    }
-                }
-            }
-        }
-    }
+    // [fork] shader-plugin: shader_settings subdir migration lives in pluginloader/
+    uevr::shader_infra::migrate_shader_settings_dir();
 
     auto load_plugins_from_dir = [this](std::filesystem::path path) {
         if (!fs::exists(path) || !fs::is_directory(path)) {
@@ -1984,7 +1950,7 @@ void PluginLoader::attempt_unload_plugins() {
             if (g_framework->is_dx12()) {
                 auto vr = VR::get();
                 if (vr != nullptr) {
-                    vr->d3d12().wait_for_plugin_gpu_work();
+                    vr->d3d12().plugin_cl().wait_for_gpu();
                 }
             }
         } catch (...) {
@@ -2080,7 +2046,10 @@ void PluginLoader::on_draw_ui() {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
-    draw_preset_ui();
+    // [fork] shader-plugin: preset UI lives in pluginloader/PresetSystem.cpp
+    uevr::preset_system::draw_preset_ui(m_preset_state,
+        [this]() { attempt_unload_plugins(); },
+        [this]() { reload_plugins(); });
 
     // Plugin status display — drawn AFTER preset UI so loading a preset refreshes immediately
     if (!m_plugins.empty()) {
@@ -2098,313 +2067,6 @@ void PluginLoader::on_draw_ui() {
         }
     } else {
         ImGui::Text("No plugins loaded.");
-    }
-}
-
-std::filesystem::path PluginLoader::get_local_presets_dir() {
-    auto dir = Framework::get_persistent_dir() / "data" / "plugins" / "presets";
-    std::filesystem::create_directories(dir);
-    return dir;
-}
-
-std::filesystem::path PluginLoader::get_global_presets_dir() {
-    wchar_t app_data_path[MAX_PATH]{};
-    SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
-    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "UEVR" / "data" / "plugins" / "presets";
-    std::filesystem::create_directories(dir);
-    return dir;
-}
-
-std::filesystem::path PluginLoader::get_shipping_presets_dir() {
-    wchar_t app_data_path[MAX_PATH]{};
-    SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
-    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "UEVR" / "data" / "plugins" / "shipping_presets";
-    // Don't create — this dir is managed by the release package, not created at runtime
-    return dir;
-}
-
-std::vector<std::string> PluginLoader::list_presets(const std::filesystem::path& dir) {
-    // Returns names INCLUDING the .uevrpreset extension so the UI can
-    // construct paths via `dir / name` directly.
-    std::vector<std::string> result;
-    try {
-        if (!std::filesystem::exists(dir)) return result;
-        for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-            if (!entry.is_regular_file()) continue;
-            const auto& p = entry.path();
-            if (p.extension() != ".uevrpreset") continue;
-            result.push_back(p.filename().string());
-        }
-        std::sort(result.begin(), result.end());
-    } catch (...) {}
-    return result;
-}
-
-bool PluginLoader::save_preset(const std::filesystem::path& presets_dir, const std::string& name) {
-    try {
-        std::filesystem::create_directories(presets_dir);
-        // Append the canonical extension if the user-supplied name lacks it.
-        std::filesystem::path file_name = name;
-        if (file_name.extension() != ".uevrpreset") {
-            file_name = std::filesystem::path(name + ".uevrpreset");
-        }
-        const auto preset_path = presets_dir / file_name;
-
-        std::string display = file_name.stem().string();
-        if (!uevr::settings_registry::save_named_preset(preset_path, display)) {
-            m_preset_status = "Save failed: write error";
-            return false;
-        }
-
-        m_preset_status = "Saved \"" + display + "\"";
-        spdlog::info("[PluginLoader] Saved preset to {}", preset_path.string());
-        return true;
-    } catch (const std::exception& e) {
-        m_preset_status = std::string("Save failed: ") + e.what();
-        spdlog::error("[PluginLoader] Failed to save preset '{}': {}", name, e.what());
-        return false;
-    }
-}
-
-// Active preset tracking (file-scope to avoid header/class-layout changes)
-static std::string s_active_preset_name{};
-static std::filesystem::path s_active_preset_dir{};
-static bool s_active_preset_is_builtin = false;
-static bool s_active_preset_loaded_from_disk = false;
-
-static std::filesystem::path get_active_preset_file() {
-    return Framework::get_persistent_dir() / "data" / "plugins" / "active_preset.txt";
-}
-
-static void save_active_preset_to_disk() {
-    try {
-        std::ofstream f(get_active_preset_file());
-        if (!f.is_open()) return;
-        f << s_active_preset_name << "\n";
-        f << s_active_preset_dir.string() << "\n";
-        f << (s_active_preset_is_builtin ? 1 : 0) << "\n";
-    } catch (...) {}
-}
-
-static void restore_active_preset_from_disk() {
-    if (s_active_preset_loaded_from_disk) return;
-    s_active_preset_loaded_from_disk = true;
-    try {
-        std::ifstream f(get_active_preset_file());
-        if (!f.is_open()) return;
-        std::string name, dir_str, builtin_str;
-        if (!std::getline(f, name) || name.empty()) return;
-        if (!std::getline(f, dir_str)) return;
-        if (!std::getline(f, builtin_str)) return;
-        auto dir = std::filesystem::path(dir_str);
-        // Verify the preset still exists on disk
-        if (std::filesystem::exists(dir / (name + ".uevrpreset"))) {
-            s_active_preset_name = name;
-            s_active_preset_dir = dir;
-            s_active_preset_is_builtin = (builtin_str == "1");
-        }
-    } catch (...) {}
-}
-
-bool PluginLoader::load_preset(const std::filesystem::path& preset_path) {
-    try {
-        if (!std::filesystem::exists(preset_path)) {
-            m_preset_status = "Load failed: file not found";
-            return false;
-        }
-
-        const auto persistent_dir = Framework::get_persistent_dir();
-        const auto shader_settings_dir = persistent_dir / "data" / "plugins" / SHADER_SETTINGS_DIR_NAME;
-        std::filesystem::create_directories(shader_settings_dir);
-        const auto auto_path = shader_settings_dir / "auto.uevrpreset";
-
-        auto name = preset_path.filename().string();
-        s_active_preset_name = preset_path.stem().string();
-        s_active_preset_dir = preset_path.parent_path();
-        s_active_preset_is_builtin = (s_active_preset_dir == get_shipping_presets_dir());
-        save_active_preset_to_disk();
-
-        m_preset_status = "Loaded \"" + name + "\" - reloading plugins...";
-        spdlog::info("[PluginLoader] Loaded preset '{}', reloading plugins", name);
-
-        // Unload first so attempt_unload_plugins()'s flush_now() drains the
-        // current (about-to-be-replaced) registry to disk — then we copy the
-        // chosen preset over auto.uevrpreset. If we copied first, flush_now()
-        // would clobber it with the still-live old values.
-        attempt_unload_plugins();
-        std::filesystem::copy_file(preset_path, auto_path,
-            std::filesystem::copy_options::overwrite_existing);
-        reload_plugins();
-
-        m_preset_status = "Loaded \"" + name + "\"";
-        return true;
-    } catch (const std::exception& e) {
-        m_preset_status = std::string("Load failed: ") + e.what();
-        spdlog::error("[PluginLoader] Failed to load preset: {}", e.what());
-        return false;
-    }
-}
-
-bool PluginLoader::delete_preset(const std::filesystem::path& preset_path) {
-    try {
-        auto name = preset_path.filename().string();
-        std::error_code ec;
-        std::filesystem::remove(preset_path, ec);
-        m_preset_status = "Deleted \"" + name + "\"";
-        spdlog::info("[PluginLoader] Deleted preset '{}'", name);
-        if (s_active_preset_name == preset_path.stem().string() && s_active_preset_dir == preset_path.parent_path()) {
-            s_active_preset_name.clear();
-            s_active_preset_dir.clear();
-            save_active_preset_to_disk();
-        }
-        return true;
-    } catch (const std::exception& e) {
-        m_preset_status = std::string("Delete failed: ") + e.what();
-        return false;
-    }
-}
-
-void PluginLoader::draw_preset_ui() {
-    if (ImGui::CollapsingHeader("Plugin Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
-        restore_active_preset_from_disk();
-        // Auto-name helper: finds next available "Preset N" name (checks both local and global)
-        auto next_auto_name = [this]() -> std::string {
-            auto local = get_local_presets_dir();
-            auto global = get_global_presets_dir();
-            for (int i = 1; i < 1000; ++i) {
-                auto name = "Preset " + std::to_string(i);
-                auto file = name + ".uevrpreset";
-                if (!std::filesystem::exists(local / file) && !std::filesystem::exists(global / file)) {
-                    return name;
-                }
-            }
-            return "Preset";
-        };
-
-        // Active preset indicator + overwrite
-        if (!s_active_preset_name.empty()) {
-            ImGui::Text("Active: %s%s", s_active_preset_name.c_str(), s_active_preset_is_builtin ? " (built-in)" : "");
-            if (!s_active_preset_is_builtin) {
-                ImGui::SameLine();
-                if (ImGui::Button("Overwrite")) {
-                    save_preset(s_active_preset_dir, s_active_preset_name);
-                }
-            }
-        } else {
-            ImGui::TextDisabled("No preset loaded");
-        }
-
-        ImGui::Spacing();
-
-        // Save as new preset
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
-        ImGui::InputText("##PresetName", m_preset_name_buf, sizeof(m_preset_name_buf));
-
-        // Sanitize to a safe single filename (no path separators, no reserved chars)
-        auto sanitize_name = [](std::string s) -> std::string {
-            std::erase_if(s, [](char c) {
-                return c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|';
-            });
-            while (!s.empty() && (s.back() == '.' || s.back() == ' ')) s.pop_back();
-            while (!s.empty() && (s.front() == '.' || s.front() == ' ')) s.erase(s.begin());
-            return s;
-        };
-
-        ImGui::SameLine();
-        if (ImGui::Button("Save")) {
-            auto dir = get_local_presets_dir();
-            std::string name = sanitize_name((m_preset_name_buf[0] != '\0') ? m_preset_name_buf : next_auto_name());
-            if (name.empty()) {
-                m_preset_status = "Invalid preset name.";
-            } else {
-                save_preset(dir, name);
-                s_active_preset_name = name;
-                s_active_preset_dir = dir;
-                s_active_preset_is_builtin = false;
-                save_active_preset_to_disk();
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Save Global")) {
-            auto dir = get_global_presets_dir();
-            std::string name = sanitize_name((m_preset_name_buf[0] != '\0') ? m_preset_name_buf : next_auto_name());
-            if (name.empty()) {
-                m_preset_status = "Invalid preset name.";
-            } else {
-                save_preset(dir, name);
-                s_active_preset_name = name;
-                s_active_preset_dir = dir;
-                s_active_preset_is_builtin = false;
-                save_active_preset_to_disk();
-            }
-        }
-
-        if (!m_preset_status.empty()) {
-            ImGui::TextWrapped("%s", m_preset_status.c_str());
-        }
-
-        auto draw_preset_list = [&](const char* section_label, const std::filesystem::path& presets_dir) {
-            auto presets = list_presets(presets_dir);
-            if (presets.empty()) {
-                ImGui::TextDisabled("  (none)");
-                return;
-            }
-            for (const auto& name : presets) {
-                ImGui::PushID((section_label + name).c_str());
-                if (ImGui::Button("Load")) {
-                    load_preset(presets_dir / name);
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Delete")) {
-                    delete_preset(presets_dir / name);
-                }
-                ImGui::SameLine();
-                ImGui::Text("%s", name.c_str());
-                ImGui::PopID();
-            }
-        };
-
-        ImGui::Spacing();
-        ImGui::Text("Game Presets (this game):");
-        draw_preset_list("local_", get_local_presets_dir());
-
-        ImGui::Spacing();
-        ImGui::Text("Global Presets (all games):");
-        draw_preset_list("global_", get_global_presets_dir());
-
-        // "Disable all" is intentionally a transient action, not a preset:
-        // it resets every registered plugin to its compiled-in defaults
-        // and forces enabled=0 (auto-saved via the normal debounce path).
-        // Replaces the previous data-preset "All Off".
-        ImGui::Spacing();
-        if (ImGui::Button("Disable all shaders")) {
-            uevr::settings_registry::disable_all();
-            m_preset_status = "All shaders disabled and reset to defaults";
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("(disables every shader and resets all sliders to defaults)");
-
-        // Built-in presets (shipped with the release, Load-only)
-        auto shipping_dir = get_shipping_presets_dir();
-        if (std::filesystem::exists(shipping_dir) && std::filesystem::is_directory(shipping_dir)) {
-            auto shipping = list_presets(shipping_dir);
-            if (!shipping.empty()) {
-                ImGui::Spacing();
-                ImGui::Text("Built-in Presets:");
-                for (const auto& name : shipping) {
-                    ImGui::PushID(("shipping_" + name).c_str());
-                    if (ImGui::Button("Load")) {
-                        load_preset(shipping_dir / name);
-                    }
-                    ImGui::SameLine();
-                    ImGui::Text("%s", name.c_str());
-                    ImGui::PopID();
-                }
-            }
-        }
-
-        ImGui::Spacing();
-        ImGui::TextDisabled("Tip: Select individual effects in the left menu under PluginLoader to tweak settings.");
     }
 }
 
@@ -2439,55 +2101,11 @@ void PluginLoader::on_present() {
     uevr::settings_registry::tick_debounce();
 }
 
-// D3D11 pipeline state objects — created once, bound before every plugin
-// dispatch so plugins inherit a known-good baseline regardless of what
-// state the UE renderer left on the immediate context.
-static Microsoft::WRL::ComPtr<ID3D11RasterizerState>   s_plugin_rasterizer;
-static Microsoft::WRL::ComPtr<ID3D11DepthStencilState> s_plugin_depth_stencil;
-static Microsoft::WRL::ComPtr<ID3D11BlendState>        s_plugin_blend;
-static bool s_plugin_dx11_state_ready = false;
-
-static bool ensure_plugin_dx11_state(ID3D11Device* device) {
-    if (s_plugin_dx11_state_ready) return true;
-    if (!device) return false;
-
-    D3D11_RASTERIZER_DESC rd{};
-    rd.FillMode = D3D11_FILL_SOLID;
-    rd.CullMode = D3D11_CULL_NONE;
-    rd.DepthClipEnable = TRUE;
-    rd.ScissorEnable = FALSE;
-    if (FAILED(device->CreateRasterizerState(&rd, &s_plugin_rasterizer))) return false;
-
-    D3D11_DEPTH_STENCIL_DESC dd{};
-    dd.DepthEnable = FALSE;
-    dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
-    dd.StencilEnable = FALSE;
-    if (FAILED(device->CreateDepthStencilState(&dd, &s_plugin_depth_stencil))) return false;
-
-    D3D11_BLEND_DESC bd{};
-    bd.RenderTarget[0].BlendEnable = FALSE;
-    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-    if (FAILED(device->CreateBlendState(&bd, &s_plugin_blend))) return false;
-
-    s_plugin_dx11_state_ready = true;
-    return true;
-}
-
-static void bind_plugin_dx11_state(ID3D11DeviceContext* ctx) {
-    ctx->RSSetState(s_plugin_rasterizer.Get());
-    ctx->OMSetDepthStencilState(s_plugin_depth_stencil.Get(), 0);
-    float blend_factor[4] = {0, 0, 0, 0};
-    ctx->OMSetBlendState(s_plugin_blend.Get(), blend_factor, 0xFFFFFFFF);
-}
-
 void PluginLoader::on_device_reset() {
     std::shared_lock _{m_api_cb_mtx};
 
-    // Release framework-managed D3D11 state objects — they hold refs to the old device.
-    s_plugin_rasterizer.Reset();
-    s_plugin_depth_stencil.Reset();
-    s_plugin_blend.Reset();
-    s_plugin_dx11_state_ready = false;
+    // [fork] shader-plugin: release framework-managed D3D11 PSOs (held refs into old device)
+    uevr::shader_infra::dx11_release_state();
 
     for (auto&& cb : m_on_device_reset_cbs) {
         try {
@@ -2501,51 +2119,15 @@ void PluginLoader::on_device_reset() {
 void PluginLoader::on_pre_render_vr_framework_dx11() {
     std::shared_lock _{m_api_cb_mtx};
 
-    // Establish clean D3D11 state before dispatching to plugins.
-    // UE5 games can leave scissor test, depth test, or exotic blend modes
-    // active on the immediate context, which breaks fullscreen shader draws.
-    if (auto& hook = g_framework->get_d3d11_hook(); hook != nullptr) {
-        if (auto* device = hook->get_device(); device != nullptr) {
-            if (ensure_plugin_dx11_state(device)) {
-                Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx;
-                device->GetImmediateContext(&ctx);
-                if (ctx) {
-                    bind_plugin_dx11_state(ctx.Get());
-                }
-            }
-        }
-    }
-
-    for (auto&& cb : m_on_pre_render_vr_framework_dx11_cbs) {
-        try {
-            cb();
-        } catch(...) {
-            spdlog::error("[APIProxy] Exception occurred in on_pre_render_vr_framework_dx11 callback; one of the plugins has an error.");
-            continue;
-        }
-    }
-}
-
-// Isolated into its own function because __try/__except cannot coexist with
-// C++ objects that have destructors (like std::shared_lock) in the same scope.
-static bool invoke_dx12_pre_render_callback_seh(UEVR_OnPreRenderVRFrameworkDX12Cb cb) {
-    __try {
-        cb();
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    // [fork] shader-plugin: D3D11 baseline state + dispatch lives in pluginloader/ShaderInfraRegistration.cpp
+    uevr::shader_infra::dispatch_pre_render_dx11(m_on_pre_render_vr_framework_dx11_cbs);
 }
 
 void PluginLoader::on_pre_render_vr_framework_dx12() {
     std::shared_lock _{m_api_cb_mtx};
 
-    for (auto&& cb : m_on_pre_render_vr_framework_dx12_cbs) {
-        if (!invoke_dx12_pre_render_callback_seh(cb)) {
-            spdlog::error("[APIProxy] Access violation in on_pre_render_vr_framework_dx12 callback; one of the plugins has an error.");
-            continue;
-        }
-    }
+    // [fork] shader-plugin: SEH-wrapped dispatch lives in pluginloader/ShaderInfraRegistration.cpp
+    uevr::shader_infra::dispatch_pre_render_dx12(m_on_pre_render_vr_framework_dx12_cbs);
 }
 
 void PluginLoader::on_post_render_vr_framework_dx11(ID3D11DeviceContext* context, ID3D11Texture2D* tex, ID3D11RenderTargetView* rtv) {

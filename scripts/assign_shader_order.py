@@ -6,13 +6,13 @@ value, and renames DLLs (and optionally LICENSE files) in a target directory
 with sequential two-digit prefixes.
 
 Usage:
-    python scripts/assign_shader_order.py <staging_dir> [--exclude Bloom]
+    python scripts/assign_shader_order.py <staging_dir> [--exclude Bloom] [--copy-licenses]
 
 The staging directory should contain bare-named DLLs (e.g. AdaptiveTonemapperShader.dll)
 as produced by the build. The script renames them in-place to NN_Name.dll.
 
-For LICENSE files, pass --license-src <dir> to copy LICENSE files from examples/
-into the staging dir with the correct prefix.
+Pass --copy-licenses to also copy and rename *-LICENSE.txt files from examples/
+into the staging dir with the matching prefix.
 """
 
 import argparse
@@ -84,10 +84,18 @@ def build_prefix_map(
 
 
 def rename_dlls(staging_dir: Path, mapping: dict[str, str]) -> int:
-    """Rename DLLs in staging_dir using the prefix mapping. Returns count renamed."""
+    """Rename DLLs in staging_dir using the prefix mapping. Returns count renamed.
+
+    DLLs that don't match any known shader are left untouched and reported as a
+    warning. We never delete files we don't recognize — the staging dir may
+    contain unrelated artifacts when run locally.
+    """
     count = 0
-    for dll in list(staging_dir.glob("*.dll")):
-        # Strip any existing prefix to get bare name
+    unknown = []
+    # Restrict to *Shader.dll so unrelated DLLs that may be present in the
+    # staging dir (e.g. third-party utilities when run locally) are never
+    # touched, even by the "unknown" warning path below.
+    for dll in list(staging_dir.glob("*Shader.dll")):
         m = PREFIX_RE.match(dll.stem)
         if not m:
             continue
@@ -96,14 +104,18 @@ def rename_dlls(staging_dir: Path, mapping: dict[str, str]) -> int:
             new_name = mapping[bare] + ".dll"
             target = staging_dir / new_name
             if dll.name != new_name:
-                # Remove any conflicting file first (stale old-prefix builds)
                 if target.exists():
                     target.unlink()
                 dll.rename(target)
             count += 1
         else:
-            # DLL doesn't match any known shader — remove (stale artifact)
-            dll.unlink()
+            unknown.append(dll.name)
+    if unknown:
+        print(
+            f"WARNING: {len(unknown)} DLL(s) in staging dir don't match any known shader "
+            f"and were left in place: {', '.join(unknown)}",
+            file=sys.stderr,
+        )
     return count
 
 
@@ -148,9 +160,9 @@ def main():
         help="Shader name substrings to exclude (default: Bloom)",
     )
     parser.add_argument(
-        "--license-src",
+        "--copy-licenses",
         action="store_true",
-        help="Also copy and rename LICENSE files from examples/ into staging_dir",
+        help="Also copy and rename *-LICENSE.txt files from examples/ into staging_dir",
     )
     parser.add_argument(
         "--print-map",
@@ -191,7 +203,7 @@ def main():
     renamed = rename_dlls(staging, mapping)
     print(f"Renamed {renamed} DLLs")
 
-    if args.license_src:
+    if args.copy_licenses:
         copied = copy_licenses(staging, mapping)
         print(f"Copied {copied} LICENSE files")
 

@@ -1439,15 +1439,9 @@ void Framework::draw_ui() {
                 }
             }
 
-            // PluginLoader is a singleton; resolve once for the whole sidebar
-            // walk instead of dynamic_cast'ing every mod every frame.
-            auto* const plugin_loader = PluginLoader::get().get();
-
             for (size_t i = 1; i < sidebar_entries.size(); ++i) {
                 if (is_advanced_mode || !sidebar_entries[i].m_advanced_entry) {
                     bool is_sub_entry = false;
-                    bool is_enabled_shader = false;
-                    bool is_custom_disabled_shader = false;
                     for (const auto& range : mod_sidebar_ranges) {
                         if (i == range.mn) {
                             // Set first entry as default ("Runtime" entry of VR mod)
@@ -1463,35 +1457,22 @@ void Framework::draw_ui() {
                         }
                         if (range.has_sidebar_entries && i >= range.mn && i < range.mx) {
                             is_sub_entry = true;
-                            // Color shader plugin entries green when their settings file marks them enabled.
-                            // Done here (not via a SidebarEntryInfo member) to avoid touching Framework.hpp,
-                            // which would shift class layout and risk stale incremental builds — see uevr-lessons.md.
-                            // Singleton compare avoids per-frame dynamic_cast against every mod.
-                            if (plugin_loader != nullptr && range.mod.get() == plugin_loader) {
-                                is_enabled_shader = plugin_loader->is_shader_plugin_enabled(sidebar_entries[i].m_label);
-                                if (!is_enabled_shader) {
-                                    is_custom_disabled_shader = uevr::settings_registry::plugin_has_custom_disabled_values(
-                                        sidebar_entries[i].m_label);
-                                }
-                            }
                         }
                     }
 
-                    if (is_sub_entry) {
-                        ImGui::Indent(10.0f);
-                    }
+                    // [fork] Per-entry visuals (sub-entry indent + shader-plugin
+                    // color) live in SettingsRegistry so Framework.cpp stays close
+                    // to upstream praydog/UEVR. See get_sidebar_item_visuals().
+                    const auto vis = uevr::settings_registry::get_sidebar_item_visuals(
+                        sidebar_entries[i].m_label, is_sub_entry);
+
+                    if (vis.indent > 0.0f) ImGui::Indent(vis.indent);
                     ImGui::PushID(i);
-                    if (is_enabled_shader)
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 1.0f, 0.3f, 1.0f));
-                    else if (is_custom_disabled_shader)
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.9f, 0.2f, 1.0f));
+                    if (vis.has_color) ImGui::PushStyleColor(ImGuiCol_Text, vis.color);
                     dcs(sidebar_entries[i].m_label.c_str(), i);
-                    if (is_enabled_shader || is_custom_disabled_shader)
-                        ImGui::PopStyleColor();
+                    if (vis.has_color) ImGui::PopStyleColor();
                     ImGui::PopID();
-                    if (is_sub_entry) {
-                        ImGui::Unindent(10.0f);
-                    }
+                    if (vis.indent > 0.0f) ImGui::Unindent(vis.indent);
                 }
             }
 

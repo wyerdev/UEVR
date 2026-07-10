@@ -21,10 +21,10 @@ Rare cutscene or 3P transition crashes may still remain in some games. The D3D12
 ## UEVR Plugins: ReShade Post-Processing Shaders
 - Fix washed-out colors and grey blacks
 
-VR headsets often show **washed-out colors and grey blacks** compared to a flat monitor. This fork includes ReShade shaders to fix this, re-implemented as native UEVR C++ plugins that apply **directly to VR eye textures** (not just the desktop mirror), fixing these issues.
+VR headsets often show **washed-out colors and grey blacks** compared to a flat monitor. This fork includes ReShade shaders to fix this, re-implemented as native UEVR C++ plugins that apply **directly to eye textures** (not just the desktop mirror), fixing these issues.
 
 ### **Where to start:** 
-- **LevelsPlus** fixes grey blacks (the #1 VR issue) and 
+- **LevelsPlus** fixes grey blacks (the #1 issue) and 
 - **FakeHDR** is the easiest way to make any game look good
 Try one or both.
 
@@ -32,49 +32,49 @@ Try one or both.
 
 These clip by design — they remap the tonal range, trading some shadow/highlight detail for better contrast. Almost always worth it.
 
-| # | Shader | When to Use It |
-|---|--------|----------------|
-| 00 | **FGFX Large Scale Perceptual Obscurance/Irradiance** | Blurs the display-space scene at large scale, overlay-blends it back as low-frequency occlusion/irradiance, then applies toning controls. Runs before the color-correction chain. |
-| 01 | **LevelsPlus** | **Fix grey/washed-out blacks.** The #1 VR problem. Remaps black/white points so darks are actually dark and whites are actually bright. Trades some shadow detail for deeper blacks — almost always worth it. Also has per-channel gamma and optional ACES tone mapping. Start here. |
-| 02 | **LiftGammaGain** | Fine-tune shadows, midtones, and highlights separately. Use if LevelsPlus alone isn't enough — e.g. shadows are too blue, or highlights are too warm. Gain can clip highlights if pushed high. |
-| 03 | **BlackCrush** | Crushes the bottom of the tonal curve to push near-blacks toward true black without affecting midtones or highlights. Use after LevelsPlus when the lift left a slightly grey shadow floor. |
-| 04 | **AdaptiveTonemapper** | Auto-exposure (eye adaptation) + tonemap curve. Measures average scene brightness and dims bright scenes / brightens dark ones over ~1s, like your eyes adjusting when walking indoors. Three tonemap curves selectable (Reinhard / Filmic / ACES). Defaults are tuned for UEVR's LDR scene RT (Exposure -3, AdaptRange.x 0.05); defaults are restorable via the "Original Defaults" button. |
-| 04.5 | **EyeAdaption** | Pure exposure compensation: measures scene luminance with a 256x256 mip chain, adapts over time, then brightens or darkens highlights/midtones/shadows without adding a separate tonemap curve. Use when you want exposure adaptation without AdaptiveTonemapper's tonemap curve. |
-| 05 | **Tonemap** | Adjust overall gamma, exposure, and saturation. Exposure can clip highlights; defog subtracts color. Also has bleach bypass (desaturated high-contrast film look). |
+| Shader | When to Use It |
+|--------|----------------|
+| **FGFX Large Scale Perceptual Obscurance/Irradiance** | Blurs the display-space scene at large scale, overlay-blends it back as low-frequency occlusion/irradiance, then applies toning controls. Runs before the color-correction chain. |
+| **LevelsPlus** | **Fix grey/washed-out blacks.** The #1 problem. Remaps black/white points so darks are actually dark and whites are actually bright. Trades some shadow detail for deeper blacks — almost always worth it. Also has per-channel gamma and optional ACES tone mapping. Start here. |
+| **LiftGammaGain** | Fine-tune shadows, midtones, and highlights separately. Use if LevelsPlus alone isn't enough — e.g. shadows are too blue, or highlights are too warm. Gain can clip highlights if pushed high. |
+| **BlackCrush** | Crushes the bottom of the tonal curve to push near-blacks toward true black without affecting midtones or highlights. Use after LevelsPlus when the lift left a slightly grey shadow floor. |
+| **AdaptiveTonemapper** | Auto-exposure (eye adaptation) + tonemap curve. Measures average scene brightness and dims bright scenes / brightens dark ones over ~1s, like your eyes adjusting when walking indoors. Three tonemap curves selectable (Reinhard / Filmic / ACES). Defaults are tuned for LDR scene RT (Exposure -3, AdaptRange.x 0.05); defaults are restorable via the "Original Defaults" button. |
+| **EyeAdaption** | Pure exposure compensation: measures scene luminance with a 256x256 mip chain, adapts over time, then brightens or darkens highlights/midtones/shadows without adding a separate tonemap curve. Use when you want exposure adaptation without AdaptiveTonemapper's tonemap curve. |
+| **Tonemap** | Adjust overall gamma, exposure, and saturation. Exposure can clip highlights; defog subtracts color. Also has bleach bypass (desaturated high-contrast film look). |
 
 **Color Grading (make it look good)**
 
 These change the overall look and feel of the image. Detail-safe — they enhance without clipping (except Filmic Pass, which can clip at extreme settings).
 
-| # | Shader | When to Use It |
-|---|--------|----------------|
-| 06 | **Curves** | Add contrast using S-curves. Redistributes contrast within the existing range without clipping. Multiple curve formulas (Luma, Chroma, etc). Subtle but effective. |
-| 07 | **FakeHDR** | **Easiest way to make any game look good.** Deepens darks and makes colors pop via local tone mapping bloom. Enhances detail without clipping. |
-| 08 | **DPX** | Emulates Cineon film stock. Gives a warm, cinematic color shift with a strength slider. Good for games that look too cold/digital. |
-| 09 | **Technicolor** | Emulates 2-strip Technicolor (old Hollywood look). Strong color shift — teal shadows, warm highlights. Use sparingly. |
-| 09.5 | **Technicolor2** | Cross-channel colour mixing that darkens and intensifies colours with brightness and saturation controls. Different algorithm from Technicolor — can be combined or used independently. |
-| 10 | **Colourfulness** | Boosts color saturation with a built-in limiter that prevents clipping. Smarter than just cranking saturation. |
-| 11 | **Vibrance** | Boosts unsaturated colors more than saturated ones. Mathematically avoids clipping. Good for making dull games pop without oversaturating skin tones. |
-| 12 | **HSL Shift** | Remap individual colors to different hues. E.g. make greens more vivid, shift reds toward orange, cool down skin tones. 8 color zones you can shift independently. Changes color direction, not intensity. |
-| 13 | **Filmic Pass** | Full cinematic color processing: sigmoid curves per RGB channel, bleach bypass, fade, saturation, and per-channel gamma. Can clip at extreme settings. More control than Tonemap — use when you want a specific film look. |
-| 13.5 | **Cartoon** | Stylized toon outlining. Detects diagonal luminance edges and darkens them for a cel-shaded/inked look. Best for animated, high-contrast, or deliberately stylized games; keep subtle in VR so textures do not turn busy. |
-| 14 | **LUT** | Apply a custom 1024×32 horizontal-tile LUT PNG to the VR scene. The final stamp on color before detail/sharpening. See [INSTALL.md](docs/reference/INSTALL.md#lut-customization) for swapping in your own LUT. |
-| 14.5 | **FXAA** | NVIDIA FXAA 3.11 quality path. Smooths remaining jagged high-contrast edges after color grading, before grain and sharpening. Best when a game's built-in TAA leaves visible stair-stepping or when sharpening makes edges too crisp. |
+| Shader | When to Use It |
+|--------|----------------|
+| **Curves** | Add contrast using S-curves. Redistributes contrast within the existing range without clipping. Multiple curve formulas (Luma, Chroma, etc). Subtle but effective. |
+| **FakeHDR** | **Easiest way to make any game look good.** Deepens darks and makes colors pop via local tone mapping bloom. Enhances detail without clipping. |
+| **DPX** | Emulates Cineon film stock. Gives a warm, cinematic color shift with a strength slider. Good for games that look too cold/digital. |
+| **Technicolor** | Emulates 2-strip Technicolor (old Hollywood look). Strong color shift — teal shadows, warm highlights. Use sparingly. |
+| **Technicolor2** | Cross-channel colour mixing that darkens and intensifies colours with brightness and saturation controls. Different algorithm from Technicolor — can be combined or used independently. |
+| **Colourfulness** | Boosts color saturation with a built-in limiter that prevents clipping. Smarter than just cranking saturation. |
+| **Vibrance** | Boosts unsaturated colors more than saturated ones. Mathematically avoids clipping. Good for making dull games pop without oversaturating skin tones. |
+| **HSL Shift** | Remap individual colors to different hues. E.g. make greens more vivid, shift reds toward orange, cool down skin tones. 8 color zones you can shift independently. Changes color direction, not intensity. |
+| **Filmic Pass** | Full cinematic color processing: sigmoid curves per RGB channel, bleach bypass, fade, saturation, and per-channel gamma. Can clip at extreme settings. More control than Tonemap — use when you want a specific film look. |
+| **Cartoon** | Stylized toon outlining. Detects diagonal luminance edges and darkens them for a cel-shaded/inked look. Best for animated, high-contrast, or deliberately stylized games; keep subtle so textures do not turn busy. |
+| **LUT** | Apply a custom 1024×32 horizontal-tile LUT PNG to the scene. The final stamp on color before detail/sharpening. See [INSTALL.md](docs/reference/INSTALL.md#lut-customization) for swapping in your own LUT. |
+| **FXAA** | NVIDIA FXAA 3.11 quality path. Smooths remaining jagged high-contrast edges after color grading, before grain and sharpening. Best when a game's built-in TAA leaves visible stair-stepping or when sharpening makes edges too crisp. |
 
 **Detail, Sharpening & Film Effects (finishing touches)**
 
-| # | Shader | When to Use It |
-|---|--------|----------------|
-| 15 | **FilmGrain2** | Adds subtle photographic film grain. Hides color banding in dark areas (common on VR panels). Keep it subtle — high values look noisy. |
-| 16 | **Clarity** | Local contrast enhancement — makes textures and details pop without changing colors or clipping. Works like sharpening but on mid-frequency detail. Multiple blend modes (Soft Light, Overlay, Hard Light, etc). **Very effective in VR** where things often look flat. |
-| 17 | **CAS** | AMD FidelityFX Contrast Adaptive Sharpening. Adapts sharpening per-pixel based on local contrast — sharpens flat areas more, high-contrast edges less. No halos. Good general-purpose sharpener. |
-| 18 | **LumaSharpen** | Sharpens in luminance only (unsharp mask on luma), avoiding color fringing. 4 sampling patterns, adjustable strength and halo clamp. Best for fine detail recovery on top of CAS. |
+| Shader | When to Use It |
+|--------|----------------|
+| **FilmGrain2** | Adds subtle photographic film grain. Hides color banding in dark areas (common on display panels). Keep it subtle — high values look noisy. |
+| **Clarity** | Local contrast enhancement — makes textures and details pop without changing colors or clipping. Works like sharpening but on mid-frequency detail. Multiple blend modes (Soft Light, Overlay, Hard Light, etc). **Very effective** where things often look flat. |
+| **CAS** | AMD FidelityFX Contrast Adaptive Sharpening. Adapts sharpening per-pixel based on local contrast — sharpens flat areas more, high-contrast edges less. No halos. Good general-purpose sharpener. |
+| **LumaSharpen** | Sharpens in luminance only (unsharp mask on luma), avoiding color fringing. 4 sampling patterns, adjustable strength and halo clamp. Best for fine detail recovery on top of CAS. |
 
 **Cleanup & Correction (final pass)**
 
-| # | Shader | When to Use It |
-|---|--------|----------------|
-| 19 | **Deband** | Removes color banding artifacts in gradients (common on VR panels). Detects flat regions via standard deviation + Weber ratio analysis, smooths them, and applies ordered dithering. |
+| Shader | When to Use It |
+|--------|----------------|
+| **Deband** | Removes color banding artifacts in gradients (common on display panels). Detects flat regions via standard deviation + Weber ratio analysis, smooths them, and applies ordered dithering. |
 
 All shaders are **disabled by default**. Enable them individually in the UEVR menu sidebar, or load a preset (see below). Shaders run in their plugin-defined pipeline order. Settings are auto-saved per game in `data/plugins/shader_settings/auto.uevrpreset`.
 
@@ -105,7 +105,7 @@ Many shaders overlap. These tables help you pick the right one for your problem.
 
 #### Washed Out / Grey / Flat Image
 
-| | LevelsPlus (#01) | Tonemap (#05) | LiftGammaGain (#02) |
+| | LevelsPlus | Tonemap | LiftGammaGain |
 |---|---|---|---|
 | What it fixes | Blacks aren't black, whites aren't white | Overall brightness/saturation off | Shadow/midtone/highlight color cast |
 | Best for | **Start here** — fixes 80% of washed-out games | Global brightness + saturation tweak | Color-cast correction (e.g. shadows too blue) |
@@ -116,7 +116,7 @@ Start with **LevelsPlus**. Still flat? Add **Tonemap**. See a color cast? Add **
 
 #### Dull / Desaturated Colors
 
-| | Vibrance (#11) | Colourfulness (#10) | Technicolor (#09) | Technicolor2 (#09.5) | DPX (#08) |
+| | Vibrance | Colourfulness | Technicolor | Technicolor2 | DPX |
 |---|---|---|---|---|---|
 | How it works | Boosts dull colors more, protects saturated | Boosts all saturation with limiter | 2-strip film color separation | Cross-channel colour mixing | Film stock emulation |
 | Skin tones safe? | Yes | Mostly | No | No | No |
@@ -128,7 +128,7 @@ Start with **LevelsPlus**. Still flat? Add **Tonemap**. See a color cast? Add **
 
 #### Flat / No Depth (Colors Are Fine but Image Looks "Painted On")
 
-| | Curves (#06) | Clarity (#16) | FakeHDR (#07) | FilmicPass (#13) |
+| | Curves | Clarity | FakeHDR | FilmicPass |
 |---|---|---|---|---|
 | Scope | Global contrast S-curve | **Local** contrast (per-region) | Local tone mapping via bloom | Full cinematic chain |
 | Best for | Simple contrast bump | **Texture detail in VR** — surfaces pop | Recovering dark detail without blowing highlights | Specific film emulation |
@@ -139,7 +139,7 @@ Start with **LevelsPlus**. Still flat? Add **Tonemap**. See a color cast? Add **
 
 #### Color Banding in Dark Areas
 
-| | Deband (#19) | FilmGrain2 (#15) |
+| | Deband | FilmGrain2 |
 |---|---|---|
 | Approach | Detects + smooths banded areas + dithering | Overlays film grain noise everywhere |
 | Targeted? | Yes — only affects banded areas | No — applies everywhere |
@@ -149,7 +149,7 @@ Use **Deband** for a surgical fix. **FilmGrain2** if you also want the grain aes
 
 #### Sharpening
 
-| | CAS (#17) | LumaSharpen (#18) | UE Built-In (`r.Tonemapper.Sharpen` CVar) |
+| | CAS | LumaSharpen | UE Built-In (`r.Tonemapper.Sharpen` CVar) |
 |---|---|---|---|
 | Algorithm | 3×3 adaptive contrast sharpening | Unsharp mask on luma only | Cross 4-tap unsharp mask |
 | Adapts to edges? | Yes (per-pixel) | No | No |
@@ -160,7 +160,7 @@ Use **Deband** for a surgical fix. **FilmGrain2** if you also want the grain aes
 
 #### Color Remapping
 
-**HSL Shift (#12)** is unique — it lets you shift individual color hues (8 zones: reds, oranges, yellows, greens, cyans, blues, purples, magentas). Use it when one specific color looks wrong, not for global adjustments.
+**HSL Shift (#14)** is unique — it lets you shift individual color hues (8 zones: reds, oranges, yellows, greens, cyans, blues, purples, magentas). Use it when one specific color looks wrong, not for global adjustments.
 
 #### Don't Stack These
 

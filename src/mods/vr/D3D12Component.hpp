@@ -20,6 +20,9 @@
 #include "d3d12/CommandContext.hpp"
 #include "d3d12/TextureContext.hpp"
 
+// [fork] shader-plugin pre-render command list — see PluginCommandListD3D12.hpp
+#include "../pluginloader/PluginCommandListD3D12.hpp"
+
 class VR;
 
 namespace vrmod {
@@ -35,11 +38,8 @@ public:
     void on_post_present(VR* vr);
     void on_reset(VR* vr);
 
-    void force_reset() { m_force_reset = true; }
-
-    bool is_plugin_dispatch_allowed() const {
-        return !m_force_reset;
-    }
+    // [fork] shader-plugin dispatch — also suspend plugin_cl until next setup()
+    void force_reset() { m_force_reset = true; m_plugin_cl.on_force_reset(); }
 
     const auto& get_backbuffer_size() const { return m_backbuffer_size; }
 
@@ -48,22 +48,8 @@ public:
     auto& openxr() { return m_openxr; }
     auto& get_openvr_ui_tex() { return m_openvr.ui_tex; }
 
-    // Plugin pre-render command list management.
-    // Called by VR.cpp around the pre_render callback dispatch.
-    void begin_plugin_pre_render();
-    void end_plugin_pre_render();
-    ID3D12GraphicsCommandList* get_plugin_command_list();
-
-    // Wait for any in-flight plugin GPU commands to complete.
-    // Must be called before destroying plugin-owned D3D12 resources
-    // (e.g. before FreeLibrary during plugin unload).
-    void wait_for_plugin_gpu_work();
-
-    // Resource state management for plugin dispatch.
-    // Transitions the scene RT to RENDER_TARGET before plugins see it,
-    // and restores it to ENGINE_SRC_COLOR afterwards for UEVR's copy.
-    void prepare_plugin_rt(ID3D12Resource* rt);
-    void restore_plugin_rt(ID3D12Resource* rt);
+    // [fork] shader-plugin pre-render command list — see PluginCommandListD3D12.hpp
+    uevr::PluginCommandListD3D12& plugin_cl() { return m_plugin_cl; }
 
 private:
     bool setup();
@@ -81,11 +67,8 @@ private:
     ComPtr<ID3D12Resource> m_prev_backbuffer{};
     std::array<d3d12::CommandContext, 3> m_generic_commands{};
 
-    // Dedicated CommandContext for plugin pre-render work.
-    // Opened before dispatching on_pre_render_vr_framework_dx12,
-    // executed after all callbacks return.
-    d3d12::CommandContext m_plugin_pre_render_ctx{};
-    bool m_plugin_pre_render_active{false};
+    // [fork] shader-plugin pre-render command list — see PluginCommandListD3D12.hpp
+    uevr::PluginCommandListD3D12 m_plugin_cl{};
 
     d3d12::TextureContext m_backbuffer_copy{};
 

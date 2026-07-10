@@ -465,4 +465,23 @@ bool plugin_has_custom_disabled_values(const std::string& dll_name) {
     return section_has_custom_disabled_values(dll_name_to_section(dll_name));
 }
 
+SidebarItemVisuals get_sidebar_item_visuals(std::string_view label, bool is_sub_entry) {
+    SidebarItemVisuals vis{};
+    if (is_sub_entry) {
+        vis.indent = 10.0f;
+    }
+    // Shader-plugin coloring: green if the corresponding settings section is
+    // enabled, yellow if it's disabled but carries non-default (preset) values.
+    // Non-shader sidebar entries miss both lookups and fall through uncolored.
+    const std::string label_str{label};
+    if (is_plugin_enabled(label_str)) {
+        vis.has_color = true;
+        vis.color = ImVec4(0.3f, 1.0f, 0.3f, 1.0f);
+    } else if (plugin_has_custom_disabled_values(label_str)) {
+        vis.has_color = true;
+        vis.color = ImVec4(1.0f, 0.9f, 0.2f, 1.0f);
+    }
+    return vis;
+}
+
 } // namespace uevr::settings_registry

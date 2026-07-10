@@ -16,8 +16,8 @@ import re
 import subprocess
 import sys
 
-# Conventional-commits-style match: fix / feat, optional (scope), optional !, then ':'
-COMMIT_RE = re.compile(r"^(fix|feat)(\([^)]+\))?!?:", re.IGNORECASE)
+# Match commits starting with fix or feat (case-insensitive)
+COMMIT_RE = re.compile(r"^(fix|feat)", re.IGNORECASE)
 
 
 def git(*args: str) -> str:

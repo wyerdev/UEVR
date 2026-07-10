@@ -68,8 +68,9 @@ jobs:
             Where-Object { $_.Name -notmatch "Bloom" } |
             Copy-Item -Destination "$staging/plugins/"
 
-          # Assign sequential prefixes and copy LICENSE files (all driven by render_order())
-          python "${{github.workspace}}/scripts/assign_shader_order.py" "$staging/plugins" --exclude Bloom --license-src
+          # Assign sequential prefixes, copy LICENSE files, write shaders.manifest
+          # (all driven by render_order()).
+          python "${{github.workspace}}/scripts/assign_shader_order.py" "$staging/plugins" --exclude Bloom --copy-licenses
 
           # Copy shipping presets (flat *.uevrpreset files only — subfolders like
           # presets/experimental/ are intentionally excluded from releases).
