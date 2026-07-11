@@ -480,7 +480,13 @@ public:
     }
 
     bool is_using_afw() {
-        return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && afw_since_inject_frame_count >= 90 && afw_switching_skip_frames == 0 && afw_resolution_change_skip_frames == 0;
+        return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && afw_since_inject_frame_count >= 90 &&
+               afw_switching_skip_frames == 0 && afw_resolution_change_skip_frames == 0 && g_framework->is_dx12();
+    }
+
+    bool is_using_afw_without_api_check() {
+        return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && afw_since_inject_frame_count >= 90 &&
+               afw_switching_skip_frames == 0 && afw_resolution_change_skip_frames == 0;
     }
 
 
