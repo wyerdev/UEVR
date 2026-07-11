@@ -8424,31 +8424,32 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
             }
         }
 
-        if (is_using_afw()) {
-            // Alternate Frame Warping controls. These were previously only reachable via the numpad
-            // (NUMPAD5 = mode, NUMPAD6 = debug, NUMPAD7 = clear), which is unusable on keyboards without a
-            // numpad. Surface them in the menu so the PDAFW debug overlay can actually be toggled.
-            ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);
-            if (ImGui::TreeNode("Alternate Frame Warping")) {
-                m_framewarp_mode->draw("Framewarp Mode");
-                m_clear_before_framewarp->draw("Clear Before Framewarp");
-                m_framewarp_debug->draw("Debug Framewarp");
-                ImGui::Spacing();
-                if (is_ghosting_fix_enabled()) {
-                    m_fix_object_motion_vector->draw("Fix Object Motion Vector");
-                    m_fix_object_motion_range->draw("Fix Object Motion Rnage");
-                    if (is_fix_object_motion_vector() && !rawVelocityDesc[0].pTexture) {
-                        ImGui::TextWrapped("No UE Velocity Buffer found, can't use the object motion vector fix.");
-                    }
+        if (is_using_afw_without_api_check()) {
+            if (g_framework->is_dx12()) {
+                ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);
+                if (ImGui::TreeNode("Alternate Frame Warping")) {
+                    m_framewarp_mode->draw("Framewarp Mode");
+                    m_clear_before_framewarp->draw("Clear Before Framewarp");
+                    m_framewarp_debug->draw("Debug Framewarp");
                     ImGui::Spacing();
-                } else {
-                    ImGui::BeginDisabled(!is_ghosting_fix_enabled());
-                    m_fix_object_motion_vector->draw("Fix Object Motion Vector");
-                    ImGui::EndDisabled();
-                    ImGui::TextWrapped("Object Motion fix is only needed when ghosting fix is enabled.");
+                    if (is_ghosting_fix_enabled()) {
+                        m_fix_object_motion_vector->draw("Fix Object Motion Vector");
+                        m_fix_object_motion_range->draw("Fix Object Motion Rnage");
+                        if (is_fix_object_motion_vector() && !rawVelocityDesc[0].pTexture) {
+                            ImGui::TextWrapped("No UE Velocity Buffer found, can't use the object motion vector fix.");
+                        }
+                        ImGui::Spacing();
+                    } else {
+                        ImGui::BeginDisabled(!is_ghosting_fix_enabled());
+                        m_fix_object_motion_vector->draw("Fix Object Motion Vector");
+                        ImGui::EndDisabled();
+                        ImGui::TextWrapped("Object Motion fix is only needed when ghosting fix is enabled.");
+                    }
+                    m_ignore_motion_threshold->draw("Ignore Motion Threshold");
+                    ImGui::TreePop();
                 }
-                m_ignore_motion_threshold->draw("Ignore Motion Threshold");
-                ImGui::TreePop();
+            } else {
+                ImGui::TextWrapped("Using DX11, AFW only supports DX12, fallback to AFR.");
             }
         }
         ImGui::Spacing();

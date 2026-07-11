@@ -3883,7 +3883,7 @@ FFakeStereoRenderingHook::FFakeStereoRenderingHook() {
 
 void FFakeStereoRenderingHook::on_frame() {
     attempt_everspace2_pool_trace();
-    // Engine tick hook is always installed ¡ª plugins (including dumper-mode
+    // Engine tick hook is always installed â€” plugins (including dumper-mode
     // clients) need on_pre_engine_tick callbacks to submit game-thread work.
     attempt_hook_game_engine_tick();
 
@@ -12299,8 +12299,10 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
     const auto rotation_offset = vr->get_rotation_offset();
     const auto current_hmd_rotation = glm::normalize(rotation_offset * glm::quat{vr->get_rotation(0)});
     const auto current_eye_rotation_offset = glm::normalize(glm::quat{vr->get_eye_transform(true_index)});
+    const auto other_eye_rotation_offset = glm::normalize(glm::quat{vr->get_eye_transform((true_index + 1) % 2)});
 
     const auto new_rotation = glm::normalize(vqi_norm * current_hmd_rotation * current_eye_rotation_offset);
+    const auto new_rotation_other = glm::normalize(vqi_norm * current_hmd_rotation * other_eye_rotation_offset);
     const auto eye_offset = glm::vec3{vr->get_eye_offset((VRRuntime::Eye)(true_index))};
     const auto eye_offset_other = glm::vec3{vr->get_eye_offset((VRRuntime::Eye)((true_index + 1) % 2))};
 
@@ -12313,7 +12315,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
     const auto head_offset = quat_converter * (vqi_norm * (pos * world_scale));
     const auto head_offset_flat = quat_converter * (vqi_norm * (pos_flat * world_scale));
     const auto eye_separation = quat_converter * (glm::normalize(new_rotation) * (eye_offset * world_scale));
-    const auto eye_separation_other = quat_converter * (glm::normalize(new_rotation) * (eye_offset_other * world_scale));
+    const auto eye_separation_other = quat_converter * (glm::normalize(new_rotation_other) * (eye_offset_other * world_scale));
 
     // Don't apply any headset transformations
     // if we have stereo emulation mode enabled
@@ -12451,15 +12453,23 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
             view_location_other -= eye_separation_other;
         }
 
-        const auto world_to_view = !has_double_precision ? 
-            glm::yawPitchRoll(
-                glm::radians(view_rotation->yaw),
-                glm::radians(view_rotation->pitch),
-                glm::radians(view_rotation->roll)) : 
-            glm::yawPitchRoll(
-                glm::radians((float)rot_d->yaw),
-                glm::radians((float)rot_d->pitch),
-                glm::radians((float)rot_d->roll));
+        auto view_rotation_other = has_double_precision ? Rotator<float>() : *view_rotation;
+        auto rot_d_other = has_double_precision ? *rot_d : Rotator<double>();
+
+        if (!is_2d_screen) {
+            const auto euler = glm::degrees(utility::math::euler_angles_from_steamvr(new_rotation_other));
+
+            if (!has_double_precision) {
+                view_rotation_other.pitch = euler.x;
+                view_rotation_other.yaw = euler.y;
+                view_rotation_other.roll = euler.z;
+            } else {
+                rot_d_other.pitch = euler.x;
+                rot_d_other.yaw = euler.y;
+                rot_d_other.roll = euler.z;
+            }
+        }
+
         const auto view_to_world = !has_double_precision ? 
             glm::yawPitchRoll(
                 glm::radians(-view_rotation->yaw),
@@ -12469,14 +12479,23 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
                 glm::radians(-(float)rot_d->yaw),
                 glm::radians((float)rot_d->pitch),
                 glm::radians(-(float)rot_d->roll));
-        // Æ¬¶Î£ºÔÚ calculate_stereo_view_offset ·½·¨Ä©Î²µ÷ÓÃ»ò²åÈëÒÔ»ñÈ¡×îÖÕ view ¾ØÕó
+        const auto view_to_world_other = !has_double_precision ? 
+            glm::yawPitchRoll(
+                glm::radians(-view_rotation_other.yaw),
+                glm::radians(view_rotation_other.pitch),
+                glm::radians(-view_rotation_other.roll)) : 
+            glm::yawPitchRoll(
+                glm::radians(-(float)rot_d_other.yaw),
+                glm::radians((float)rot_d_other.pitch),
+                glm::radians(-(float)rot_d_other.roll));
+        // ç‰‡æ®µï¼šåœ¨ calculate_stereo_view_offset æ–¹æ³•æœ«å°¾è°ƒç”¨æˆ–æ’å…¥ä»¥èŽ·å–æœ€ç»ˆ view çŸ©é˜µ
         if (!has_double_precision) {
             glm::vec3 cam_pos = (*view_location) / vr->get_world_to_meters();
             glm::vec3 cam_pos_other = view_location_other / vr->get_world_to_meters();
             cam_pos = glm::vec3(cam_pos.y, cam_pos.z, -cam_pos.x);
             cam_pos_other = glm::vec3(cam_pos_other.y, cam_pos_other.z, -cam_pos_other.x);
             glm::mat4 view_matrix = glm::translate(glm::mat4(1.0f), cam_pos) * view_to_world;
-            glm::mat4 view_matrix_other = glm::translate(glm::mat4(1.0f), cam_pos_other) * view_to_world;
+            glm::mat4 view_matrix_other = glm::translate(glm::mat4(1.0f), cam_pos_other) * view_to_world_other;
             vr->render_view_matrix[true_index][2] = vr->render_view_matrix[true_index][1];
             vr->render_view_matrix[true_index][1] = vr->render_view_matrix[true_index][0];
             vr->render_view_matrix[true_index][0].curr = glm::inverse(view_matrix);
@@ -12488,7 +12507,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
             cam_pos_d = glm::dvec3(cam_pos_d.y, cam_pos_d.z, -cam_pos_d.x);
             cam_pos_d_other = glm::dvec3(cam_pos_d_other.y, cam_pos_d_other.z, -cam_pos_d_other.x);
             glm::mat4 view_matrix = glm::translate(glm::mat4(1.0), glm::vec3(cam_pos_d)) * view_to_world;
-            glm::mat4 view_matrix_other = glm::translate(glm::mat4(1.0), glm::vec3(cam_pos_d_other)) * view_to_world;
+            glm::mat4 view_matrix_other = glm::translate(glm::mat4(1.0), glm::vec3(cam_pos_d_other)) * view_to_world_other;
             vr->render_view_matrix[true_index][2] = vr->render_view_matrix[true_index][1];
             vr->render_view_matrix[true_index][1] = vr->render_view_matrix[true_index][0];
             vr->render_view_matrix[true_index][0].curr = glm::inverse(view_matrix);
