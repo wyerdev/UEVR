@@ -94,8 +94,12 @@ public:
     bool is_fix_object_motion_vector() { return m_fix_object_motion_vector->value(); };
     float get_fix_object_motion_range() { return m_fix_object_motion_range->value(); };
 
+    bool is_fix_first_person_guns() { return m_fix_first_person_guns_experimental->value(); };
+
     bool is_no_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10; };
     bool is_never_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10 && last_dlss_frame_count == 0; };
+
+    bool is_renderdoc = false;
 
 public:
     ~VR() override;
@@ -1410,6 +1414,7 @@ private:
     const ModToggle::Ptr m_clear_before_framewarp{ModToggle::create(generate_name("ClearBeforeFramewarp"), false)};
     const ModToggle::Ptr m_fix_object_motion_vector{ModToggle::create(generate_name("FixObjectMotionVector"), true)};
     const ModSlider::Ptr m_fix_object_motion_range{ModSlider::create(generate_name("FixObjectMotionRange"), 0.1f, 10.0f, 3.0f)};
+    const ModToggle::Ptr m_fix_first_person_guns_experimental{ModToggle::create(generate_name("FixFirstPersonGunsExperimental"), true)};
     const ModToggle::Ptr m_framewarp_debug{ModToggle::create(generate_name("FramewarpDebug"), false)};
     const ModSlider::Ptr m_ignore_motion_threshold{ModSlider::create(generate_name("IgnoreMotionThreshold"), 0.1f, 100.0f, 2.5f)};
     const ModCombo::Ptr m_framewarp_mode{ModCombo::create(generate_name("FramewarpMode"),
