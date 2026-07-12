@@ -1855,26 +1855,6 @@ void UObjectHook::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     }
 }
 
-bool should_tick_motion_controller_attachments_for_view(int32_t view_index, bool is_double) {
-    if (VR::get()->is_using_afw() || (view_index + 1) % 2 == 0) {
-        return true;
-    }
-
-    auto& vr = VR::get();
-    if (view_index != 0 || !is_double || !vr->is_using_synchronized_afr() || vr->is_sceneview_compatibility_enabled()) {
-        return false;
-    }
-
-    const auto runtime = vr->get_runtime();
-    const auto frame_count = runtime != nullptr ? runtime->internal_frame_count : vr->get_frame_count();
-
-    if ((frame_count % 2) != 1) {
-        return false;
-    }
-
-    return true;
-}
-
 const auto quat_converter = glm::quat{Matrix4x4f {
     0, 0, -1, 0,
     1, 0, 0, 0,
