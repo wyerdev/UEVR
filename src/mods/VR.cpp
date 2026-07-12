@@ -139,6 +139,23 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
                 vr->d3d12Renderer->Copy(InCmdList, vr->motionVectorsDesc[nEye], src);
             }
         }
+        if (vr->is_renderdoc) {
+            static TextureDesc colorDesc[2];
+            static TextureDesc outputDesc[2];
+            if (color && colorDesc[nEye].pTexture != color) {
+                colorDesc[nEye].pTexture = color;
+                colorDesc[nEye].initialState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                vr->d3d12Renderer->SetupTextureDesc(colorDesc[nEye]);
+            }
+            if (output && outputDesc[nEye].pTexture != output) {
+                outputDesc[nEye].pTexture = output;
+                outputDesc[nEye].initialState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                vr->d3d12Renderer->SetupTextureDesc(outputDesc[nEye]);
+            }
+
+            vr->d3d12Renderer->Blit(InCmdList, outputDesc[nEye], colorDesc[nEye], {}, NoBlend, true);
+            return NVSDK_NGX_Result_Success;
+        }
     }
     if (!InFeatureHandle)
         return NVSDK_NGX_Result_Success;
@@ -368,6 +385,8 @@ std::optional<std::string> VR::clean_initialize() try {
             }
         }
     }
+
+    is_renderdoc = GetModuleHandleW(L"renderdoc.dll") != nullptr;
 
     auto& hook = g_framework->get_d3d12_hook();
     hook->get_command_queue();
@@ -2954,6 +2973,8 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                         m_fix_object_motion_range->draw("Fix Object Motion Rnage");
                         if (is_fix_object_motion_vector() && !rawVelocityDesc[0].pTexture) {
                             ImGui::TextWrapped("No UE Velocity Buffer found, can't use the object motion vector fix.");
+                        } else {
+                            m_fix_first_person_guns_experimental->draw("Fix First Person Guns (Experimental)");
                         }
                         ImGui::Spacing();
                     } else {
