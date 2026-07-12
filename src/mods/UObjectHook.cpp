@@ -2043,7 +2043,7 @@ void UObjectHook::tick_attachments(Rotator<float>* view_rotation, const float wo
 
     const float lerp_speed = m_attach_lerp_speed->value() * m_last_delta_time;
 
-    if (m_attach_lerp_enabled->value()) {
+    if (m_attach_lerp_enabled->value() && !VR::get()->is_using_ultra_responsive()) {
         auto spherical_distance_right = glm::dot(right_hand_rotation, m_last_right_aim_rotation);
 
         if (spherical_distance_right < 0.0f) {
@@ -2063,7 +2063,7 @@ void UObjectHook::tick_attachments(Rotator<float>* view_rotation, const float wo
     glm::vec3 left_hand_position = vr->get_controller_position_with_offset(VRRuntime::Hand::LEFT, true);
     glm::quat left_hand_rotation = vr->get_controller_rotation_with_offset(VRRuntime::Hand::LEFT);
 
-    if (m_attach_lerp_enabled->value()) {
+    if (m_attach_lerp_enabled->value() && !VR::get()->is_using_ultra_responsive()) {
         auto spherical_distance_left = glm::dot(left_hand_rotation, m_last_left_aim_rotation);
 
         if (spherical_distance_left < 0.0f) {
