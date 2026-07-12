@@ -539,8 +539,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         params.CameraData = &vr->cameraData[nEye];
         params.IgnoreMotionThreshold = vr->m_ignore_motion_threshold->value();
         params.Debug = vr->m_framewarp_debug->value();
-        if (vr->is_fix_first_person_guns())
-            params.InUEVelocityBuffer = &vr->rawVelocityDesc[nEye];
+        params.InUEVelocityBuffer = &vr->rawVelocityDesc[nEye];
         EvaluateFrameWarp(params);
     }
 

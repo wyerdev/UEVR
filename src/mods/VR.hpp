@@ -81,7 +81,7 @@ public:
     bool is_fix_object_motion_vector() { return m_fix_object_motion_vector->value(); };
     float get_fix_object_motion_range() { return m_fix_object_motion_range->value(); };
 
-    bool is_fix_first_person_guns() { return m_fix_first_person_guns_experimental->value(); };
+    bool is_using_ultra_responsive() { return m_ultra_responsive->value(); };
 
     bool is_no_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10; };
     bool is_never_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10 && last_dlss_frame_count == 0; };
@@ -982,13 +982,13 @@ private:
     const ModToggle::Ptr m_grow_rectangle_for_projection_cropping{ModToggle::create(generate_name("GrowRectangleForProjectionCropping"), false)};
     const ModCombo::Ptr m_sync_mode{ ModCombo::create(generate_name("SynchronizationMode"), s_sync_mode_names, 2) };
         
-    const ModToggle::Ptr m_clear_before_framewarp{ModToggle::create(generate_name("ClearBeforeFramewarp"), false)};
-    const ModToggle::Ptr m_fix_object_motion_vector{ModToggle::create(generate_name("FixObjectMotionVector"), true)};
-    const ModSlider::Ptr m_fix_object_motion_range{ModSlider::create(generate_name("FixObjectMotionRange"), 0.1f, 10.0f, 3.0f)};
-    const ModToggle::Ptr m_fix_first_person_guns_experimental{ModToggle::create(generate_name("FixFirstPersonGunsExperimental"), true)};
-    const ModToggle::Ptr m_framewarp_debug{ModToggle::create(generate_name("FramewarpDebug"), false)};
-    const ModSlider::Ptr m_ignore_motion_threshold{ModSlider::create(generate_name("IgnoreMotionThreshold"), 0.1f, 100.0f, 2.5f)};
-    const ModCombo::Ptr m_framewarp_mode{ModCombo::create(generate_name("FramewarpMode"),
+    const ModToggle::Ptr m_clear_before_framewarp{ModToggle::create(generate_name("AFW_ClearBeforeFramewarp"), false)};
+    const ModToggle::Ptr m_fix_object_motion_vector{ModToggle::create(generate_name("AFW_FixObjectMotionVector"), true)};
+    const ModSlider::Ptr m_fix_object_motion_range{ModSlider::create(generate_name("AFW_FixObjectMotionRange"), 0.1f, 10.0f, 3.0f)};
+    const ModToggle::Ptr m_ultra_responsive{ModToggle::create(generate_name("AFW_UltraResponsive"), true)};
+    const ModToggle::Ptr m_framewarp_debug{ModToggle::create(generate_name("AFW_FramewarpDebug"), false)};
+    const ModSlider::Ptr m_ignore_motion_threshold{ModSlider::create(generate_name("AFW_IgnoreMotionThreshold"), 0.1f, 100.0f, 2.5f)};
+    const ModCombo::Ptr m_framewarp_mode{ModCombo::create(generate_name("AFW_FramewarpMode"),
         {
             "None",
             "AlternateEyeWarping",
@@ -1194,6 +1194,7 @@ public:
             *m_framewarp_mode,
             *m_fix_object_motion_vector,
             *m_fix_object_motion_range,
+            *m_ultra_responsive,
         };
 
         add_components_vr();

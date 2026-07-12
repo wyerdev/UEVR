@@ -2973,8 +2973,6 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                         m_fix_object_motion_range->draw("Fix Object Motion Rnage");
                         if (is_fix_object_motion_vector() && !rawVelocityDesc[0].pTexture) {
                             ImGui::TextWrapped("No UE Velocity Buffer found, can't use the object motion vector fix.");
-                        } else {
-                            m_fix_first_person_guns_experimental->draw("Fix First Person Guns (Experimental)");
                         }
                         ImGui::Spacing();
                     } else {
@@ -2984,6 +2982,8 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                         ImGui::TextWrapped("Object Motion fix is only needed when ghosting fix is enabled.");
                     }
                     m_ignore_motion_threshold->draw("Ignore Motion Threshold");
+                    m_ultra_responsive->draw("Ultra Responsive");
+                    ImGui::TextWrapped("This basically just disables lerping in UObjectHook Config tab.");
                     ImGui::TreePop();
                 }
             } else {
