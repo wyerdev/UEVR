@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <span>
 #include <chrono>
 
@@ -111,8 +112,19 @@ private:
         d3d12::TextureContext* game_tex_override = nullptr,
         std::optional<D3D12_RESOURCE_STATES> game_tex_state = std::nullopt,
         bool prefer_left_eye = false,
-        bool source_is_single_eye = false);
+        bool source_is_single_eye = false,
+        d3d12::TextureContext* ui_tex_override = nullptr);
     bool ensure_ue58_spectator_texture(ID3D12Device* device, ID3D12Resource* source);
+    void reset_ue58_converted_ui_textures(bool reset_sources = true);
+    bool ensure_ue58_slate_ui_consumer_fence(ID3D12Device* device);
+    bool is_ue58_converted_ui_slot_reusable(uint32_t slot_index);
+    void release_ue58_converted_ui_source_slot(uint32_t converted_slot_index);
+    d3d12::TextureContext* acquire_ue58_slate_ui_source_slot(
+        ID3D12Device* device,
+        ID3D12Resource* resource,
+        DXGI_FORMAT view_format);
+    void mark_ue58_converted_ui_slot_consumed(uint32_t slot_index);
+    void wait_for_ue58_slate_ui_consumers();
     void clear_backbuffer();
     bool ensure_2d_screen_textures(ID3D12Device* device, const D3D12_RESOURCE_DESC& base_desc);
 
@@ -181,6 +193,23 @@ private:
     d3d12::TextureContext m_backbuffer_copy{};
 
     d3d12::TextureContext m_game_ui_tex{};
+    static constexpr uint32_t UE58_CONVERTED_UI_SLOT_COUNT = 3;
+    // Slate can rotate native D3D12 resources between frames. Keep each source
+    // SRV alive until the conversion command list that binds it has completed.
+    static constexpr uint32_t UE58_SLATE_UI_SOURCE_SLOT_COUNT = UE58_CONVERTED_UI_SLOT_COUNT + 1;
+    struct UE58SlateUiSourceSlot {
+        d3d12::TextureContext texture{};
+        uint32_t conversion_references{};
+    };
+    std::array<UE58SlateUiSourceSlot, UE58_SLATE_UI_SOURCE_SLOT_COUNT> m_ue58_ui_source_slots{};
+    std::array<d3d12::TextureContext, UE58_CONVERTED_UI_SLOT_COUNT> m_ue58_converted_ui_tex{};
+    uint32_t m_ue58_converted_ui_slot_cursor{};
+    d3d12::TextureContext* m_ue58_active_converted_ui_tex{};
+    uint32_t m_ue58_active_converted_ui_slot{UE58_CONVERTED_UI_SLOT_COUNT};
+    std::array<int32_t, UE58_CONVERTED_UI_SLOT_COUNT> m_ue58_converted_ui_source_slots{ -1, -1, -1 };
+    std::array<uint64_t, UE58_CONVERTED_UI_SLOT_COUNT> m_ue58_converted_ui_consumer_fence_values{};
+    ComPtr<ID3D12Fence> m_ue58_converted_ui_consumer_fence{};
+    uint64_t m_ue58_converted_ui_consumer_fence_value{};
     d3d12::TextureContext m_game_tex{};
     d3d12::TextureContext m_ue58_spectator_tex{};
     d3d12::TextureContext m_scene_capture_tex{};
@@ -308,6 +337,8 @@ private:
         {
             this->copy(swapchain_idx, src, std::nullopt, std::nullopt, src_state, src_box);
         }
+        void retire_framework_ui_delayed_release(bool force_wait = false);
+        void copy_framework_ui_ue58(ID3D12Resource* src, D3D12_RESOURCE_STATES src_state = D3D12_RESOURCE_STATE_PRESENT);
         void wait_for_all_copies() {
             std::scoped_lock _{this->mtx};
 
@@ -354,6 +385,15 @@ private:
             uint32_t last_acquired_frame{0};
             bool ever_acquired{false};
             bool pre_acquired{false};
+            bool framework_ui_pending_release{false};
+            uint32_t framework_ui_pending_texture{0};
+            uint32_t framework_ui_pending_frame{0};
+            uint64_t framework_ui_stale_reuse_count{0};
+            uint64_t framework_ui_recovery_wait_count{0};
+            bool framework_ui_has_released_texture{false};
+            uint32_t framework_ui_last_released_texture{0};
+            uint32_t framework_ui_last_release_frame{0};
+            uint64_t framework_ui_front_buffer_skip_count{0};
         };
 
         std::unordered_map<uint32_t, SwapchainContext> contexts{};

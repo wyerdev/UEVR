@@ -1353,6 +1353,224 @@ void attempt_everspace2_pool_trace() {
         profile->preshadow_depth_assignment_return_rva);
 }
 
+namespace home_together_pool_guard {
+constexpr uint32_t IMAGE_TIMESTAMP = 0x27A677D3;
+constexpr uint32_t IMAGE_SIZE = 0x0B822000;
+constexpr uintptr_t POOLED_RENDER_TARGET_VTABLE_RVA = 0x08D2D560;
+constexpr uintptr_t POOLED_RENDER_TARGET_RELEASE_RVA = 0x0346C3C0;
+constexpr uintptr_t POOLED_RENDER_TARGET_FINAL_RELEASE_RVA = 0x0346C3E1;
+constexpr uintptr_t RENDER_TARGET_POOL_RVA = 0x0A89E0F0;
+constexpr uintptr_t RENDER_TARGET_POOL_TARGETS_OFFSET = 0x28;
+constexpr uintptr_t POOLED_RENDER_TARGET_POOL_OFFSET = 0x20;
+constexpr uintptr_t POOLED_RENDER_TARGET_REFCOUNT_OFFSET = 0x88;
+
+std::atomic_bool attempted{};
+std::atomic_uint64_t prevented_final_releases{};
+safetyhook::MidHook final_release_hook{};
+
+bool is_current_game() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        return exe_path && exe_path->find(L"HomeTogether-Win64-Shipping.exe") != std::wstring::npos;
+    }();
+
+    return result;
+}
+
+void final_release_guard(safetyhook::Context& ctx) {
+    // The xadd immediately before this hook has already changed NumRefs from
+    // one to zero. A tracked object must still have the pool's owning ref, so
+    // reaching zero while its pool slot still points at it is an over-release.
+    if (static_cast<uint32_t>(ctx.rdi) != 1) {
+        return;
+    }
+
+    const auto module = reinterpret_cast<uintptr_t>(utility::get_executable());
+    const auto pooled_target = static_cast<uintptr_t>(ctx.rbx);
+
+    if (module == 0 ||
+        pooled_target == 0 ||
+        !is_readable_process_range(pooled_target, POOLED_RENDER_TARGET_REFCOUNT_OFFSET + sizeof(uint32_t)))
+    {
+        return;
+    }
+
+    uintptr_t vtable{};
+    uintptr_t owning_pool{};
+    std::memcpy(&vtable, reinterpret_cast<const void*>(pooled_target), sizeof(vtable));
+    std::memcpy(
+        &owning_pool,
+        reinterpret_cast<const void*>(pooled_target + POOLED_RENDER_TARGET_POOL_OFFSET),
+        sizeof(owning_pool));
+
+    const auto expected_pool = module + RENDER_TARGET_POOL_RVA;
+    if (vtable != module + POOLED_RENDER_TARGET_VTABLE_RVA || owning_pool != expected_pool) {
+        return;
+    }
+
+    uintptr_t pool_elements{};
+    int32_t pool_count{};
+    int32_t pool_capacity{};
+    const auto pool_array = owning_pool + RENDER_TARGET_POOL_TARGETS_OFFSET;
+
+    if (!is_readable_process_range(pool_array, sizeof(uintptr_t) + sizeof(int32_t) * 2)) {
+        return;
+    }
+
+    std::memcpy(&pool_elements, reinterpret_cast<const void*>(pool_array), sizeof(pool_elements));
+    std::memcpy(&pool_count, reinterpret_cast<const void*>(pool_array + 0x08), sizeof(pool_count));
+    std::memcpy(&pool_capacity, reinterpret_cast<const void*>(pool_array + 0x0C), sizeof(pool_capacity));
+
+    constexpr int32_t MAX_REASONABLE_POOL_ELEMENTS = 65536;
+    if (pool_elements == 0 ||
+        pool_count <= 0 ||
+        pool_count > MAX_REASONABLE_POOL_ELEMENTS ||
+        pool_capacity < pool_count ||
+        pool_capacity > MAX_REASONABLE_POOL_ELEMENTS ||
+        !is_readable_process_range(pool_elements, static_cast<size_t>(pool_count) * sizeof(uintptr_t)))
+    {
+        return;
+    }
+
+    int32_t owning_index = -1;
+    for (int32_t i = 0; i < pool_count; ++i) {
+        uintptr_t candidate{};
+        std::memcpy(
+            &candidate,
+            reinterpret_cast<const void*>(pool_elements + static_cast<uintptr_t>(i) * sizeof(uintptr_t)),
+            sizeof(candidate));
+
+        if (candidate == pooled_target) {
+            owning_index = i;
+            break;
+        }
+    }
+
+    if (owning_index < 0) {
+        // The pool clears its slot before its legitimate final Release.
+        return;
+    }
+
+    auto* ref_count = reinterpret_cast<std::atomic_uint32_t*>(
+        pooled_target + POOLED_RENDER_TARGET_REFCOUNT_OFFSET);
+    uint32_t expected_zero{};
+    uint32_t restored_count{};
+
+    if (ref_count->compare_exchange_strong(
+            expected_zero,
+            1,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire))
+    {
+        restored_count = 1;
+    } else if (expected_zero > 0 && expected_zero < 0x100000) {
+        // Another owner revived the target after the decrement. It is no
+        // longer final and must not enter the destructor path either.
+        restored_count = expected_zero;
+    } else {
+        return;
+    }
+
+    // The original function compares EDI with one and returns EDI - 1. Make
+    // it follow the non-final path and return the restored reference count.
+    ctx.rdi = static_cast<uint64_t>(restored_count) + 1;
+
+    uintptr_t direct_caller{};
+    if (is_readable_process_range(ctx.rsp + 0x28, sizeof(direct_caller))) {
+        std::memcpy(&direct_caller, reinterpret_cast<const void*>(ctx.rsp + 0x28), sizeof(direct_caller));
+    }
+
+    const auto event = prevented_final_releases.fetch_add(1, std::memory_order_relaxed) + 1;
+    SPDLOG_ERROR(
+        "[HomeTogether][RenderTargetPool] Prevented tracked pooled target over-release "
+        "event={} object={:x} pool={:x} index={} restored_refs={} thread={} caller={:x} caller_rva={:x}",
+        event,
+        pooled_target,
+        owning_pool,
+        owning_index,
+        restored_count,
+        GetCurrentThreadId(),
+        direct_caller,
+        direct_caller >= module ? direct_caller - module : 0);
+}
+
+void attempt_install() {
+    if (!is_current_game() ||
+        g_framework == nullptr ||
+        !g_framework->is_dx12() ||
+        attempted.exchange(true, std::memory_order_acq_rel))
+    {
+        return;
+    }
+
+    const auto module = utility::get_executable();
+    if (module == nullptr || IsBadReadPtr(module, sizeof(IMAGE_DOS_HEADER))) {
+        return;
+    }
+
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        return;
+    }
+
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+        reinterpret_cast<uintptr_t>(module) + dos->e_lfanew);
+    if (IsBadReadPtr(nt, sizeof(*nt)) ||
+        nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->FileHeader.TimeDateStamp != IMAGE_TIMESTAMP ||
+        nt->OptionalHeader.SizeOfImage != IMAGE_SIZE)
+    {
+        SPDLOG_WARN(
+            "[HomeTogether][RenderTargetPool] Guard disabled because the executable fingerprint changed");
+        return;
+    }
+
+    const auto module_base = reinterpret_cast<uintptr_t>(module);
+    const auto release = module_base + POOLED_RENDER_TARGET_RELEASE_RVA;
+    const auto final_release = module_base + POOLED_RENDER_TARGET_FINAL_RELEASE_RVA;
+    const auto vtable_release_slot = module_base + POOLED_RENDER_TARGET_VTABLE_RVA + 7 * sizeof(uintptr_t);
+    constexpr std::array<uint8_t, 37> release_signature{
+        0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10,
+        0x57, 0x48, 0x83, 0xEC, 0x20, 0xBE, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x48, 0x8B, 0xD9, 0x8B, 0xFE, 0xF0, 0x0F, 0xC1, 0xB9, 0x88,
+        0x00, 0x00, 0x00, 0x83, 0xFF, 0x01, 0x75,
+    };
+
+    uintptr_t vtable_release{};
+    if (IsBadReadPtr(reinterpret_cast<void*>(release), release_signature.size()) ||
+        std::memcmp(reinterpret_cast<void*>(release), release_signature.data(), release_signature.size()) != 0 ||
+        !is_readable_process_range(vtable_release_slot, sizeof(vtable_release)))
+    {
+        SPDLOG_WARN(
+            "[HomeTogether][RenderTargetPool] Guard disabled because FPooledRenderTarget::Release validation failed");
+        return;
+    }
+
+    std::memcpy(&vtable_release, reinterpret_cast<const void*>(vtable_release_slot), sizeof(vtable_release));
+    if (vtable_release != release) {
+        SPDLOG_WARN(
+            "[HomeTogether][RenderTargetPool] Guard disabled because the FPooledRenderTarget vtable did not match");
+        return;
+    }
+
+    final_release_hook = safetyhook::create_mid(
+        reinterpret_cast<void*>(final_release),
+        &final_release_guard);
+
+    if (!final_release_hook) {
+        SPDLOG_ERROR(
+            "[HomeTogether][RenderTargetPool] Failed to install tracked-target final-release guard at {:x}",
+            final_release);
+        return;
+    }
+
+    SPDLOG_WARN(
+        "[HomeTogether][RenderTargetPool] Installed exact-build tracked-target final-release guard at {:x}; "
+        "legitimate pool removals remain unchanged",
+        final_release);
+}
+}
+
 bool everspace2_set_dedicated_ui_root(sdk::UObjectBase* object, bool rooted) {
     if (object == nullptr) {
         return false;
@@ -3883,8 +4101,7 @@ FFakeStereoRenderingHook::FFakeStereoRenderingHook() {
 
 void FFakeStereoRenderingHook::on_frame() {
     attempt_everspace2_pool_trace();
-    // Engine tick hook is always installed â€” plugins (including dumper-mode
-    // clients) need on_pre_engine_tick callbacks to submit game-thread work.
+    home_together_pool_guard::attempt_install();
     attempt_hook_game_engine_tick();
 
     // Render-pipeline hooks are the crash vector on some UE4.26.x forks
@@ -9964,6 +10181,20 @@ void FFakeStereoRenderingHook::begin_render_viewfamily(ISceneViewExtension* exte
     runtime->internal_frame_count = frame_count;
     runtime->on_pre_render_game_thread(frame_count);
 
+    if (is_ue_5_8() &&
+        runtime->is_openxr() &&
+        runtime->ready() &&
+        !g_hook->m_has_game_viewport_client_draw_hook)
+    {
+        // UE5.8 can strip the usual UGameViewportClient::Draw anchors while
+        // still reaching BeginRenderViewFamily. Publish a fresh pose here so
+        // OpenXR submit states keep stage views instead of reusing one stale
+        // startup pose forever.
+        vr->update_hmd_state(true, frame_count);
+        SPDLOG_INFO_ONCE(
+            "[UE5.8][OpenXR] Publishing HMD poses from BeginRenderViewFamily because UGameViewportClient::Draw was not resolved");
+    }
+
     if (everspace2_is_current_game()) {
         // SetupViewPoint runs before this callback. Publish a stable token for
         // the next frame so all of its viewpoint calls share one tracking pose.
@@ -12488,7 +12719,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
                 glm::radians(-(float)rot_d_other.yaw),
                 glm::radians((float)rot_d_other.pitch),
                 glm::radians(-(float)rot_d_other.roll));
-        // ç‰‡æ®µï¼šåœ¨ calculate_stereo_view_offset æ–¹æ³•æœ«å°¾è°ƒç”¨æˆ–æ’å…¥ä»¥èŽ·å–æœ€ç»ˆ view çŸ©é˜µ
+        // Æ¬¶Î£ºÔÚ calculate_stereo_view_offset ·½·¨Ä©Î²µ÷ÓÃ»ò²åÈëÒÔ»ñÈ¡×îÖÕ view ¾ØÕó
         if (!has_double_precision) {
             glm::vec3 cam_pos = (*view_location) / vr->get_world_to_meters();
             glm::vec3 cam_pos_other = view_location_other / vr->get_world_to_meters();
@@ -13714,6 +13945,16 @@ struct UE55SlateDrawWindowPassInputs {
     float viewport_scale_ui;
 };
 
+struct UE58SlateDrawWindowPassInputs {
+    void* renderer;
+    void* window_element_list;
+    void* window;
+    sdk::FViewportInfo* viewport_info;
+    UE55FIntPoint cursor_position;
+    UE55FIntRect scene_view_rect;
+    float viewport_scale_ui;
+};
+
 struct UE55SlateDrawWindowPassOutputs {
     void* viewport_rhi;
     FRHITexture2D* viewport_texture_rhi;
@@ -13746,6 +13987,34 @@ bool try_read_ue55_slate_draw_inputs(void* candidate, void* renderer, UE55SlateD
 }
 
 bool try_read_ue55_slate_draw_inputs_full(void* candidate, void* renderer, UE55SlateDrawWindowPassInputs& out) {
+    if (is_ue_5_8()) {
+        if (!is_readable_process_range((uintptr_t)candidate, sizeof(UE58SlateDrawWindowPassInputs))) {
+            return false;
+        }
+
+        UE58SlateDrawWindowPassInputs ue58{};
+        memcpy(&ue58, candidate, sizeof(ue58));
+
+        if (ue58.renderer != renderer || ue58.window == nullptr) {
+            return false;
+        }
+
+        if (!is_readable_process_range((uintptr_t)ue58.window, sizeof(void*))) {
+            return false;
+        }
+
+        out = {};
+        out.renderer = ue58.renderer;
+        out.window_element_list = ue58.window_element_list;
+        out.window = ue58.window;
+        out.viewport_info = ue58.viewport_info;
+        out.cursor_position = ue58.cursor_position;
+        out.scene_view_rect = ue58.scene_view_rect;
+        out.viewport_scale_ui = ue58.viewport_scale_ui;
+        SPDLOG_INFO_ONCE("[UE5.8][SlateUI] Using UE5.8 FSlateDrawWindowPassInputs layout");
+        return true;
+    }
+
     if (!is_readable_process_range((uintptr_t)candidate, sizeof(UE55SlateDrawWindowPassInputs))) {
         return false;
     }
@@ -13982,6 +14251,30 @@ bool ue55_try_promote_fallback_ui_target(
 
     return true;
 }
+
+bool ue58_slate_output_is_scene_target(
+    VRRenderTargetManager_Base* rtm,
+    FRHITexture2D* texture,
+    const D3D12_RESOURCE_DESC& desc)
+{
+    if (rtm != nullptr && texture != nullptr && texture == rtm->get_render_target()) {
+        return true;
+    }
+
+    auto vr = VR::get();
+
+    if (vr == nullptr || !vr->is_hmd_active()) {
+        return false;
+    }
+
+    const auto expected_scene_width = (uint64_t)vr->get_hmd_width() * 2ull;
+    const auto expected_scene_height = (uint64_t)vr->get_hmd_height();
+
+    return expected_scene_width != 0 &&
+           expected_scene_height != 0 &&
+           desc.Width == expected_scene_width &&
+           desc.Height == expected_scene_height;
+}
 }
 
 void FFakeStereoRenderingHook::slate_output_texture_register_hook_impl(safetyhook::Context& ctx, bool ue58) {
@@ -14042,7 +14335,16 @@ void FFakeStereoRenderingHook::slate_output_texture_register_hook_impl(safetyhoo
             expected_height == 0 ||
             (original_desc->Width == expected_width && original_desc->Height == expected_height);
 
-        if (original_desc && extent_ok) {
+        if (original_desc && ue58_slate_output_is_scene_target(rtm, original, *original_desc)) {
+            SPDLOG_INFO_EVERY_N_SEC(
+                1,
+                "{} refusing original SlateOutputTexture promotion because it matches the VR scene target: original={:x} [{}x{} fmt={}]",
+                tag,
+                (uintptr_t)original,
+                original_desc->Width,
+                original_desc->Height,
+                (uint32_t)original_desc->Format);
+        } else if (original_desc && extent_ok) {
             rtm->set_dedicated_ui_target(original, original_desc->Width, original_desc->Height);
             rtm->get_fallback_ui_target_ref() = nullptr;
             rtm->cancel_dedicated_ui_creation_preserving_target("UE5.8 promoted SlateOutputTexture");
@@ -14102,6 +14404,35 @@ void FFakeStereoRenderingHook::slate_output_texture_register_hook_impl(safetyhoo
         SPDLOG_INFO_EVERY_N_SEC(1, "{} refusing SlateOutputTexture replacement because the original RDX texture is not a valid D3D12 texture: {:x}",
             tag,
             (uintptr_t)original);
+        return;
+    }
+
+    if (ue58 && ue58_slate_output_is_scene_target(rtm, original, *original_desc)) {
+        SPDLOG_INFO_EVERY_N_SEC(
+            1,
+            "{} routing scene-target SlateOutputTexture to dedicated UI target: original={:x} [{}x{} fmt={}] -> dedicated={:x} [{}x{} fmt={}]",
+            tag,
+            (uintptr_t)original,
+            original_desc->Width,
+            original_desc->Height,
+            (uint32_t)original_desc->Format,
+            (uintptr_t)ui_target,
+            desc->Width,
+            desc->Height,
+            (uint32_t)desc->Format);
+        ctx.rdx = (uintptr_t)ui_target;
+        return;
+    }
+
+    if (ue58 && (original_desc->Width != desc->Width || original_desc->Height != desc->Height)) {
+        SPDLOG_INFO_EVERY_N_SEC(
+            1,
+            "{} refusing SlateOutputTexture replacement because original extent [{}x{}] does not match dedicated UI extent [{}x{}]",
+            tag,
+            original_desc->Width,
+            original_desc->Height,
+            desc->Width,
+            desc->Height);
         return;
     }
 

@@ -513,6 +513,42 @@ std::optional<DXGI_FORMAT> dune_view_format_for_resource(DXGI_FORMAT format) {
     }
 }
 
+std::optional<DXGI_FORMAT> concrete_color_view_format_for_resource(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+        return DXGI_FORMAT_B8G8R8X8_UNORM;
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+        return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    case DXGI_FORMAT_R16G16B16A16_UNORM:
+        return format;
+    default:
+        return std::nullopt;
+    }
+}
+
+bool can_copy_to_openxr_ui_swapchain(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        return true;
+    default:
+        return false;
+    }
+}
+
 }
 
 const char* D3D12Component::shf_scene_mode_name(ShfSceneMode mode) {
@@ -691,6 +727,207 @@ bool D3D12Component::ensure_ue58_spectator_texture(ID3D12Device* device, ID3D12R
         (uint32_t)spectator_desc.Format,
         view_format ? (uint32_t)*view_format : (uint32_t)DXGI_FORMAT_UNKNOWN);
     return true;
+}
+
+bool D3D12Component::ensure_ue58_slate_ui_consumer_fence(ID3D12Device* device) {
+    if (m_ue58_converted_ui_consumer_fence != nullptr) {
+        return true;
+    }
+
+    if (device == nullptr || FAILED(device->CreateFence(
+        0,
+        D3D12_FENCE_FLAG_NONE,
+        IID_PPV_ARGS(&m_ue58_converted_ui_consumer_fence))))
+    {
+        SPDLOG_ERROR_EVERY_N_SEC(1, "[UE5.8][SlateUI] failed to create converted UI consumer fence");
+        m_ue58_converted_ui_consumer_fence.Reset();
+        return false;
+    }
+
+    m_ue58_converted_ui_consumer_fence->SetName(L"UE5.8 Slate UI Consumer Fence");
+    return true;
+}
+
+void D3D12Component::wait_for_ue58_slate_ui_consumers() {
+    if (m_ue58_converted_ui_consumer_fence == nullptr ||
+        m_ue58_converted_ui_consumer_fence_value == 0 ||
+        m_ue58_converted_ui_consumer_fence->GetCompletedValue() >= m_ue58_converted_ui_consumer_fence_value)
+    {
+        return;
+    }
+
+    const auto event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+
+    if (event == nullptr) {
+        SPDLOG_ERROR("[UE5.8][SlateUI] failed to create a consumer-fence wait event during reset");
+        return;
+    }
+
+    const auto result = m_ue58_converted_ui_consumer_fence->SetEventOnCompletion(
+        m_ue58_converted_ui_consumer_fence_value,
+        event);
+
+    if (FAILED(result)) {
+        SPDLOG_ERROR("[UE5.8][SlateUI] failed to arm consumer-fence wait during reset");
+        CloseHandle(event);
+        return;
+    }
+
+    WaitForSingleObject(event, INFINITE);
+    CloseHandle(event);
+}
+
+void D3D12Component::release_ue58_converted_ui_source_slot(uint32_t converted_slot_index) {
+    if (converted_slot_index >= UE58_CONVERTED_UI_SLOT_COUNT) {
+        return;
+    }
+
+    auto& source_slot_index = m_ue58_converted_ui_source_slots[converted_slot_index];
+
+    if (source_slot_index < 0 || source_slot_index >= (int32_t)UE58_SLATE_UI_SOURCE_SLOT_COUNT) {
+        source_slot_index = -1;
+        return;
+    }
+
+    auto& source_slot = m_ue58_ui_source_slots[source_slot_index];
+
+    if (source_slot.conversion_references > 0) {
+        --source_slot.conversion_references;
+    } else {
+        SPDLOG_WARN("[UE5.8][SlateUI] converted UI source-slot reference underflow");
+    }
+
+    source_slot_index = -1;
+}
+
+bool D3D12Component::is_ue58_converted_ui_slot_reusable(uint32_t slot_index) {
+    if (slot_index >= UE58_CONVERTED_UI_SLOT_COUNT) {
+        return false;
+    }
+
+    auto& slot = m_ue58_converted_ui_tex[slot_index];
+
+    // The source SRV remains valid until the conversion command list retires.
+    if (slot.commands.ready() && !slot.commands.try_wait()) {
+        return false;
+    }
+
+    const auto consumer_fence_value = m_ue58_converted_ui_consumer_fence_values[slot_index];
+
+    // The converted output also stays immutable until the OpenXR UI copy that
+    // reads it has retired on the same graphics queue.
+    if (consumer_fence_value != 0 &&
+        (m_ue58_converted_ui_consumer_fence == nullptr ||
+         m_ue58_converted_ui_consumer_fence->GetCompletedValue() < consumer_fence_value))
+    {
+        return false;
+    }
+
+    release_ue58_converted_ui_source_slot(slot_index);
+    m_ue58_converted_ui_consumer_fence_values[slot_index] = 0;
+    return true;
+}
+
+d3d12::TextureContext* D3D12Component::acquire_ue58_slate_ui_source_slot(
+    ID3D12Device* device,
+    ID3D12Resource* resource,
+    DXGI_FORMAT view_format)
+{
+    if (device == nullptr || resource == nullptr) {
+        return nullptr;
+    }
+
+    for (auto& source_slot : m_ue58_ui_source_slots) {
+        if (source_slot.texture.texture.Get() == resource && source_slot.texture.srv_heap != nullptr) {
+            return &source_slot.texture;
+        }
+    }
+
+    for (auto& source_slot : m_ue58_ui_source_slots) {
+        if (source_slot.conversion_references != 0) {
+            continue;
+        }
+
+        if (!source_slot.texture.setup(
+                device,
+                resource,
+                view_format,
+                view_format,
+                L"UE5.8 Slate UI Source Texture"))
+        {
+            source_slot.texture.reset();
+            return nullptr;
+        }
+
+        return &source_slot.texture;
+    }
+
+    SPDLOG_WARNING_EVERY_N_SEC(
+        1,
+        "[UE5.8][SlateUI] all source descriptor slots are still referenced; preserving the last completed converted UI frame");
+    return nullptr;
+}
+
+void D3D12Component::mark_ue58_converted_ui_slot_consumed(uint32_t slot_index) {
+    if (slot_index >= UE58_CONVERTED_UI_SLOT_COUNT ||
+        m_ue58_converted_ui_consumer_fence == nullptr ||
+        g_framework == nullptr)
+    {
+        return;
+    }
+
+    const auto& d3d12_hook = g_framework->get_d3d12_hook();
+
+    if (d3d12_hook == nullptr) {
+        return;
+    }
+
+    const auto command_queue = d3d12_hook->get_command_queue();
+
+    if (command_queue == nullptr) {
+        return;
+    }
+
+    const auto fence_value = ++m_ue58_converted_ui_consumer_fence_value;
+
+    if (FAILED(command_queue->Signal(m_ue58_converted_ui_consumer_fence.Get(), fence_value))) {
+        --m_ue58_converted_ui_consumer_fence_value;
+        SPDLOG_ERROR_EVERY_N_SEC(1, "[UE5.8][SlateUI] failed to signal converted UI consumer fence");
+        return;
+    }
+
+    m_ue58_converted_ui_consumer_fence_values[slot_index] = fence_value;
+}
+
+void D3D12Component::reset_ue58_converted_ui_textures(bool reset_sources) {
+    // Reset is exceptional (resize/device reset). Wait here rather than on the
+    // frame path so an OpenXR UI copy never observes a released ring resource.
+    wait_for_ue58_slate_ui_consumers();
+
+    for (uint32_t slot_index = 0; slot_index < UE58_CONVERTED_UI_SLOT_COUNT; ++slot_index) {
+        auto& converted_ui = m_ue58_converted_ui_tex[slot_index];
+
+        if (converted_ui.commands.ready()) {
+            converted_ui.commands.wait(INFINITE);
+        }
+
+        release_ue58_converted_ui_source_slot(slot_index);
+        converted_ui.reset();
+        m_ue58_converted_ui_consumer_fence_values[slot_index] = 0;
+    }
+
+    m_ue58_active_converted_ui_tex = nullptr;
+    m_ue58_active_converted_ui_slot = UE58_CONVERTED_UI_SLOT_COUNT;
+    m_ue58_converted_ui_slot_cursor = 0;
+    m_ue58_converted_ui_consumer_fence.Reset();
+    m_ue58_converted_ui_consumer_fence_value = 0;
+
+    if (reset_sources) {
+        for (auto& source_slot : m_ue58_ui_source_slots) {
+            source_slot.texture.reset();
+            source_slot.conversion_references = 0;
+        }
+    }
 }
 
 D3D12Component::ShfSceneMode D3D12Component::classify_shf_scene_mode(
@@ -1774,10 +2011,96 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         log_shf_scene_mode_if_needed(shf_scene_mode, source_desc, real_desc, frame_count, shf_using_mono_expansion);
     }
 
+    bool ue58_ui_uses_shader_conversion = false;
+    bool ue58_ui_copy_blocked = false;
+    bool ue58_ui_reuse_last_converted_frame = false;
+    d3d12::TextureContext* ue58_ui_source_context = nullptr;
+    std::optional<uint32_t> ue58_ui_source_slot_index{};
+    d3d12::TextureContext* ue58_ui_submit_context = nullptr;
+    uint32_t ue58_ui_submit_slot = UE58_CONVERTED_UI_SLOT_COUNT;
+
     if (ui_target != nullptr) {
-        if (m_game_ui_tex.texture.Get() != ui_target->get_native_resource()) {
-            if (!m_game_ui_tex.setup(device, 
-                (ID3D12Resource*)ui_target->get_native_resource(), 
+        const auto native_ui = (ID3D12Resource*)ui_target->get_native_resource();
+
+        if (native_ui != nullptr && is_ue58_runtime_cached()) {
+            const auto native_desc = native_ui->GetDesc();
+            const auto needs_shader_conversion = runtime->is_openxr() && !can_copy_to_openxr_ui_swapchain(native_desc.Format);
+
+            if (needs_shader_conversion) {
+                const auto native_view_format = concrete_color_view_format_for_resource(native_desc.Format);
+
+                if (!native_view_format) {
+                    SPDLOG_WARNING_EVERY_N_SEC(
+                        1,
+                        "[UE5.8][SlateUI] blocking dedicated UI copy because source format {} cannot be safely viewed or copied to the OpenXR UI swapchain",
+                        (uint32_t)native_desc.Format);
+                    m_game_ui_tex.reset();
+                    reset_ue58_converted_ui_textures();
+                    ue58_ui_copy_blocked = true;
+                } else {
+                    ue58_ui_source_context = acquire_ue58_slate_ui_source_slot(device, native_ui, *native_view_format);
+
+                    if (ue58_ui_source_context != nullptr) {
+                        for (uint32_t source_slot_index = 0; source_slot_index < UE58_SLATE_UI_SOURCE_SLOT_COUNT; ++source_slot_index) {
+                            if (&m_ue58_ui_source_slots[source_slot_index].texture == ue58_ui_source_context) {
+                                ue58_ui_source_slot_index = source_slot_index;
+                                break;
+                            }
+                        }
+                    }
+
+                    ue58_ui_uses_shader_conversion =
+                        ue58_ui_source_context != nullptr &&
+                        ue58_ui_source_context->texture.Get() == native_ui &&
+                        ue58_ui_source_context->srv_heap != nullptr &&
+                        ue58_ui_source_slot_index.has_value();
+
+                    if (!ue58_ui_uses_shader_conversion) {
+                        if (m_ue58_active_converted_ui_tex != nullptr &&
+                            m_ue58_active_converted_ui_tex->texture.Get() != nullptr &&
+                            m_ue58_active_converted_ui_slot < UE58_CONVERTED_UI_SLOT_COUNT)
+                        {
+                            // All source slots are still referenced by queued
+                            // conversions. Reuse a completed output instead of
+                            // destroying a descriptor heap the GPU may read.
+                            ue58_ui_uses_shader_conversion = true;
+                            ue58_ui_reuse_last_converted_frame = true;
+                            ue58_ui_submit_context = m_ue58_active_converted_ui_tex;
+                            ue58_ui_submit_slot = m_ue58_active_converted_ui_slot;
+                        } else {
+                            SPDLOG_ERROR_EVERY_N_SEC(
+                                1,
+                                "[UE5.8][SlateUI] no safe Slate UI source descriptor is available [{}x{} fmt={}]; blocking UI layer this frame",
+                                native_desc.Width,
+                                native_desc.Height,
+                                (uint32_t)native_desc.Format);
+                            m_game_ui_tex.reset();
+                            ue58_ui_copy_blocked = true;
+                        }
+                    }
+
+                    if (ue58_ui_uses_shader_conversion && m_game_ui_tex.texture.Get() != nullptr) {
+                        // The converted UE5.8 UI path uses its own ring below.
+                        // Leaving a stale direct UI context alive makes later
+                        // clear/draw paths race against a texture that is no
+                        // longer the submitted UI source.
+                        m_game_ui_tex.reset();
+                    }
+                }
+            } else {
+                reset_ue58_converted_ui_textures();
+            }
+        } else {
+            reset_ue58_converted_ui_textures();
+        }
+
+        if (!ue58_ui_uses_shader_conversion &&
+            !ue58_ui_copy_blocked &&
+            native_ui != nullptr &&
+            m_game_ui_tex.texture.Get() != native_ui)
+        {
+            if (!m_game_ui_tex.setup(device,
+                native_ui,
                 DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM,
                 L"Game UI Texture"))
             {
@@ -1821,6 +2144,8 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
             }
         }
     } else {
+        reset_ue58_converted_ui_textures();
+
         const bool keep_pending_ue57_ui =
             ffsr->get_render_target_manager()->get_dedicated_ui_width() != 0 &&
             ffsr->get_render_target_manager()->get_dedicated_ui_height() != 0 &&
@@ -1832,6 +2157,155 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     }
 
     const float clear_color[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+    if (ue58_ui_uses_shader_conversion && !ue58_ui_reuse_last_converted_frame) {
+        if (m_game_batch != nullptr &&
+            ue58_ui_source_context != nullptr &&
+            ue58_ui_source_context->texture.Get() != nullptr &&
+            ue58_ui_source_context->srv_heap != nullptr &&
+            ue58_ui_source_slot_index.has_value() &&
+            ensure_ue58_slate_ui_consumer_fence(device))
+        {
+            const auto native_desc = ue58_ui_source_context->texture->GetDesc();
+            auto converted_desc = native_desc;
+            converted_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            converted_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            converted_desc.Flags &= ~D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+
+            if (m_ue58_active_converted_ui_tex != nullptr &&
+                m_ue58_active_converted_ui_tex->texture.Get() != nullptr &&
+                !shf_texture_desc_matches(m_ue58_active_converted_ui_tex->texture->GetDesc(), converted_desc))
+            {
+                // Keep source descriptors alive; only the owned BGRA output
+                // ring changes with the destination description.
+                reset_ue58_converted_ui_textures(false);
+            }
+
+            const auto setup_converted_slot = [&](d3d12::TextureContext& slot) -> bool {
+                bool needs_create = slot.texture.Get() == nullptr;
+
+                if (!needs_create) {
+                    needs_create = !shf_texture_desc_matches(slot.texture->GetDesc(), converted_desc) ||
+                        slot.rtv_heap == nullptr ||
+                        slot.srv_heap == nullptr ||
+                        !slot.commands.ready();
+                }
+
+                if (!needs_create) {
+                    return true;
+                }
+
+                slot.reset();
+
+                D3D12_HEAP_PROPERTIES heap_props{};
+                heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+                heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+                heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+
+                ComPtr<ID3D12Resource> converted_ui{};
+                if (FAILED(device->CreateCommittedResource(
+                        &heap_props,
+                        D3D12_HEAP_FLAG_NONE,
+                        &converted_desc,
+                        ENGINE_SRC_COLOR,
+                        nullptr,
+                        IID_PPV_ARGS(&converted_ui))))
+                {
+                    SPDLOG_ERROR_EVERY_N_SEC(
+                        1,
+                        "[UE5.8][SlateUI] failed to create BGRA UI conversion texture [{}x{} src_fmt={}]",
+                        native_desc.Width,
+                        native_desc.Height,
+                        (uint32_t)native_desc.Format);
+                    return false;
+                }
+
+                if (!slot.setup(
+                        device,
+                        converted_ui.Get(),
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        L"UE5.8 Converted Game UI Ring Texture"))
+                {
+                    SPDLOG_ERROR_EVERY_N_SEC(
+                        1,
+                        "[UE5.8][SlateUI] failed to setup BGRA UI conversion texture [{}x{} src_fmt={}]",
+                        native_desc.Width,
+                        native_desc.Height,
+                        (uint32_t)native_desc.Format);
+                    slot.reset();
+                    return false;
+                }
+
+                SPDLOG_INFO_EVERY_N_SEC(
+                    2,
+                    "[UE5.8][SlateUI] using shader conversion ring for Slate UI source [{}x{} fmt={}] -> BGRA OpenXR UI",
+                    native_desc.Width,
+                    native_desc.Height,
+                    (uint32_t)native_desc.Format);
+                return true;
+            };
+
+            for (uint32_t attempt = 0; attempt < UE58_CONVERTED_UI_SLOT_COUNT; ++attempt) {
+                const auto slot_index = (m_ue58_converted_ui_slot_cursor + attempt) % UE58_CONVERTED_UI_SLOT_COUNT;
+                auto& slot = m_ue58_converted_ui_tex[slot_index];
+
+                if (!is_ue58_converted_ui_slot_reusable(slot_index)) {
+                    continue;
+                }
+
+                if (!setup_converted_slot(slot)) {
+                    ue58_ui_copy_blocked = true;
+                    break;
+                }
+
+                slot.commands.clear_rtv(slot, (float*)&clear_color, ENGINE_SRC_COLOR);
+                d3d12::render_srv_to_rtv(
+                    m_game_batch.get(),
+                    slot.commands.cmd_list.Get(),
+                    *ue58_ui_source_context,
+                    slot,
+                    ENGINE_SRC_COLOR,
+                    ENGINE_SRC_COLOR);
+                slot.commands.execute();
+
+                m_ue58_converted_ui_source_slots[slot_index] = (int32_t)*ue58_ui_source_slot_index;
+                ++m_ue58_ui_source_slots[*ue58_ui_source_slot_index].conversion_references;
+                m_ue58_active_converted_ui_tex = &slot;
+                m_ue58_active_converted_ui_slot = slot_index;
+                m_ue58_converted_ui_slot_cursor = (slot_index + 1) % UE58_CONVERTED_UI_SLOT_COUNT;
+                ue58_ui_submit_context = &slot;
+                ue58_ui_submit_slot = slot_index;
+                break;
+            }
+
+            if (!ue58_ui_copy_blocked && ue58_ui_submit_context == nullptr) {
+                if (m_ue58_active_converted_ui_tex != nullptr &&
+                    m_ue58_active_converted_ui_tex->texture.Get() != nullptr &&
+                    m_ue58_active_converted_ui_slot < UE58_CONVERTED_UI_SLOT_COUNT)
+                {
+                    ue58_ui_submit_context = m_ue58_active_converted_ui_tex;
+                    ue58_ui_submit_slot = m_ue58_active_converted_ui_slot;
+                    SPDLOG_INFO_EVERY_N_SEC(
+                        1,
+                        "[UE5.8][SlateUI] all shader-converted UI output slots are still consumed; reusing the most recent stable UI texture");
+                } else {
+                    SPDLOG_WARNING_EVERY_N_SEC(
+                        1,
+                        "[UE5.8][SlateUI] blocking shader-converted UI copy because no converted UI ring slot is safe to reuse yet");
+                    ue58_ui_copy_blocked = true;
+                }
+            }
+        } else {
+            SPDLOG_WARNING_EVERY_N_SEC(
+                1,
+                "[UE5.8][SlateUI] blocking shader-converted UI copy because the conversion resources are incomplete");
+            ue58_ui_copy_blocked = true;
+        }
+    }
+
+    auto* active_ui_tex = ue58_ui_uses_shader_conversion ? ue58_ui_submit_context : &m_game_ui_tex;
+
     const auto is_2d_screen = vr->is_using_2d_screen();
     const auto shf_auto_2d_screen =
         SHF_AUTO_2D_SCREEN_FROM_MONO_CINEMATIC &&
@@ -1867,21 +2341,21 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         const auto view_game_tex_clear_state =
             (is_shf_external_backbuffer || shf_using_mono_expansion) ? ENGINE_SRC_COLOR : D3D12_RESOURCE_STATE_RENDER_TARGET;
 
-        if (ui_invert_alpha > 0.0f && !skip_in_place_ui_invert && m_game_ui_tex.texture.Get() != nullptr && m_game_ui_tex.srv_heap != nullptr) {
+        if (ui_invert_alpha > 0.0f && !skip_in_place_ui_invert && active_ui_tex != nullptr && active_ui_tex->texture.Get() != nullptr && active_ui_tex->srv_heap != nullptr) {
             const std::array<float, 4> blend_factor{ 1.0f, 1.0f, 1.0f, ui_invert_alpha };
             const DirectX::XMFLOAT4 invert_alpha_tint{ 1.0f, 1.0f, 1.0f, ui_invert_alpha };
             d3d12::render_srv_to_rtv(
                 m_ui_batch_alpha_invert.get(),
                 commands.cmd_list.Get(),
-                m_game_ui_tex,
-                m_game_ui_tex,
+                *active_ui_tex,
+                *active_ui_tex,
                 ENGINE_SRC_COLOR,
                 ENGINE_SRC_COLOR,
                 blend_factor,
                 invert_alpha_tint);
         }
 
-        draw_spectator_view(commands.cmd_list.Get(), is_right_eye_frame, &view_game_tex);
+        draw_spectator_view(commands.cmd_list.Get(), is_right_eye_frame, &view_game_tex, std::nullopt, false, false, active_ui_tex);
         spectator_mirror_drawn = true;
 
         const auto has_2d_screen_textures =
@@ -1982,11 +2456,11 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                 ENGINE_SRC_COLOR
             );
 
-            if (m_game_ui_tex.texture.Get() != nullptr && m_game_ui_tex.srv_heap != nullptr) {
+            if (active_ui_tex != nullptr && active_ui_tex->texture.Get() != nullptr && active_ui_tex->srv_heap != nullptr) {
                 d3d12::render_srv_to_rtv(
                     m_game_batch.get(),
                     commands.cmd_list.Get(),
-                    m_game_ui_tex,
+                    *active_ui_tex,
                     m_2d_screen_tex[0],
                     ENGINE_SRC_COLOR,
                     ENGINE_SRC_COLOR
@@ -2016,11 +2490,11 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                     );
                 }
 
-                if (m_game_ui_tex.texture.Get() != nullptr && m_game_ui_tex.srv_heap != nullptr) {
+                if (active_ui_tex != nullptr && active_ui_tex->texture.Get() != nullptr && active_ui_tex->srv_heap != nullptr) {
                     d3d12::render_srv_to_rtv(
                         m_game_batch.get(),
                         commands.cmd_list.Get(),
-                        m_game_ui_tex,
+                        *active_ui_tex,
                         m_2d_screen_tex[1],
                         ENGINE_SRC_COLOR,
                         ENGINE_SRC_COLOR
@@ -2039,12 +2513,20 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
 
     // Draws the spectator view
     auto clear_rt = [&](d3d12::CommandContext& commands) {
-		if (m_game_ui_tex.texture.Get() == nullptr) {
+        if (ue58_ui_uses_shader_conversion) {
+            // Converted UE5.8 Slate UI may be reused while all ring slots are
+            // busy. Clearing the submitted copy creates the right-eye/UI
+            // flicker we are trying to avoid; the engine-owned Slate target
+            // remains isolated by the dedicated UI redirect.
+            return;
+        }
+
+        if (active_ui_tex == nullptr || active_ui_tex->texture.Get() == nullptr) {
             return;
         }
 		
         const float ui_clear_color[] = { 0.0f, 0.0f, 0.0f, ui_invert_alpha };
-        commands.clear_rtv(m_game_ui_tex, (float*)&ui_clear_color, ENGINE_SRC_COLOR);
+        commands.clear_rtv(*active_ui_tex, (float*)&ui_clear_color, ENGINE_SRC_COLOR);
     };
 
     auto ensure_openxr_frame_began = [&](const char* caller) -> bool {
@@ -2132,18 +2614,52 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::UI, m_2d_screen_tex[0].texture.Get(), draw_2d_view, std::nullopt, ENGINE_SRC_COLOR);
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::UI_RIGHT, m_2d_screen_tex[1].texture.Get(), std::nullopt, clear_rt, ENGINE_SRC_COLOR);
                     }
-                } else if (ui_target != nullptr) {
-                    m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::UI, (ID3D12Resource*)ui_target->get_native_resource(), draw_2d_view, clear_rt, ENGINE_SRC_COLOR);
+                } else if (ui_target != nullptr && !ue58_ui_copy_blocked) {
+                    bool ue58_converted_ui_copied = false;
+                    auto* ui_submit_texture = ue58_ui_uses_shader_conversion
+                        ? (ue58_ui_submit_context != nullptr ? ue58_ui_submit_context->texture.Get() : nullptr)
+                        : (ID3D12Resource*)ui_target->get_native_resource();
+
+                    if (ui_submit_texture == nullptr) {
+                        SPDLOG_INFO_EVERY_N_SEC(
+                            1,
+                            "[UE5.8][SlateUI] skipping OpenXR UI layer copy this frame because no converted UI texture is available");
+                    } else {
+                        m_openxr.copy(
+                            (uint32_t)runtimes::OpenXR::SwapchainIndex::UI,
+                            ui_submit_texture,
+                            draw_2d_view,
+                            clear_rt,
+                            ENGINE_SRC_COLOR);
+                        ue58_converted_ui_copied = ue58_ui_uses_shader_conversion;
+                    }
+
+                    if (ue58_converted_ui_copied &&
+                        ue58_ui_submit_slot < UE58_CONVERTED_UI_SLOT_COUNT)
+                    {
+                        // This signal follows the OpenXR UI copy on the
+                        // graphics queue, so the converted output stays
+                        // immutable until the runtime-facing read retires.
+                        mark_ue58_converted_ui_slot_consumed(ue58_ui_submit_slot);
+                    }
+                } else if (ui_target != nullptr && ue58_ui_copy_blocked) {
+                    SPDLOG_INFO_EVERY_N_SEC(
+                        1,
+                        "[UE5.8][SlateUI] skipping OpenXR UI layer copy this frame because the Slate UI source was not safe to submit");
                 }
 
                 auto fw_rt = g_framework->get_rendertarget_d3d12();
 
                 if (fw_rt && g_framework->is_drawing_anything()) {
-                    m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::FRAMEWORK_UI, g_framework->get_rendertarget_d3d12().Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    if (is_ue58_runtime_cached()) {
+                        m_openxr.copy_framework_ui_ue58(fw_rt.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    } else {
+                        m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::FRAMEWORK_UI, fw_rt.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    }
                 }
             } else if (use_2d_screen) {
                 m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::UI, m_2d_screen_tex[0].texture.Get(), draw_2d_view, clear_rt, ENGINE_SRC_COLOR);
-            } else if (m_game_ui_tex.commands.ready()) {
+            } else if (!ue58_ui_uses_shader_conversion && m_game_ui_tex.commands.ready()) {
                 m_game_ui_tex.commands.wait(INFINITE);
                 draw_2d_view(m_game_ui_tex.commands, nullptr);
                 clear_rt(m_game_ui_tex.commands);
@@ -2828,6 +3344,10 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                 }   
             }
             
+            if (is_ue58_runtime_cached()) {
+                m_openxr.retire_framework_ui_delayed_release(true);
+            }
+
             if (!suppress_ui_copy && m_openxr.ever_acquired((uint32_t)runtimes::OpenXR::SwapchainIndex::FRAMEWORK_UI)) {
                 const auto framework_quad = openxr_overlay.generate_framework_ui_quad();
                 if (framework_quad) {
@@ -2922,7 +3442,8 @@ void D3D12Component::log_frame_timing_stats_if_needed(VR* vr) {
     const auto hmd_active = vr != nullptr && vr->is_hmd_active();
     const auto afr = vr != nullptr && vr->is_using_afr();
     const auto native_stereo = vr != nullptr && vr->is_native_stereo_fix_enabled();
-    const auto has_ui_tex = m_game_ui_tex.texture.Get() != nullptr;
+    const auto has_ui_tex = m_game_ui_tex.texture.Get() != nullptr ||
+        (m_ue58_active_converted_ui_tex != nullptr && m_ue58_active_converted_ui_tex->texture.Get() != nullptr);
     const auto has_game_tex = m_game_tex.texture.Get() != nullptr;
 
     spdlog::info(
@@ -2973,8 +3494,12 @@ void D3D12Component::log_frame_timing_stats_if_needed(VR* vr) {
 }
 
 bool D3D12Component::has_game_and_ui_textures() const {
+    const auto has_ue58_converted_ui =
+        m_ue58_active_converted_ui_tex != nullptr &&
+        m_ue58_active_converted_ui_tex->texture.Get() != nullptr;
+
     return m_game_tex.texture.Get() != nullptr &&
-        m_game_ui_tex.texture.Get() != nullptr;
+        (m_game_ui_tex.texture.Get() != nullptr || has_ue58_converted_ui);
 }
 
 D3D12Component::HitchFrameSnapshot D3D12Component::get_hitch_frame_snapshot(VR* vr) const {
@@ -2984,7 +3509,8 @@ D3D12Component::HitchFrameSnapshot D3D12Component::get_hitch_frame_snapshot(VR* 
     snapshot.last_afr_state = m_last_afr_state;
     snapshot.has_prev_backbuffer = m_prev_backbuffer.Get() != nullptr;
     snapshot.has_game_tex = m_game_tex.texture.Get() != nullptr;
-    snapshot.has_ui_tex = m_game_ui_tex.texture.Get() != nullptr;
+    snapshot.has_ui_tex = m_game_ui_tex.texture.Get() != nullptr ||
+        (m_ue58_active_converted_ui_tex != nullptr && m_ue58_active_converted_ui_tex->texture.Get() != nullptr);
     snapshot.has_scene_capture_tex = m_scene_capture_tex.texture.Get() != nullptr;
     snapshot.backbuffer_width = m_backbuffer_size[0];
     snapshot.backbuffer_height = m_backbuffer_size[1];
@@ -3130,7 +3656,8 @@ void D3D12Component::draw_spectator_view(
     d3d12::TextureContext* game_tex_override,
     std::optional<D3D12_RESOURCE_STATES> game_tex_state,
     bool prefer_left_eye,
-    bool source_is_single_eye)
+    bool source_is_single_eye,
+    d3d12::TextureContext* ui_tex_override)
 {
     if (command_list == nullptr) {
         SPDLOG_INFO_EVERY_N_SEC(5, "[D3D12][spectator] disabled: command list is null");
@@ -3144,7 +3671,8 @@ void D3D12Component::draw_spectator_view(
 
     const auto& vr = VR::get();
     const auto mirror_mode = vr->get_desktop_mirror_mode();
-    const auto has_ui_tex = m_game_ui_tex.texture != nullptr && m_game_ui_tex.srv_heap != nullptr && m_game_ui_tex.srv_heap->Heap() != nullptr;
+    auto& ui_tex = ui_tex_override != nullptr ? *ui_tex_override : m_game_ui_tex;
+    const auto has_ui_tex = ui_tex.texture != nullptr && ui_tex.srv_heap != nullptr && ui_tex.srv_heap->Heap() != nullptr;
 
     if (!vr->is_hmd_active()) {
         SPDLOG_INFO_EVERY_N_SEC(
@@ -3353,13 +3881,15 @@ void D3D12Component::draw_spectator_view(
         &source_rect, 
         DirectX::Colors::White);
 
-    if (mirror_mode == VR::DESKTOP_MIRROR_FULL && has_ui_tex) {
-        const auto ui_desc = m_game_ui_tex.texture->GetDesc();
-        ID3D12DescriptorHeap* ui_heaps[] = { m_game_ui_tex.srv_heap->Heap() };
+    const auto draw_ui_overlay = mirror_mode == VR::DESKTOP_MIRROR_FULL && has_ui_tex && !is_ue58_runtime_cached();
+
+    if (draw_ui_overlay) {
+        const auto ui_desc = ui_tex.texture->GetDesc();
+        ID3D12DescriptorHeap* ui_heaps[] = { ui_tex.srv_heap->Heap() };
         render::D3D12Diagnostics::get().record_descriptor_heaps_set("VR::D3D12Component::draw_spectator_view/UISRV", 1, ui_heaps);
         command_list->SetDescriptorHeaps(1, ui_heaps);
 
-        batch->Draw(m_game_ui_tex.get_srv_gpu(), 
+        batch->Draw(ui_tex.get_srv_gpu(),
             DirectX::XMUINT2{ (uint32_t)ui_desc.Width, (uint32_t)ui_desc.Height },
             dest_rect, 
             DirectX::Colors::White);
@@ -3498,6 +4028,7 @@ void D3D12Component::on_reset(VR* vr) {
 
     m_openvr.ui_tex.reset();
     m_game_ui_tex.reset();
+    reset_ue58_converted_ui_textures();
     m_game_tex.reset();
     m_ue58_spectator_tex.reset();
     m_scene_capture_tex.reset();
@@ -4311,6 +4842,246 @@ void D3D12Component::OpenXR::release_acquired(uint32_t swapchain_idx) {
     ctx.pre_acquired = false;
     ctx.last_acquired_frame = vr->get_frame_count();
     ctx.ever_acquired = true;
+
+    if (swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::FRAMEWORK_UI) {
+        ctx.framework_ui_pending_release = false;
+        ctx.framework_ui_pending_texture = 0;
+        ctx.framework_ui_pending_frame = 0;
+        ctx.framework_ui_has_released_texture = true;
+        ctx.framework_ui_last_released_texture = texture_index;
+        ctx.framework_ui_last_release_frame = ctx.last_acquired_frame;
+    }
+}
+
+void D3D12Component::OpenXR::retire_framework_ui_delayed_release(bool force_wait) {
+    if (!is_ue58_runtime_cached()) {
+        return;
+    }
+
+    std::scoped_lock _{this->mtx};
+
+    auto vr = VR::get();
+
+    if (vr == nullptr || vr->m_openxr == nullptr) {
+        return;
+    }
+
+    constexpr auto framework_ui_idx = (uint32_t)runtimes::OpenXR::SwapchainIndex::FRAMEWORK_UI;
+
+    auto ctx_it = this->contexts.find(framework_ui_idx);
+    auto swapchain_it = vr->m_openxr->swapchains.find(framework_ui_idx);
+
+    if (ctx_it == this->contexts.end() || swapchain_it == vr->m_openxr->swapchains.end()) {
+        return;
+    }
+
+    auto& ctx = ctx_it->second;
+
+    if (!ctx.framework_ui_pending_release) {
+        return;
+    }
+
+    const auto texture_index = ctx.framework_ui_pending_texture;
+
+    if (texture_index >= ctx.texture_contexts.size() || ctx.texture_contexts[texture_index] == nullptr) {
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[UE5.8][FrameworkUI] Pending FRAMEWORK_UI image {} is invalid; forcing stale acquisition release",
+            texture_index);
+
+        XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        const auto result = xrReleaseSwapchainImage(swapchain_it->second.handle, &release_info);
+
+        if (result == XR_SUCCESS && ctx.num_textures_acquired > 0) {
+            ctx.num_textures_acquired--;
+        } else if (result != XR_SUCCESS) {
+            spdlog::error("[UE5.8][FrameworkUI] Failed to release invalid pending FRAMEWORK_UI image: {}", vr->m_openxr->get_result_string(result));
+        }
+
+        ctx.pre_acquired = false;
+        ctx.framework_ui_pending_release = false;
+        ctx.framework_ui_pending_texture = 0;
+        ctx.framework_ui_pending_frame = 0;
+        return;
+    }
+
+    auto& texture_ctx = ctx.texture_contexts[texture_index];
+    const auto current_frame = vr->get_frame_count();
+    const auto pending_age = current_frame >= ctx.framework_ui_pending_frame
+        ? current_frame - ctx.framework_ui_pending_frame
+        : 0u;
+    constexpr uint32_t max_pending_frames = 8;
+    const auto use_recovery_wait = force_wait || pending_age > max_pending_frames;
+
+    if (use_recovery_wait) {
+        ++ctx.framework_ui_recovery_wait_count;
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[UE5.8][FrameworkUI] Waiting for delayed FRAMEWORK_UI copy before release (force={} age={} recoveries={})",
+            force_wait,
+            pending_age,
+            ctx.framework_ui_recovery_wait_count);
+        texture_ctx->commands.wait(INFINITE);
+    } else if (!texture_ctx->commands.try_wait()) {
+        ++ctx.framework_ui_stale_reuse_count;
+        SPDLOG_INFO_EVERY_N_SEC(
+            1,
+            "[UE5.8][FrameworkUI] Reusing last completed FRAMEWORK_UI image while copy is pending (texture={} age={} stale_reuse={})",
+            texture_index,
+            pending_age,
+            ctx.framework_ui_stale_reuse_count);
+        return;
+    }
+
+    XrSwapchainImageReleaseInfo release_info{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    auto result = xrReleaseSwapchainImage(swapchain_it->second.handle, &release_info);
+
+    if (result == XR_ERROR_RUNTIME_FAILURE) {
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[UE5.8][FrameworkUI] xrReleaseSwapchainImage failed during delayed release; waiting all UI contexts and retrying");
+
+        for (auto& pending_ctx : ctx.texture_contexts) {
+            if (pending_ctx != nullptr) {
+                pending_ctx->commands.wait(INFINITE);
+            }
+        }
+
+        result = xrReleaseSwapchainImage(swapchain_it->second.handle, &release_info);
+    }
+
+    if (result != XR_SUCCESS) {
+        spdlog::error("[UE5.8][FrameworkUI] Delayed xrReleaseSwapchainImage failed: {}", vr->m_openxr->get_result_string(result));
+        return;
+    }
+
+    if (ctx.num_textures_acquired > 0) {
+        ctx.num_textures_acquired--;
+    } else {
+        SPDLOG_WARNING_EVERY_N_SEC(2, "[UE5.8][FrameworkUI] Delayed release completed with no tracked acquired images");
+    }
+
+    ctx.pre_acquired = false;
+    ctx.last_acquired_texture = texture_index;
+    ctx.last_acquired_frame = current_frame;
+    ctx.ever_acquired = true;
+    ctx.framework_ui_pending_release = false;
+    ctx.framework_ui_pending_texture = 0;
+    ctx.framework_ui_pending_frame = 0;
+    ctx.framework_ui_has_released_texture = true;
+    ctx.framework_ui_last_released_texture = texture_index;
+    ctx.framework_ui_last_release_frame = current_frame;
+}
+
+void D3D12Component::OpenXR::copy_framework_ui_ue58(ID3D12Resource* resource, D3D12_RESOURCE_STATES src_state) {
+    constexpr auto framework_ui_idx = (uint32_t)runtimes::OpenXR::SwapchainIndex::FRAMEWORK_UI;
+
+    if (!is_ue58_runtime_cached()) {
+        copy(framework_ui_idx, resource, src_state);
+        return;
+    }
+
+    // Give the previous UI copy until the next UI draw to finish before we
+    // acquire a fresh image. This keeps the visible UI layer current without
+    // doing the older immediate wait directly after recording the copy.
+    retire_framework_ui_delayed_release(true);
+
+    std::scoped_lock _{this->mtx};
+
+    auto vr = VR::get();
+
+    if (vr == nullptr || vr->m_openxr == nullptr || resource == nullptr) {
+        return;
+    }
+
+    if (vr->m_openxr->frame_state.shouldRender != XR_TRUE) {
+        return;
+    }
+
+    if (!vr->m_openxr->frame_began) {
+        if (vr->get_synchronize_stage() != VR::SynchronizeStage::VERY_LATE) {
+            spdlog::error("[UE5.8][FrameworkUI] OpenXR frame not begun when trying to copy FRAMEWORK_UI.");
+            return;
+        }
+    }
+
+    auto ctx_it = this->contexts.find(framework_ui_idx);
+    auto swapchain_it = vr->m_openxr->swapchains.find(framework_ui_idx);
+
+    if (ctx_it == this->contexts.end() || swapchain_it == vr->m_openxr->swapchains.end()) {
+        SPDLOG_INFO_EVERY_N_SEC(1, "[UE5.8][FrameworkUI] FRAMEWORK_UI swapchain is not available yet");
+        return;
+    }
+
+    auto& ctx = ctx_it->second;
+
+    if (ctx.framework_ui_pending_release) {
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[UE5.8][FrameworkUI] FRAMEWORK_UI copy is still pending after forced retirement; skipping this UI update");
+        return;
+    }
+
+    if (ctx.num_textures_acquired > 0) {
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[UE5.8][FrameworkUI] Releasing unexpected stale FRAMEWORK_UI acquisition before non-blocking copy");
+        release_acquired(framework_ui_idx);
+
+        if (ctx.num_textures_acquired > 0) {
+            return;
+        }
+    }
+
+    uint32_t texture_index{};
+    XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    auto result = xrAcquireSwapchainImage(swapchain_it->second.handle, &acquire_info, &texture_index);
+
+    if (result != XR_SUCCESS) {
+        spdlog::error("[UE5.8][FrameworkUI] xrAcquireSwapchainImage failed: {}", vr->m_openxr->get_result_string(result));
+        return;
+    }
+
+    ctx.num_textures_acquired++;
+    ctx.last_acquired_texture = texture_index;
+
+    XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    wait_info.timeout = XR_INFINITE_DURATION;
+    result = xrWaitSwapchainImage(swapchain_it->second.handle, &wait_info);
+
+    if (result != XR_SUCCESS) {
+        spdlog::error("[UE5.8][FrameworkUI] xrWaitSwapchainImage failed: {}", vr->m_openxr->get_result_string(result));
+        release_acquired(framework_ui_idx);
+        return;
+    }
+
+    if (texture_index >= ctx.texture_contexts.size() || texture_index >= ctx.textures.size() || ctx.texture_contexts[texture_index] == nullptr) {
+        spdlog::error("[UE5.8][FrameworkUI] Invalid FRAMEWORK_UI texture index {}", texture_index);
+        release_acquired(framework_ui_idx);
+        return;
+    }
+
+    auto& texture_ctx = ctx.texture_contexts[texture_index];
+
+    if (!texture_ctx->commands.try_wait()) {
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[UE5.8][FrameworkUI] FRAMEWORK_UI texture {} was re-acquired before its command context retired; waiting once to preserve swapchain ownership",
+            texture_index);
+        texture_ctx->commands.wait(INFINITE);
+    }
+
+    texture_ctx->commands.copy(
+        resource,
+        ctx.textures[texture_index].texture,
+        src_state,
+        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    texture_ctx->commands.execute();
+
+    ctx.pre_acquired = false;
+    ctx.framework_ui_pending_release = true;
+    ctx.framework_ui_pending_texture = texture_index;
+    ctx.framework_ui_pending_frame = vr->get_frame_count();
 }
 
 void D3D12Component::OpenXR::copy(
