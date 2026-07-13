@@ -12719,7 +12719,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
                 glm::radians(-(float)rot_d_other.yaw),
                 glm::radians((float)rot_d_other.pitch),
                 glm::radians(-(float)rot_d_other.roll));
-        // Æ¬¶Î£ºÔÚ calculate_stereo_view_offset ·½·¨Ä©Î²µ÷ÓÃ»ò²åÈëÒÔ»ñÈ¡×îÖÕ view ¾ØÕó
+        // ç‰‡æ®µï¼šåœ¨ calculate_stereo_view_offset æ–¹æ³•æœ«å°¾è°ƒç”¨æˆ–æ’å…¥ä»¥èŽ·å–æœ€ç»ˆ view çŸ©é˜µ
         if (!has_double_precision) {
             glm::vec3 cam_pos = (*view_location) / vr->get_world_to_meters();
             glm::vec3 cam_pos_other = view_location_other / vr->get_world_to_meters();
