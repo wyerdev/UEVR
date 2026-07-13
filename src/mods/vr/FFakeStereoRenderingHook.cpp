@@ -3074,13 +3074,25 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
 
     if (init_options_scene_state != nullptr && !new_scene_state_inserted_this_frame && vr->is_ghosting_fix_enabled() && !known_scene_states.empty() && vr->is_using_afr() && true_index == 1) {
         init_options->set_stereo_pass(EStereoscopicPass::eSSP_PRIMARY);
-
-        // Set the scene state to the one that isn't the current one
-        for (auto scene_state : known_scene_states) {
-            if (scene_state != init_options_scene_state) {
-                SPDLOG_INFO_ONCE("Setting scene state to {:x}", (uintptr_t)scene_state);
-                init_options->set_scene_state(scene_state);
-                break;
+        auto& eye_pair = g_hook->m_sceneview_data.m_ghosting_fix_pair;
+        if (eye_pair.eye_state[0] == init_options_scene_state) {
+            eye_pair.last_seen_frame = g_frame_count;
+        } else if (eye_pair.eye_state == nullptr || g_frame_count - eye_pair.last_seen_frame > 90) {
+            eye_pair.eye_state[0] = init_options_scene_state;
+            eye_pair.eye_state[1] = nullptr;
+        }
+        if (eye_pair.eye_state[0] == init_options_scene_state && eye_pair.eye_state[1]) {
+            init_options->set_scene_state(eye_pair.eye_state[1]);
+        }
+        if (eye_pair.eye_state[0] == init_options_scene_state && !eye_pair.eye_state[1]) {
+            // Set the scene state to the one that isn't the current one
+            for (auto scene_state : known_scene_states) {
+                if (scene_state != init_options_scene_state) {
+                    SPDLOG_INFO_ONCE("Setting scene state to {:x}", (uintptr_t)scene_state);
+                    init_options->set_scene_state(scene_state);
+                    eye_pair.eye_state[1] = scene_state;
+                    break;
+                }
             }
         }
     }

@@ -2973,6 +2973,8 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                         m_fix_object_motion_range->draw("Fix Object Motion Rnage");
                         if (is_fix_object_motion_vector() && !rawVelocityDesc[0].pTexture) {
                             ImGui::TextWrapped("No UE Velocity Buffer found, can't use the object motion vector fix.");
+                        } else {
+                            m_fix_first_person_guns_experimental->draw("Fix First Person Guns (Experimental)");
                         }
                         ImGui::Spacing();
                     } else {

@@ -82,6 +82,7 @@ public:
     float get_fix_object_motion_range() { return m_fix_object_motion_range->value(); };
 
     bool is_using_ultra_responsive() { return m_ultra_responsive->value(); };
+    bool is_fix_first_person_guns() { return m_fix_first_person_guns_experimental->value(); };
 
     bool is_no_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10; };
     bool is_never_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10 && last_dlss_frame_count == 0; };
@@ -986,6 +987,7 @@ private:
     const ModToggle::Ptr m_fix_object_motion_vector{ModToggle::create(generate_name("AFW_FixObjectMotionVector"), true)};
     const ModSlider::Ptr m_fix_object_motion_range{ModSlider::create(generate_name("AFW_FixObjectMotionRange"), 0.1f, 10.0f, 3.0f)};
     const ModToggle::Ptr m_ultra_responsive{ModToggle::create(generate_name("AFW_UltraResponsive"), true)};
+    const ModToggle::Ptr m_fix_first_person_guns_experimental{ModToggle::create(generate_name("FixFirstPersonGunsExperimental"), false)};
     const ModToggle::Ptr m_framewarp_debug{ModToggle::create(generate_name("AFW_FramewarpDebug"), false)};
     const ModSlider::Ptr m_ignore_motion_threshold{ModSlider::create(generate_name("AFW_IgnoreMotionThreshold"), 0.1f, 100.0f, 2.5f)};
     const ModCombo::Ptr m_framewarp_mode{ModCombo::create(generate_name("AFW_FramewarpMode"),
@@ -1195,6 +1197,7 @@ public:
             *m_fix_object_motion_vector,
             *m_fix_object_motion_range,
             *m_ultra_responsive,
+            *m_fix_first_person_guns_experimental,
         };
 
         add_components_vr();
