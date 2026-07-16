@@ -2725,10 +2725,10 @@ void VR::on_present() {
         afw_resolution_change_skip_frames--;
     if (afw_switching_skip_frames > 0)
         afw_switching_skip_frames--;
-    if (is_afw_last_frame ^ (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && is_using_2d_screen())) {
+    if (is_afw_last_frame ^ (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && !is_using_2d_screen())) {
         afw_switching_skip_frames = 90;
     }
-    is_afw_last_frame = (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && is_using_2d_screen());
+    is_afw_last_frame = (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && !is_using_2d_screen());
     afw_since_inject_frame_count++;
 }
 
