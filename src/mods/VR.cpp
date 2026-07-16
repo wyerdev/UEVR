@@ -8540,7 +8540,7 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 if (ImGui::TreeNode("Alternate Frame Warping")) {
                     m_framewarp_mode->draw("Framewarp Mode");
                     if (is_no_dlss()) {
-                        ImGui::TextWrapped("No DLSS instance detected, are you sure you have turn on DLSS in-game?");
+                        ImGui::TextWrapped("No DLSS instance detected, are you sure you have turned on DLSS in-game?");
                     }
                     m_clear_before_framewarp->draw("Clear Before Framewarp");
                     m_framewarp_debug->draw("Debug Framewarp");
