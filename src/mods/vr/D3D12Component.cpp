@@ -4205,7 +4205,7 @@ bool D3D12Component::setup() {
     // #############################
     static uint32_t lastSize[2]{0, 0};
     static DXGI_FORMAT lastFormat = DXGI_FORMAT_UNKNOWN;
-    if ((lastSize[0] != vr->get_hmd_width() || lastSize[1] != vr->get_hmd_height() || lastFormat != backbuffer_desc.Format)) {
+    if (!vr->is_using_2d_screen() && (lastSize[0] != vr->get_hmd_width() || lastSize[1] != vr->get_hmd_height() || lastFormat != backbuffer_desc.Format)) {
         FrameWarpInitParams params = {vr->get_hmd_width(), vr->get_hmd_height(), backbuffer_desc.Format};
         spdlog::info("[VR] Before InitFrameWarp");
         m_eyeFrameBuffers = InitFrameWarp(params);
