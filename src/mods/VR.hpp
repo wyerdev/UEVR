@@ -481,12 +481,13 @@ public:
     bool is_using_synchronized_afr() const {
         return m_rendering_method->value() == RenderingMethod::SYNCHRONIZED ||
                (m_extreme_compat_mode->value() && m_rendering_method->value() == RenderingMethod::NATIVE_STEREO) ||
-               (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && (afw_since_inject_frame_count < 90 || afw_resolution_change_skip_frames > 0));
+               (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP &&
+                   (afw_since_inject_frame_count < 90 || afw_resolution_change_skip_frames > 0 || is_using_2d_screen()));
     }
 
     bool is_using_afw() {
         return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && afw_since_inject_frame_count >= 90 &&
-               afw_switching_skip_frames == 0 && afw_resolution_change_skip_frames == 0 && g_framework->is_dx12();
+               afw_switching_skip_frames == 0 && afw_resolution_change_skip_frames == 0 && g_framework->is_dx12() && !is_using_2d_screen();
     }
 
     bool is_using_afw_without_api_check() {

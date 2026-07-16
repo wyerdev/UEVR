@@ -2725,10 +2725,10 @@ void VR::on_present() {
         afw_resolution_change_skip_frames--;
     if (afw_switching_skip_frames > 0)
         afw_switching_skip_frames--;
-    if (is_afw_last_frame ^ (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP)) {
+    if (is_afw_last_frame ^ (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && is_using_2d_screen())) {
         afw_switching_skip_frames = 90;
     }
-    is_afw_last_frame = (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP);
+    is_afw_last_frame = (m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP && is_using_2d_screen());
     afw_since_inject_frame_count++;
 }
 
@@ -2965,6 +2965,9 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);
                 if (ImGui::TreeNode("Alternate Frame Warping")) {
                     m_framewarp_mode->draw("Framewarp Mode");
+                    if (is_no_dlss()) {
+                        ImGui::TextWrapped("No DLSS instance detected, are you sure you have turn on DLSS in-game?");
+                    }
                     m_clear_before_framewarp->draw("Clear Before Framewarp");
                     m_framewarp_debug->draw("Debug Framewarp");
                     ImGui::Spacing();
