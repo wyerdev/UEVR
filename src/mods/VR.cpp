@@ -82,7 +82,7 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
             auto mvDesc = motionVectors->GetDesc();
             auto outputDesc = output->GetDesc();
             vr->mvScale[0] = mvScale[0] * outputDesc.Width / mvDesc.Width;
-            vr->mvScale[1] = mvScale[0] * outputDesc.Height / mvDesc.Height;
+            vr->mvScale[1] = mvScale[1] * outputDesc.Height / mvDesc.Height;
         }
         if (depth) {
             auto depthDesc = depth->GetDesc();
