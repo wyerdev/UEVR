@@ -2968,6 +2968,7 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                     if (is_no_dlss()) {
                         ImGui::TextWrapped("No DLSS instance detected, are you sure you have turned on DLSS in-game?");
                     }
+                    //m_use_uint64->draw("Use UINT64");
                     m_clear_before_framewarp->draw("Clear Before Framewarp");
                     m_framewarp_debug->draw("Debug Framewarp");
                     ImGui::Spacing();

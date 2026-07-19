@@ -78,6 +78,7 @@ public:
     int get_vr_frame_count() { return m_frame_count; };
     bool is_left_eye() { return m_frame_count % 2 == m_left_eye_interval; };
 
+    bool is_use_uint64() { return m_use_uint64->value(); };
     bool is_fix_object_motion_vector() { return m_fix_object_motion_vector->value(); };
     float get_fix_object_motion_range() { return m_fix_object_motion_range->value(); };
 
@@ -983,7 +984,8 @@ private:
     const ModCombo::Ptr m_vertical_projection_override{ModCombo::create(generate_name("VerticalProjectionOverride"), s_vertical_projection_override_names)};
     const ModToggle::Ptr m_grow_rectangle_for_projection_cropping{ModToggle::create(generate_name("GrowRectangleForProjectionCropping"), false)};
     const ModCombo::Ptr m_sync_mode{ ModCombo::create(generate_name("SynchronizationMode"), s_sync_mode_names, 2) };
-        
+
+    const ModToggle::Ptr m_use_uint64{ModToggle::create(generate_name("AFW_UseUINT64"), false)};
     const ModToggle::Ptr m_clear_before_framewarp{ModToggle::create(generate_name("AFW_ClearBeforeFramewarp"), false)};
     const ModToggle::Ptr m_fix_object_motion_vector{ModToggle::create(generate_name("AFW_FixObjectMotionVector"), true)};
     const ModSlider::Ptr m_fix_object_motion_range{ModSlider::create(generate_name("AFW_FixObjectMotionRange"), 0.1f, 10.0f, 3.0f)};

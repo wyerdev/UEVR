@@ -153,6 +153,7 @@ namespace pd
 		bool             IsFoveated = false;
 		RECT             FoveatedArea = {};
 		TextureDesc*     InUEVelocityBuffer = nullptr;
+		bool             UseUINT64 = false;
 		float            Reserved[12] = { 0, 0 };
 	};
 
@@ -324,7 +325,7 @@ namespace pd
 		virtual bool                        CreateFrameBuffer(int nWidth, int nHeight, FrameBufferDesc& framebufferDesc, D3D12_RESOURCE_STATES initialState, bool createUAV) = 0;
 		virtual void                        Clear(ID3D12GraphicsCommandList* cmdList, TextureDesc& texDesc, const FLOAT ColorRGBA[4]) =0;
 		virtual void                        Blit(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc, D3D12_VIEWPORT viewPort = {}, BlendType enableBlend = NoBlend, bool isCS = false) = 0;
-		virtual void                        Copy(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc) = 0;
+		virtual void                        Copy(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc, D3D12_BOX srcBox = {}, UINT dstX = 0, UINT dstY = 0) = 0;
 		virtual void                        Sharpen(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc, float sharpness) = 0;
 		virtual void                        Tonemap(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc, TonemapParams params) = 0;
 		virtual void                        ExtractUI(ID3D12GraphicsCommandList* cmdList, TextureDesc& extactedUIDesc, TextureDesc& hudlessDesc, TextureDesc& finalColorWithUI) = 0;
