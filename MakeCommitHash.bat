@@ -1,15 +1,29 @@
 @echo off
+setlocal enabledelayedexpansion
 
 FOR /F "tokens=*" %%g IN ('git rev-parse HEAD') DO (SET UEVR_COMMIT_HASH=%%g)
 
 FOR /F "tokens=*" %%t IN ('git describe --tags --always --abbrev^=0') DO (SET UEVR_TAG=%%t)
 IF "%UEVR_TAG%"=="" (SET UEVR_TAG=no_tag)
 
-FOR /F "tokens=*" %%c IN ('git describe --tags --always --long') DO (
-FOR /F "tokens=1,2 delims=-" %%a IN ("%%c") DO (
-SET UEVR_TAG_LONG=%%a
-SET UEVR_COMMITS_PAST_TAG=%%b
-)
+FOR /F "tokens=*" %%d IN ('git describe --tags --always --long') DO (
+    set "src=%%d"
+    set cnt=0
+    for %%i in ("!src:-=" "!") do (
+        set /a cnt+=1
+    )
+	if !cnt!==3 (
+		FOR /F "tokens=1,2 delims=-" %%a IN ("%%d") DO (
+			SET UEVR_TAG_LONG=%%a
+			SET UEVR_COMMITS_PAST_TAG=%%b
+		)
+	)
+	if !cnt!==4 (
+		FOR /F "tokens=1,2,3 delims=-" %%a IN ("%%d") DO (
+			SET UEVR_TAG_LONG=%%a-%%b
+			SET UEVR_COMMITS_PAST_TAG=%%c
+		)
+	)
 )
 
 IF "%UEVR_COMMITS_PAST_TAG%"=="" (SET UEVR_COMMITS_PAST_TAG=0)
