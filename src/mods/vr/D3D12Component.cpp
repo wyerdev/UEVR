@@ -2875,6 +2875,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         params.Debug = vr->m_framewarp_debug->value();
         if (vr->is_ghosting_fix_enabled() && vr->is_fix_object_motion_vector() && vr->is_fix_moving_object_brightness_flickering())
             params.InUEVelocityBuffer = &vr->rawVelocityDesc[nEye];
+        params.UseUINT64 = vr->is_use_uint64();
         EvaluateFrameWarp(params);
     }
 
