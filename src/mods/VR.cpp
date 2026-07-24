@@ -403,9 +403,24 @@ std::optional<std::string> VR::clean_initialize() try {
     *(uintptr_t*)&ptrClearDepthStencilView = hookVtable(cmdList, 47, hk_ID3D12GraphicsCommandList_ClearDepthStencilView);
     d3d12Renderer->EndCommandList(0);
 
-    auto dllNGX = GetModuleHandle("_nvngx.dll");
+    auto dllNGX = LoadLibrary("_nvngx.dll");
     if (!dllNGX)
-        dllNGX = GetModuleHandle("nvngx.dll");
+        dllNGX = LoadLibrary("nvngx.dll");
+    auto dllOptiScaler = LoadLibrary("dxgi.dll");
+    if (dllOptiScaler) {
+        if (GetProcAddress(dllOptiScaler, "NVSDK_NGX_D3D12_CreateFeature")) {
+            dllNGX = dllOptiScaler;
+            spdlog::info("OptiScaler detected, hooking it instead of nvngx.dll.");
+        } else {
+            dllOptiScaler = LoadLibrary("winmm.dll");
+            if (dllOptiScaler) {
+                if (GetProcAddress(dllOptiScaler, "NVSDK_NGX_D3D12_CreateFeature")) {
+                    dllNGX = dllOptiScaler;
+                    spdlog::info("OptiScaler detected, hooking it instead of nvngx.dll.");
+                }
+            } 
+        }
+    }
     if (!dllNGX) {
         spdlog::error("nvngx.dll not loaded!");
     } else {
