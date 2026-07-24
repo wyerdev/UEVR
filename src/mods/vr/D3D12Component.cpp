@@ -520,7 +520,13 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
             .bottom = m_backbuffer_size[1],
             .back = 1};
 
-        vr->d3d12Renderer->Crop(cmdList, eyeFrameBuffer.color, backbufferDesc[backbuffer_index], src_box);
+        // Sharpening
+        if (vr->is_enable_sharpening() && vr->get_sharpness() > 0) {
+            vr->d3d12Renderer->Crop(cmdList, otherEyeFrameBuffer.color, backbufferDesc[backbuffer_index], src_box);
+            vr->d3d12Renderer->Sharpen(cmdList, eyeFrameBuffer.color, otherEyeFrameBuffer.color, vr->get_sharpness());
+        } else {
+            vr->d3d12Renderer->Crop(cmdList, eyeFrameBuffer.color, backbufferDesc[backbuffer_index], src_box);
+        }
 
         s_CurrentEyeFrameBuffer.color = eyeFrameBuffer.color;
         s_CurrentEyeFrameBuffer.depth = vr->depthDesc[nEye];

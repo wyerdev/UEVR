@@ -128,6 +128,7 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
                     mvParams.CorrectMVType = FixUEObjectMotion;
                     mvParams.ObjectMotionScale = 2.0f;
                     mvParams.FixUEObjMotionRange = vr->get_fix_object_motion_range();
+                    mvParams.IgnoreMotionThreshold = vr->get_ignore_motion_threshold();
                     mvParams.InUEVelocityPrev = &vr->rawVelocityDesc[nEyeOther];
                     mvParams.InDepthPrev = &vr->depthDesc[nEyeOther];
                     vr->d3d12Renderer->CorrectMotionVectors(InCmdList, vr->rawMVDesc[nEye], mvParams);
@@ -2971,6 +2972,9 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                     //m_use_uint64->draw("Use UINT64");
                     m_clear_before_framewarp->draw("Clear Before Framewarp");
                     m_framewarp_debug->draw("Debug Framewarp");
+                    ImGui::Spacing();
+                    m_enable_sharpening->draw("Enable Sharpening");
+                    m_sharpness->draw("Sharpness");
                     ImGui::Spacing();
                     if (is_ghosting_fix_enabled()) {
                         m_fix_object_motion_vector->draw("Fix Object Motion Vector");

@@ -76,7 +76,11 @@ public:
 
     int get_render_frame_count() { return m_render_frame_count; };
     int get_vr_frame_count() { return m_frame_count; };
-    bool is_left_eye() { return m_frame_count % 2 == m_left_eye_interval; };
+
+    bool is_enable_sharpening() { return m_enable_sharpening->value(); };
+    float get_sharpness() { return m_sharpness->value(); };
+
+    float get_ignore_motion_threshold() { return m_ignore_motion_threshold->value(); };
 
     bool is_use_uint64() { return m_use_uint64->value(); };
     bool is_fix_object_motion_vector() { return m_fix_object_motion_vector->value(); };
@@ -988,9 +992,11 @@ private:
     const ModToggle::Ptr m_use_uint64{ModToggle::create(generate_name("AFW_UseUINT64"), false)};
     const ModToggle::Ptr m_clear_before_framewarp{ModToggle::create(generate_name("AFW_ClearBeforeFramewarp"), false)};
     const ModToggle::Ptr m_fix_object_motion_vector{ModToggle::create(generate_name("AFW_FixObjectMotionVector"), true)};
-    const ModSlider::Ptr m_fix_object_motion_range{ModSlider::create(generate_name("AFW_FixObjectMotionRange"), 0.1f, 10.0f, 3.0f)};
+    const ModSlider::Ptr m_fix_object_motion_range{ModSlider::create(generate_name("AFW_FixObjectMotionRange"), 0.0f, 10.0f, 3.0f)};
     const ModToggle::Ptr m_ultra_responsive{ModToggle::create(generate_name("AFW_UltraResponsive"), true)};
     const ModToggle::Ptr m_fix_moving_object_brightness_flickering{ModToggle::create(generate_name("AFW_FixMovingObjectBrightnessFlickering"), true)};
+    const ModToggle::Ptr m_enable_sharpening{ModToggle::create(generate_name("AFW_EnableSharpening"), false)};
+    const ModSlider::Ptr m_sharpness{ModSlider::create(generate_name("AFW_Sharpness"), 0.0f, 1.0f, 0.6f)};
     const ModToggle::Ptr m_framewarp_debug{ModToggle::create(generate_name("AFW_FramewarpDebug"), false)};
     const ModSlider::Ptr m_ignore_motion_threshold{ModSlider::create(generate_name("AFW_IgnoreMotionThreshold"), 0.1f, 100.0f, 2.5f)};
     const ModCombo::Ptr m_framewarp_mode{ModCombo::create(generate_name("AFW_FramewarpMode"),
@@ -1201,6 +1207,8 @@ public:
             *m_fix_object_motion_range,
             *m_ultra_responsive,
             *m_fix_moving_object_brightness_flickering,
+            *m_enable_sharpening,
+            *m_sharpness
         };
 
         add_components_vr();

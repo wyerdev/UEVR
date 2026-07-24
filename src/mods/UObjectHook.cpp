@@ -575,12 +575,27 @@ bool should_tick_motion_controller_attachments_for_view(int32_t view_index, bool
     }
 
     auto& vr = VR::get();
-    if (view_index != 0 || !is_double || !vr->is_using_synchronized_afr() || vr->is_sceneview_compatibility_enabled()) {
+    if (view_index != 0 || !is_double || vr->is_sceneview_compatibility_enabled()) {
         return false;
     }
 
     const auto runtime = vr->get_runtime();
     const auto frame_count = runtime != nullptr ? runtime->internal_frame_count : vr->get_frame_count();
+    static auto last_frame_count = frame_count;
+
+    if (!vr->mDebug1) {
+        // skip second
+        if (!vr->mDebug2 && last_frame_count == frame_count) {
+            last_frame_count = frame_count;
+            return false;
+        }
+        // skip first
+        if (vr->mDebug2 && last_frame_count != frame_count) {
+            last_frame_count = frame_count;
+            return false;
+        }
+    }
+    last_frame_count = frame_count;
 
     if ((frame_count % 2) != 1) {
         return false;
