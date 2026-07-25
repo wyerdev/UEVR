@@ -146,7 +146,7 @@ namespace pd
 		EyeIndex         EyeIndex;
 		CameraData*      CameraData;  // required, camera matrices for this frame
 		bool             ClearBeforeWarping = false;
-		float            IgnoreMotionThreshold{ 2.5f };  // per-object motion vectors, ignore threshold in pixel space
+		float            IgnoreMotionThreshold{ 2.5f };  // per-object motion vectors ignore threshold
 		bool             IsHudlessColor = true;          // specify whether InEyeColor is hudless or contaning UI, if the latter, will use UIColorAndAlpha to avoid reprojecting UI.
 		MVType           MotionVectorsType = Normal;
 		bool             Debug = false;

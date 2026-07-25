@@ -2472,12 +2472,13 @@ void VR::update_camera_data(int frame_count) {
 
         auto offset = last_update_matrix_frame_count[nEye] - last_update_camera_data_frame_count;
         offset = std::clamp(offset, 0, 2) / 2;
+
         cameraData[nEye].camWorldToViewMatrix = glm::mat4(); // not used
         cameraData[nEye].camViewToWorldMatrix = glm::mat4(); // not used
-        cameraData[nEye].destWorldToViewMatrix = render_view_matrix[nEye][offset].other;
-        cameraData[nEye].srcWorldToViewMatrix = render_view_matrix[nEye][offset].curr;
-        cameraData[nEye].destViewToWorldMatrix = glm::inverse(cameraData[nEye].destWorldToViewMatrix);
-        cameraData[nEye].srcViewToWorldMatrix = glm::inverse(cameraData[nEye].srcWorldToViewMatrix);
+        cameraData[nEye].destViewToWorldMatrix = render_view_inv_matrix[nEye][offset].other;
+        cameraData[nEye].srcViewToWorldMatrix = render_view_inv_matrix[nEye][offset].curr;
+        cameraData[nEye].destWorldToViewMatrix = glm::inverse(cameraData[nEye].destViewToWorldMatrix);
+        cameraData[nEye].srcWorldToViewMatrix = glm::inverse(cameraData[nEye].srcViewToWorldMatrix);
 
         //float x = jitterOffset[0] / get_hmd_width();
         //float y = jitterOffset[1] / get_hmd_height();
