@@ -48,12 +48,24 @@ constexpr auto STALE_POSE_REFRESH_MIN_AGE_MS = 50LL;
 constexpr auto EVERSPACE2_COHERENT_SUBMIT_LOG_INTERVAL = std::chrono::seconds(2);
 constexpr auto EVERSPACE2_COHERENT_SUBMIT_SUMMARY_INTERVAL = std::chrono::seconds(5);
 
+bool collect_openxr_frame_timing() {
+    const auto vr = VR::get();
+    return vr != nullptr && vr->is_hitch_diagnostics_enabled();
+}
+
 struct ScopedOpenXRTiming {
     OpenXR::FrameTimingStats& stats;
-    std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
+    bool enabled{};
+    std::chrono::steady_clock::time_point start{};
+
+    ScopedOpenXRTiming(OpenXR::FrameTimingStats& stats, bool enabled)
+        : stats{stats}, enabled{enabled}, start{enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}} {
+    }
 
     ~ScopedOpenXRTiming() {
-        stats.add(std::chrono::steady_clock::now() - start);
+        if (enabled) {
+            stats.add(std::chrono::steady_clock::now() - start);
+        }
     }
 };
 
@@ -827,9 +839,14 @@ bool OpenXR::recover_focused_stale_frame_loop(const char* caller) {
         this->last_begin_frame_caller = "focused_stale_synced_no_begin";
 
         this->begin_profile();
-        const auto begin_frame_start = std::chrono::steady_clock::now();
+        const auto collect_frame_timing = collect_openxr_frame_timing();
+        const auto begin_frame_start = collect_frame_timing
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         const auto begin_result = xrBeginFrame(this->session, &frame_begin_info);
-        this->begin_frame_timing.add(std::chrono::steady_clock::now() - begin_frame_start);
+        if (collect_frame_timing) {
+            this->begin_frame_timing.add(std::chrono::steady_clock::now() - begin_frame_start);
+        }
         this->end_profile("xrBeginFrame");
 
         if (begin_result != XR_SUCCESS && begin_result != XR_FRAME_DISCARDED) {
@@ -849,9 +866,13 @@ bool OpenXR::recover_focused_stale_frame_loop(const char* caller) {
         frame_end_info.layerCount = 0;
         frame_end_info.layers = nullptr;
 
-        const auto end_frame_start = std::chrono::steady_clock::now();
+        const auto end_frame_start = collect_frame_timing
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         const auto end_result = xrEndFrame(this->session, &frame_end_info);
-        this->end_frame_timing.add(std::chrono::steady_clock::now() - end_frame_start);
+        if (collect_frame_timing) {
+            this->end_frame_timing.add(std::chrono::steady_clock::now() - end_frame_start);
+        }
 
         if (end_result != XR_SUCCESS) {
             spdlog::warn(
@@ -921,9 +942,14 @@ bool OpenXR::close_synced_frame_without_layers(const char* reason) {
         XrFrameBeginInfo frame_begin_info{XR_TYPE_FRAME_BEGIN_INFO};
 
         this->begin_profile();
-        const auto begin_frame_start = std::chrono::steady_clock::now();
+        const auto collect_frame_timing = collect_openxr_frame_timing();
+        const auto begin_frame_start = collect_frame_timing
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         const auto begin_result = xrBeginFrame(this->session, &frame_begin_info);
-        this->begin_frame_timing.add(std::chrono::steady_clock::now() - begin_frame_start);
+        if (collect_frame_timing) {
+            this->begin_frame_timing.add(std::chrono::steady_clock::now() - begin_frame_start);
+        }
         this->end_profile("xrBeginFrame");
 
         if (begin_result != XR_SUCCESS && begin_result != XR_FRAME_DISCARDED) {
@@ -944,9 +970,14 @@ bool OpenXR::close_synced_frame_without_layers(const char* reason) {
     frame_end_info.layerCount = 0;
     frame_end_info.layers = nullptr;
 
-    const auto end_frame_start = std::chrono::steady_clock::now();
+    const auto collect_frame_timing = collect_openxr_frame_timing();
+    const auto end_frame_start = collect_frame_timing
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
     const auto result = xrEndFrame(this->session, &frame_end_info);
-    this->end_frame_timing.add(std::chrono::steady_clock::now() - end_frame_start);
+    if (collect_frame_timing) {
+        this->end_frame_timing.add(std::chrono::steady_clock::now() - end_frame_start);
+    }
 
     if (result != XR_SUCCESS) {
         spdlog::warn(
@@ -1087,11 +1118,13 @@ VRRuntime::Error OpenXR::synchronize_frame(std::optional<uint32_t> frame_count, 
     auto result = xrWaitFrame(this->session, &frame_wait_info, &local_frame_state);
     const auto wait_frame_end = std::chrono::steady_clock::now();
     const auto wait_frame_duration = wait_frame_end - wait_frame_start;
-    this->wait_frame_timing.add(wait_frame_duration);
+    if (collect_openxr_frame_timing()) {
+        this->wait_frame_timing.add(wait_frame_duration);
 
-    const auto callsite_index = (size_t)callsite;
-    if (callsite_index < this->wait_frame_callsite_timing.size()) {
-        this->wait_frame_callsite_timing[callsite_index].add(wait_frame_duration);
+        const auto callsite_index = (size_t)callsite;
+        if (callsite_index < this->wait_frame_callsite_timing.size()) {
+            this->wait_frame_callsite_timing[callsite_index].add(wait_frame_duration);
+        }
     }
 
     const auto wait_frame_ms = std::chrono::duration<double, std::milli>{wait_frame_duration}.count();
@@ -1195,7 +1228,8 @@ VRRuntime::Error OpenXR::update_poses(bool from_view_extensions, uint32_t frame_
         return VRRuntime::Error::SUCCESS;
     }
 
-    ScopedOpenXRTiming pose_timing{this->pose_update_timing};
+    const auto collect_frame_timing = collect_openxr_frame_timing();
+    ScopedOpenXRTiming pose_timing{this->pose_update_timing, collect_frame_timing};
 
     const auto& vr = VR::get();
 
@@ -1223,11 +1257,13 @@ VRRuntime::Error OpenXR::update_poses(bool from_view_extensions, uint32_t frame_
     double stage_locate_ms = 0.0;
     double space_locate_ms = 0.0;
 
-    ++this->pose_update_call_count;
-    if (from_view_extensions) {
-        ++this->pose_update_view_extension_count;
-    } else {
-        ++this->pose_update_non_view_extension_count;
+    if (collect_frame_timing) {
+        ++this->pose_update_call_count;
+        if (from_view_extensions) {
+            ++this->pose_update_view_extension_count;
+        } else {
+            ++this->pose_update_non_view_extension_count;
+        }
     }
 
     this->last_pose_update_frame_count = frame_count;
@@ -3268,9 +3304,14 @@ XrResult OpenXR::begin_frame(const char* caller) {
     this->begin_profile();
 
     XrFrameBeginInfo frame_begin_info{XR_TYPE_FRAME_BEGIN_INFO};
-    const auto begin_frame_start = std::chrono::steady_clock::now();
+    const auto collect_frame_timing = collect_openxr_frame_timing();
+    const auto begin_frame_start = collect_frame_timing
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
     auto result = xrBeginFrame(this->session, &frame_begin_info);
-    this->begin_frame_timing.add(std::chrono::steady_clock::now() - begin_frame_start);
+    if (collect_frame_timing) {
+        this->begin_frame_timing.add(std::chrono::steady_clock::now() - begin_frame_start);
+    }
 
     this->end_profile("xrBeginFrame");
 
@@ -3282,9 +3323,13 @@ XrResult OpenXR::begin_frame(const char* caller) {
         spdlog::warn("[OpenXR] xrBeginFrame returned XR_ERROR_CALL_ORDER_INVALID, attempting recovery");
         this->recover_wedged_frame("xrBeginFrame call order invalid");
         synchronize_frame(std::nullopt, SyncFrameCallsite::OpenXRBeginFrameRecovery);
-        const auto retry_begin_frame_start = std::chrono::steady_clock::now();
+        const auto retry_begin_frame_start = collect_frame_timing
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         result = xrBeginFrame(this->session, &frame_begin_info);
-        this->begin_frame_timing.add(std::chrono::steady_clock::now() - retry_begin_frame_start);
+        if (collect_frame_timing) {
+            this->begin_frame_timing.add(std::chrono::steady_clock::now() - retry_begin_frame_start);
+        }
     }
 
     this->frame_began = result == XR_SUCCESS || result == XR_FRAME_DISCARDED; // discarded means endFrame was not called
@@ -3406,11 +3451,13 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
         spdlog::warn("[VR] No stage views to submit");
     }
 
-    this->projection_layer_cache.clear();
+    // Reset size of end frame data containers to 0.
+    this->end_frame_data.clear();
 
-    std::vector<XrCompositionLayerBaseHeader*> layers{};
-    std::vector<XrCompositionLayerProjectionView> projection_layer_views{};
-    std::vector<XrCompositionLayerDepthInfoKHR> depth_layers{};
+    auto& projection_layer_cache = this->end_frame_data.projection_layer_cache;
+    auto& projection_layer_views = this->end_frame_data.projection_layer_views;
+    auto& depth_layers           = this->end_frame_data.depth_layers;
+    auto& layers                 = this->end_frame_data.layers;
 
     // Dummy projection layers for Virtual Desktop. If we don't do this, timewarp does not work correctly on VD.
     // the reasoning from ggodin (VD dev) is that VD composites all layers using the top layer's pose (apparently)
@@ -3524,7 +3571,7 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
             }
         }
 
-        auto& layer = this->projection_layer_cache.emplace_back();
+        auto& layer = projection_layer_cache.emplace_back();
         layer.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
         layer.space = this->stage_space;
         layer.viewCount = (uint32_t)projection_layer_views.size();
@@ -3535,7 +3582,7 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
             layers.push_back((XrCompositionLayerBaseHeader*)&dummy_projection_layer);
         }
 
-        for (auto& l : this->projection_layer_cache) {
+        for (auto& l : projection_layer_cache) {
             layers.push_back((XrCompositionLayerBaseHeader*)&l);
         }
 
@@ -3561,16 +3608,21 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
     const auto submitted_real_projection =
         this->is_everspace2_coherent_submit_active() &&
         !projection_layer_views.empty() &&
-        !this->projection_layer_cache.empty();
+        !projection_layer_cache.empty();
 
     //spdlog::info("[VR] display time diff: {}", pipelined_frame_state.predictedDisplayTime - this->frame_state.predictedDisplayTime);
     //spdlog::info("[VR] Ending frame, {} layers", frame_end_info.layerCount);
     //spdlog::info("[VR] Ending frame, layer ptr: {:x}", (uintptr_t)frame_end_info.layers);
 
     this->begin_profile();
-    const auto end_frame_start = std::chrono::steady_clock::now();
+    const auto collect_frame_timing = collect_openxr_frame_timing();
+    const auto end_frame_start = collect_frame_timing
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
     auto result = xrEndFrame(this->session, &frame_end_info);
-    this->end_frame_timing.add(std::chrono::steady_clock::now() - end_frame_start);
+    if (collect_frame_timing) {
+        this->end_frame_timing.add(std::chrono::steady_clock::now() - end_frame_start);
+    }
     this->end_profile("xrEndFrame");
     
     if (result != XR_SUCCESS) {
@@ -3607,7 +3659,32 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
     return result;
 }
 
+void OpenXR::reset_frame_timing_stats() {
+    this->last_frame_timing_log = {};
+    this->wait_frame_timing.reset();
+    this->begin_frame_timing.reset();
+    this->end_frame_timing.reset();
+    this->pose_update_timing.reset();
+    for (auto& timing : this->wait_frame_callsite_timing) {
+        timing.reset();
+    }
+    this->pose_update_call_count = 0;
+    this->pose_update_view_extension_count = 0;
+    this->pose_update_non_view_extension_count = 0;
+}
+
 void OpenXR::log_frame_timing_stats_if_needed() {
+    const auto timing_enabled = collect_openxr_frame_timing();
+
+    if (timing_enabled != this->frame_timing_collection_active) {
+        reset_frame_timing_stats();
+        this->frame_timing_collection_active = timing_enabled;
+    }
+
+    if (!timing_enabled) {
+        return;
+    }
+
     const auto now = std::chrono::steady_clock::now();
 
     if (this->last_frame_timing_log.time_since_epoch().count() == 0) {

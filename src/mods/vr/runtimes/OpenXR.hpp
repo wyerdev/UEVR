@@ -242,7 +242,6 @@ public:
     XrSpaceLocation view_space_location{XR_TYPE_SPACE_LOCATION};
 
     std::unordered_set<std::string> enabled_extensions{};
-    std::vector<XrCompositionLayerProjection> projection_layer_cache{};
 
     std::vector<XrViewConfigurationView> view_configs{};
     std::unordered_map<uint32_t, Swapchain> swapchains{}; // SwapchainIndex -> Swapchain
@@ -273,6 +272,22 @@ public:
     /*std::array<std::vector<XrView>, 3> stage_view_queue{};
     std::array<XrSpaceLocation, 3> view_space_location_queue{};
     std::array<XrFrameState, 3> frame_state_queue{};*/
+
+    // Reusable scratch for end-frame (so we don't use thread_local)
+    // Should be cleared on every call to end_frame.
+    struct EndFrameData {
+        std::vector<XrCompositionLayerBaseHeader*> layers{};
+        std::vector<XrCompositionLayerProjectionView> projection_layer_views{};
+        std::vector<XrCompositionLayerDepthInfoKHR> depth_layers{};
+        std::vector<XrCompositionLayerProjection> projection_layer_cache{};
+
+        void clear() {
+            layers.clear();
+            projection_layer_views.clear();
+            depth_layers.clear();
+            projection_layer_cache.clear();
+        }
+    } end_frame_data{};
 
     static constexpr auto QUEUE_SIZE = 6;
     std::array<PipelineState, QUEUE_SIZE> pipeline_states{};
@@ -380,6 +395,7 @@ public:
         }
     };
 
+    void reset_frame_timing_stats();
     void log_frame_timing_stats_if_needed();
     
     const ModSlider::Ptr resolution_scale{ ModSlider::create("OpenXR_ResolutionScale", 0.1f, 3.0f, 1.0f) };
@@ -442,6 +458,7 @@ public:
     std::chrono::steady_clock::time_point last_slow_pose_update_log{};
     std::chrono::steady_clock::time_point last_stale_pose_skip_log{};
     std::chrono::steady_clock::time_point last_stale_pose_submit_log{};
+    bool frame_timing_collection_active{};
     FrameTimingStats wait_frame_timing{};
     FrameTimingStats begin_frame_timing{};
     FrameTimingStats end_frame_timing{};

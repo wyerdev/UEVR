@@ -141,12 +141,12 @@ public:
         ue58_pending_native_resource = nullptr;
         ue58_pending_scene_target_observations = 0;
     }
-    uint32_t observe_ue58_scene_target(FRHITexture2D* texture, ID3D12Resource* resource) {
+    uint32_t observe_ue58_scene_target(FRHITexture2D* texture, void* native_resource) {
         if (ue58_pending_scene_target != texture ||
-            ue58_pending_native_resource != resource)
+            ue58_pending_native_resource != native_resource)
         {
             ue58_pending_scene_target = texture;
-            ue58_pending_native_resource = resource;
+            ue58_pending_native_resource = native_resource;
             ue58_pending_scene_target_observations = 1;
             return ue58_pending_scene_target_observations;
         }
@@ -158,6 +158,7 @@ public:
         return ue58_pending_scene_target_observations;
     }
     void set_dedicated_ui_target(FRHITexture2D* rt, uint32_t width = 0, uint32_t height = 0);
+    void inherit_dedicated_ui_state_from(VRRenderTargetManager_Base& source, const char* reason);
     void request_dedicated_ui_target(uint32_t width, uint32_t height);
     void destroy_dedicated_ui_target();
     void cancel_dedicated_ui_creation_preserving_target(const char* reason = nullptr);
@@ -165,7 +166,7 @@ public:
     void ensure_dedicated_ui_target(uintptr_t command_list);
     bool create_dedicated_ui_texture();
     bool try_schedule_dedicated_ui_creation();
-    bool can_attempt_dedicated_ui_creation() const;
+    bool can_attempt_dedicated_ui_creation();
     void reset_dedicated_ui_creation_state();
     bool is_dedicated_ui_generation_current(uint64_t generation) const {
         return in_flight_dedicated_ui_generation == generation;
@@ -263,6 +264,7 @@ protected:
     bool is_version_5_0_3{false};
     bool wants_depth_reallocate{false};
     bool allocate_texture_called{false}; // used to determine if the pretexture hook should go ahead
+    std::atomic_bool legacy_texture_replay_failed_closed{false};
 
     uint32_t last_width{0};
     uint32_t last_height{0};
@@ -302,7 +304,7 @@ protected:
     uint64_t in_flight_dedicated_ui_generation{0};
     sdk::FViewport* last_viewport{nullptr};
     FRHITexture2D* ue58_pending_scene_target{nullptr};
-    ID3D12Resource* ue58_pending_native_resource{nullptr};
+    void* ue58_pending_native_resource{nullptr};
     uint32_t ue58_pending_scene_target_observations{0};
     std::atomic<std::shared_ptr<const Everspace2D3D12SceneTargetSnapshot>> everspace2_scene_target_snapshot{};
     std::atomic<uint64_t> everspace2_scene_target_generation{};
@@ -392,6 +394,61 @@ struct VRRenderTargetManager_58 : IStereoRenderTargetManager_58, VRRenderTargetM
         uint32_t NumSamples = 1) override;
 };
 
+struct VRRenderTargetManager_58_Transitional : IStereoRenderTargetManager_58_Transitional, VRRenderTargetManager_Base {
+    bool ShouldUseSeparateRenderTarget() const override {
+        return VRRenderTargetManager_Base::should_use_separate_render_target();
+    }
+
+    void CalculateRenderTargetSize(
+        const sdk::FViewport& Viewport,
+        uint32_t& InOutSizeX,
+        uint32_t& InOutSizeY) override
+    {
+        VRRenderTargetManager_Base::calculate_render_target_size(Viewport, InOutSizeX, InOutSizeY);
+    }
+
+    bool NeedReAllocateViewportRenderTarget(const sdk::FViewport& Viewport) override {
+        return VRRenderTargetManager_Base::need_reallocate_view_target(Viewport);
+    }
+
+    bool NeedReAllocateDepthTexture(const void* DepthTarget) override {
+        return false;
+    }
+
+    bool NeedReAllocateShadingRateTexture(const void* ShadingRateTarget) override {
+        return false;
+    }
+
+    bool AllocateRenderTargetTextures(
+        sdk::FRHICommandListBase& RHICmdList,
+        uint32_t SizeX,
+        uint32_t SizeY,
+        uint8_t Format,
+        uint32_t NumLayers,
+        ETextureCreateFlags Flags,
+        ETextureCreateFlags TargetableTextureFlags,
+        TArray<FTexture2DRHIRef>& OutTargetableTextures,
+        TArray<FTexture2DRHIRef>& OutShaderResourceTextures,
+        uint32_t NumSamples = 1) override;
+
+    bool AllocateRenderTargetTextures(
+        uint32_t SizeX,
+        uint32_t SizeY,
+        uint8_t Format,
+        uint32_t NumLayers,
+        ETextureCreateFlags Flags,
+        ETextureCreateFlags TargetableTextureFlags,
+        TArray<FTexture2DRHIRef>& OutTargetableTextures,
+        TArray<FTexture2DRHIRef>& OutShaderResourceTextures,
+        uint32_t NumSamples = 1) override;
+};
+
+enum class UE58RenderTargetManagerABI : uint8_t {
+    Unknown,
+    Public,
+    TransitionalDepthSlot,
+};
+
 struct VRRenderTargetManager_418 : IStereoRenderTargetManager_418, VRRenderTargetManager_Base {
     uint32_t GetNumberOfBufferedFrames() const override { return VRRenderTargetManager_Base::get_number_of_buffered_frames(); }
     virtual bool ShouldUseSeparateRenderTarget() const override { return VRRenderTargetManager_Base::should_use_separate_render_target(); }
@@ -446,6 +503,12 @@ public:
 
     VRRenderTargetManager_Base* get_render_target_manager() {
         if (m_uses_ue58_rendertarget_manager) {
+            if (m_ue58_rendertarget_manager_abi.load(std::memory_order_acquire) ==
+                UE58RenderTargetManagerABI::TransitionalDepthSlot)
+            {
+                return static_cast<VRRenderTargetManager_Base*>(&m_rtm_58_transitional);
+            }
+
             return static_cast<VRRenderTargetManager_Base*>(&m_rtm_58);
         }
 
@@ -552,6 +615,8 @@ public:
             .eye = static_cast<uint8_t>(packed & 0x1ull),
         };
     }
+
+    std::string get_dune_final_output_probe_status_text() const;
 
     void note_stable_slate_draw() {
         if (!m_has_seen_stable_slate_draw) {
@@ -762,6 +827,7 @@ private:
     bool hook();
     bool standard_fake_stereo_hook(uintptr_t vtable);
     bool nonstandard_create_stereo_device_hook();
+    bool nonstandard_create_stereo_device_hook_5_54();
     bool nonstandard_create_stereo_device_hook_4_27();
     bool nonstandard_create_stereo_device_hook_4_22();
     bool nonstandard_create_stereo_device_hook_4_18();
@@ -779,6 +845,11 @@ private:
     bool patch_vtable_checks();
     bool attempt_runtime_inject_stereo();
     bool hook_ue418_oculus_pixel_density_sink();
+    bool attempt_hook_dune_dlss_output();
+    bool attempt_hook_dune_ffx_frame_resources();
+    void attempt_hook_naruto_ue416_init_dynamic_rhi(sdk::FViewport* viewport);
+    void attempt_hook_naruto_ue416_projection_rect();
+    void attempt_hook_naruto_ue416_draw_stereo_predicate();
     void post_init_properties(uintptr_t localplayer);
     void try_adopt_scene_viewport_render_target(sdk::FViewport* viewport, const char* source);
     void update_daysgone_ui_telemetry();
@@ -793,6 +864,16 @@ private:
 
     // FSceneView
     static sdk::FSceneView* sceneview_constructor(sdk::FSceneView* sceneview, sdk::FSceneViewInitOptions* init_options, void* a3, void* a4);
+
+    // Naruto's UE4.16 build omits the stock stereo sizing branch in
+    // FSceneViewport::InitDynamicRHI. This hook changes only its allocation locals.
+    static void naruto_ue416_init_dynamic_rhi_size_hook(safetyhook::Context& ctx);
+    // Its LocalPlayer projection override also skips AdjustViewRect. Restore only
+    // the validated per-eye rectangles after GetProjectionData succeeds.
+    static void naruto_ue416_projection_rect_hook(safetyhook::Context& ctx);
+    // Naruto's UGameViewportClient::Draw calls a shipping stub that always
+    // reports stereo disabled. Override only that validated Draw callsite.
+    static void naruto_ue416_draw_stereo_predicate_hook(safetyhook::Context& ctx);
     
     // IStereoRendering
     static bool is_stereo_enabled(FFakeStereoRendering* stereo);
@@ -806,8 +887,19 @@ private:
     static uint32_t get_desired_number_of_views_hook(FFakeStereoRendering* stereo, bool is_stereo_enabled);
     static EStereoscopicPass get_view_pass_for_index_hook(FFakeStereoRendering* stereo, bool stereo_requested, int32_t view_index);
     static bool ue418_oculus_update_pixel_density_hook(void* settings);
+    static void* dune_dlss_add_passes_hook(
+        void* upscaler,
+        void* outputs,
+        void* graph_builder,
+        void* view,
+        void* pass_inputs);
+    static void dune_ffx_register_frame_resources_hook(
+        void* backend,
+        void* resource,
+        uint64_t frame_id);
 
     static IStereoRenderTargetManager* get_render_target_manager_hook(FFakeStereoRendering* stereo);
+    void observe_ue58_render_target_manager_abi(uintptr_t return_address);
     static IStereoLayers* get_stereo_layers_hook(FFakeStereoRendering* stereo);
 
     // LocalPlayer
@@ -903,6 +995,7 @@ private:
 
         // For keeping track of what the states were before our modifications.
         std::unordered_map<sdk::FSceneViewStateInterface*, sdk::FSceneViewInitOptionsUE4> view_init_options_ue4{};
+        std::unordered_map<sdk::FSceneViewStateInterface*, sdk::FSceneViewInitOptionsUE50To53> view_init_options_ue50_to_53{};
         std::unordered_map<sdk::FSceneViewStateInterface*, sdk::FSceneViewInitOptionsUE5> view_init_options_ue5{};
         std::unordered_set<uintptr_t> seen_retaddrs{};
     } m_sceneview_data;
@@ -915,12 +1008,17 @@ private:
     safetyhook::InlineHook m_calculate_stereo_projection_matrix_hook{};
     safetyhook::InlineHook m_render_texture_render_thread_hook{};
     safetyhook::InlineHook m_ue418_oculus_pixel_density_hook{};
+    safetyhook::InlineHook m_dune_dlss_add_passes_hook{};
+    safetyhook::InlineHook m_dune_ffx_register_frame_resources_hook{};
     safetyhook::InlineHook m_slate_thread_hook{};
     std::vector<safetyhook::MidHook> m_ue57_slate_elements_hooks{};
     safetyhook::MidHook m_ue55_slate_output_texture_register_hook{};
     std::vector<safetyhook::MidHook> m_ue58_slate_output_texture_register_hooks{};
     safetyhook::MidHook m_daysgone_slate_intermediate_buffer_hook{};
     safetyhook::MidHook m_daysgone_bend_taa_composite_hook{};
+    safetyhook::MidHook m_naruto_ue416_init_dynamic_rhi_size_hook{};
+    safetyhook::MidHook m_naruto_ue416_projection_rect_hook{};
+    safetyhook::MidHook m_naruto_ue416_draw_stereo_predicate_hook{};
     safetyhook::InlineHook m_windrose_hfsm_state_enter_hook{};
     safetyhook::InlineHook m_windrose_hfsm_state_exit_hook{};
     safetyhook::InlineHook m_windrose_hfsm_component_enter_hook{};
@@ -960,8 +1058,11 @@ private:
 
     VRRenderTargetManager m_rtm{};
     VRRenderTargetManager_58 m_rtm_58{};
+    VRRenderTargetManager_58_Transitional m_rtm_58_transitional{};
     VRRenderTargetManager_418 m_rtm_418{};
     VRRenderTargetManager_Special m_rtm_special{};
+    std::atomic<FRHITexture2D*> m_validated_ue58_scene_viewport_texture{};
+    std::atomic<void*> m_validated_ue58_scene_viewport_texture_vtable{};
 
     Rotator<float> m_last_afr_rotation{};
     Rotator<double> m_last_afr_rotation_double{};
@@ -1014,7 +1115,42 @@ private:
     uint64_t m_daysgone_ui_telemetry_log_counter{0};
     std::atomic_bool m_daysgone_bend_ui_fix_queued{false};
     std::chrono::steady_clock::time_point m_daysgone_bend_ui_last_apply{};
-    std::string m_daysgone_bend_ui_last_apply_signature{};
+    struct DaysGoneBendUIApplySettings {
+        uint64_t manual_generation{};
+        int32_t mode{};
+        bool force_player_camera{};
+        bool override_widget_transform{};
+        bool override_root_transform{};
+        bool force_widget_refresh{};
+        bool viewport_slot_fix{};
+        bool apply_child_render_transform{};
+        bool use_slate_overlay{};
+        bool suppress_in_scene_composite{};
+        float viewport_slot_offset_x{};
+        float viewport_slot_offset_y{};
+        float viewport_slot_scale{};
+        float viewport_slot_opacity{};
+        float distance_from_camera{};
+        float camera_fov{};
+        float widget_loc_x{};
+        float widget_loc_y{};
+        float widget_loc_z{};
+        float widget_rot_pitch{};
+        float widget_rot_yaw{};
+        float widget_rot_roll{};
+        float widget_scale{};
+        float screen_offset_x{};
+        float screen_offset_y{};
+        float screen_scale{};
+        float draw_scale{};
+        float root_loc_x{};
+        float root_loc_y{};
+        float root_loc_z{};
+        float key_opacity{};
+
+        bool operator==(const DaysGoneBendUIApplySettings&) const = default;
+    };
+    std::optional<DaysGoneBendUIApplySettings> m_daysgone_bend_ui_last_apply_settings{};
     std::atomic<uint64_t> m_daysgone_bend_ui_manual_apply_generation{0};
     struct DaysGoneBendUIOriginalState {
         uintptr_t menu3d{};
@@ -1046,13 +1182,20 @@ private:
     std::atomic<uint64_t> m_daysgone_bend_ui_restore_count{0};
     bool m_attempted_hook_update_viewport_rhi{false};
     bool m_attempted_hook_fsceneview_constructor{false};
+    bool m_attempted_hook_naruto_ue416_init_dynamic_rhi{false};
+    bool m_attempted_hook_naruto_ue416_projection_rect{false};
+    bool m_attempted_hook_naruto_ue416_draw_stereo_predicate{false};
     bool m_uses_old_rendertarget_manager{false};
     bool m_uses_ue58_rendertarget_manager{false};
+    std::atomic<UE58RenderTargetManagerABI> m_ue58_rendertarget_manager_abi{
+        UE58RenderTargetManagerABI::Unknown};
+    std::mutex m_ue58_rendertarget_manager_abi_mutex{};
     bool m_rendertarget_manager_embedded_in_stereo_device{false}; // 4.17 and below...?
     bool m_special_detected{false};
     bool m_special_detected_4_18{false};
     bool m_special_detected_4_22{false};
     bool m_special_detected_4_27{false};
+    bool m_special_detected_5_54{false};
     bool m_manually_constructed{false};
     bool m_pixel_format_cvar_found{false};
     bool m_injected_stereo_at_runtime{false};

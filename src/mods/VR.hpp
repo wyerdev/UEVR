@@ -791,6 +791,20 @@ public:
             !is_using_2d_screen();
     }
 
+    bool is_dune_native_dual_view_probe_enabled() const {
+        const auto runtime = get_runtime();
+        return m_compatibility_dune_native_dual_view_probe->value() &&
+            m_is_d3d12 &&
+            runtime != nullptr &&
+            runtime->ready() &&
+            runtime->is_openxr() &&
+            is_hmd_active() &&
+            m_rendering_method->value() == RenderingMethod::NATIVE_STEREO &&
+            !is_using_afr() &&
+            !is_native_stereo_fix_enabled() &&
+            !is_using_2d_screen();
+    }
+
     bool is_daysgone_bend_ui_placement_fix_enabled() const {
         return m_compatibility_daysgone_bend_ui_placement_fix->value();
     }
@@ -837,6 +851,10 @@ public:
 
     bool is_mixtape_auto_2d_active() const {
         return m_mixtape_auto_2d_active.load(std::memory_order_relaxed);
+    }
+
+    bool is_halo_electra_cinematic_active() const {
+        return m_halo_electra_cinematic_active.load(std::memory_order_relaxed);
     }
 
     void set_windrose_meta_ui_2d_state_active(
@@ -989,6 +1007,7 @@ private:
     void update_shf_auto_2d_mode(sdk::UGameEngine* engine);
     void update_dispatch_auto_2d_mode(sdk::UGameEngine* engine);
     void update_mixtape_auto_2d_mode(sdk::UGameEngine* engine);
+    void update_halo_electra_cinematic_state(sdk::UGameEngine* engine);
     void update_windrose_meta_ui_auto_2d_mode();
     void update_imgui_state_from_vr_controller_fallback();
     void update_subnautica2_save_thumbnail_guard(sdk::UGameEngine* engine);
@@ -1264,6 +1283,8 @@ private:
     std::chrono::steady_clock::time_point m_mixtape_auto_2d_last_sample{};
     std::atomic_bool m_mixtape_auto_2d_active{false};
     bool m_mixtape_auto_2d_previous_mode{false};
+    std::chrono::steady_clock::time_point m_halo_electra_restore_after{};
+    std::atomic_bool m_halo_electra_cinematic_active{false};
     struct WindroseMetaUiToken {
         std::string name{};
         std::string source{};
@@ -1608,6 +1629,7 @@ private:
     const ModToggle::Ptr m_compatibility_daysgone_gbuffer_safe_mode{ ModToggle::create(generate_name("Compatibility_DaysGoneGBufferSafeMode"), false, true) };
     const ModToggle::Ptr m_compatibility_everspace2_remove_cinematic_bars{ ModToggle::create(generate_name("Compatibility_Everspace2RemoveCinematicBars"), false, true) };
     const ModToggle::Ptr m_compatibility_dune_true_stereo{ ModToggle::create(generate_name("Compatibility_DuneTrueStereo"), false, true) };
+    const ModToggle::Ptr m_compatibility_dune_native_dual_view_probe{ ModToggle::create(generate_name("Compatibility_DuneNativeDualViewProbe"), false, true) };
 
     struct Fullscreen16x9CameraCompatState {
         bool was_enabled{false};
@@ -1915,6 +1937,7 @@ public:
             *m_compatibility_daysgone_gbuffer_safe_mode,
             *m_compatibility_everspace2_remove_cinematic_bars,
             *m_compatibility_dune_true_stereo,
+            *m_compatibility_dune_native_dual_view_probe,
             *m_sceneview_compatibility_mode,
             *m_keybind_recenter,
             *m_keybind_recenter_horizon,

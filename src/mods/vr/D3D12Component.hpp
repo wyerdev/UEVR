@@ -127,6 +127,7 @@ private:
     void wait_for_ue58_slate_ui_consumers();
     void clear_backbuffer();
     bool ensure_2d_screen_textures(ID3D12Device* device, const D3D12_RESOURCE_DESC& base_desc);
+    bool ensure_halo_electra_quad_source_texture(ID3D12Device* device, uint64_t width, uint32_t height);
 
     enum class ShfSceneMode {
         Unknown,
@@ -176,6 +177,7 @@ private:
         }
     };
 
+    void reset_frame_timing_stats();
     void log_frame_timing_stats_if_needed(VR* vr);
     void log_openxr_swapchain_recreate(VR* vr, uint32_t reasons, uint32_t new_depth_width = 0, uint32_t new_depth_height = 0);
 
@@ -183,6 +185,7 @@ private:
     std::array<d3d12::CommandContext, 3> m_generic_commands{};
     std::chrono::steady_clock::time_point m_last_on_frame{};
     std::chrono::steady_clock::time_point m_last_frame_timing_log{};
+    bool m_frame_timing_collection_active{};
     FrameTimingStats m_perf_on_frame{};
     FrameTimingStats m_perf_ui_copy{};
     FrameTimingStats m_perf_swapchain_copy{};
@@ -215,6 +218,7 @@ private:
     d3d12::TextureContext m_scene_capture_tex{};
     d3d12::TextureContext m_shf_mono_scene_tex{};
     d3d12::TextureContext m_dune_hmd_mono_scene_tex{};
+    d3d12::TextureContext m_halo_electra_quad_source_tex{};
     std::array<d3d12::CommandContext, 3> m_game_tex_commands{};
     d3d12::CommandContext m_shf_mono_scene_commands{};
     d3d12::CommandContext m_dune_hmd_mono_scene_commands{};
