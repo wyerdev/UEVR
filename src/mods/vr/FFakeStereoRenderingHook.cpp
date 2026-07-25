@@ -12719,32 +12719,35 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
                 glm::radians(-(float)rot_d_other.yaw),
                 glm::radians((float)rot_d_other.pitch),
                 glm::radians(-(float)rot_d_other.roll));
-        // 片段：在 calculate_stereo_view_offset 方法末尾调用或插入以获取最终 view 矩阵
+        glm::vec3 cam_pos;
+        glm::vec3 cam_pos_other;
         if (!has_double_precision) {
-            glm::vec3 cam_pos = (*view_location) / vr->get_world_to_meters();
-            glm::vec3 cam_pos_other = view_location_other / vr->get_world_to_meters();
+            cam_pos = (*view_location) / vr->get_world_to_meters();
+            cam_pos_other = view_location_other / vr->get_world_to_meters();
             cam_pos = glm::vec3(cam_pos.y, cam_pos.z, -cam_pos.x);
             cam_pos_other = glm::vec3(cam_pos_other.y, cam_pos_other.z, -cam_pos_other.x);
-            glm::mat4 view_matrix = glm::translate(glm::mat4(1.0f), cam_pos) * view_to_world;
-            glm::mat4 view_matrix_other = glm::translate(glm::mat4(1.0f), cam_pos_other) * view_to_world_other;
-            vr->render_view_matrix[true_index][2] = vr->render_view_matrix[true_index][1];
-            vr->render_view_matrix[true_index][1] = vr->render_view_matrix[true_index][0];
-            vr->render_view_matrix[true_index][0].curr = glm::inverse(view_matrix);
-            vr->render_view_matrix[true_index][0].other = glm::inverse(view_matrix_other);
-            vr->last_update_matrix_frame_count[true_index] = g_frame_count;
         } else {
             glm::dvec3 cam_pos_d = (*view_d) / double(vr->get_world_to_meters());
             glm::dvec3 cam_pos_d_other = view_d_other / double(vr->get_world_to_meters());
-            cam_pos_d = glm::dvec3(cam_pos_d.y, cam_pos_d.z, -cam_pos_d.x);
-            cam_pos_d_other = glm::dvec3(cam_pos_d_other.y, cam_pos_d_other.z, -cam_pos_d_other.x);
-            glm::mat4 view_matrix = glm::translate(glm::mat4(1.0), glm::vec3(cam_pos_d)) * view_to_world;
-            glm::mat4 view_matrix_other = glm::translate(glm::mat4(1.0), glm::vec3(cam_pos_d_other)) * view_to_world_other;
-            vr->render_view_matrix[true_index][2] = vr->render_view_matrix[true_index][1];
-            vr->render_view_matrix[true_index][1] = vr->render_view_matrix[true_index][0];
-            vr->render_view_matrix[true_index][0].curr = glm::inverse(view_matrix);
-            vr->render_view_matrix[true_index][0].other = glm::inverse(view_matrix_other);
-            vr->last_update_matrix_frame_count[true_index] = g_frame_count;
+            cam_pos = glm::vec3(cam_pos_d.y, cam_pos_d.z, -cam_pos_d.x);
+            cam_pos_other = glm::vec3(cam_pos_d_other.y, cam_pos_d_other.z, -cam_pos_d_other.x);
         }
+
+        auto distance = glm::distance(vr->view_matrix_origin_offset, cam_pos);
+        if (distance > 100.0) {
+            vr->view_matrix_origin_offset = cam_pos;
+        }
+
+        cam_pos -= vr->view_matrix_origin_offset;
+        cam_pos_other -= vr->view_matrix_origin_offset;
+
+        glm::mat4 view_inv_matrix = glm::translate(glm::mat4(1.0f), cam_pos) * view_to_world;
+        glm::mat4 view_inv_matrix_other = glm::translate(glm::mat4(1.0f), cam_pos_other) * view_to_world_other;
+        vr->render_view_inv_matrix[true_index][2] = vr->render_view_inv_matrix[true_index][1];
+        vr->render_view_inv_matrix[true_index][1] = vr->render_view_inv_matrix[true_index][0];
+        vr->render_view_inv_matrix[true_index][0].curr = view_inv_matrix;
+        vr->render_view_inv_matrix[true_index][0].other = view_inv_matrix_other;
+        vr->last_update_matrix_frame_count[true_index] = g_frame_count;
     }
 
 #ifdef FFAKE_STEREO_RENDERING_LOG_ALL_CALLS

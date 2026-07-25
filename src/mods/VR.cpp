@@ -155,6 +155,7 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
                     mvParams.CorrectMVType = FixUEObjectMotion;
                     mvParams.ObjectMotionScale = 2.0f;
                     mvParams.FixUEObjMotionRange = vr->get_fix_object_motion_range();
+                    mvParams.IgnoreMotionThreshold = vr->get_ignore_motion_threshold();
                     mvParams.InUEVelocityPrev = &vr->rawVelocityDesc[nEyeOther];
                     mvParams.InDepthPrev = &vr->depthDesc[nEyeOther];
                     vr->d3d12Renderer->CorrectMotionVectors(InCmdList, vr->rawMVDesc[nEye], mvParams);
@@ -2593,9 +2594,24 @@ std::optional<std::string> VR::clean_initialize() try {
     *(uintptr_t*)&ptrClearDepthStencilView = hookVtable(cmdList, 47, hk_ID3D12GraphicsCommandList_ClearDepthStencilView);
     d3d12Renderer->EndCommandList(0);
 
-    auto dllNGX = GetModuleHandle("_nvngx.dll");
+    auto dllNGX = LoadLibrary("_nvngx.dll");
     if (!dllNGX)
-        dllNGX = GetModuleHandle("nvngx.dll");
+        dllNGX = LoadLibrary("nvngx.dll");
+    auto dllOptiScaler = LoadLibrary("dxgi.dll");
+    if (dllOptiScaler) {
+        if (GetProcAddress(dllOptiScaler, "NVSDK_NGX_D3D12_CreateFeature")) {
+            dllNGX = dllOptiScaler;
+            spdlog::info("OptiScaler detected, hooking it instead of nvngx.dll.");
+        } else {
+            dllOptiScaler = LoadLibrary("winmm.dll");
+            if (dllOptiScaler) {
+                if (GetProcAddress(dllOptiScaler, "NVSDK_NGX_D3D12_CreateFeature")) {
+                    dllNGX = dllOptiScaler;
+                    spdlog::info("OptiScaler detected, hooking it instead of nvngx.dll.");
+                }
+            } 
+        }
+    }
     if (!dllNGX) {
         spdlog::error("nvngx.dll not loaded!");
     } else {
@@ -8003,12 +8019,13 @@ void VR::update_camera_data(int frame_count) {
 
         auto offset = last_update_matrix_frame_count[nEye] - last_update_camera_data_frame_count;
         offset = std::clamp(offset, 0, 2) / 2;
+
         cameraData[nEye].camWorldToViewMatrix = glm::mat4(); // not used
         cameraData[nEye].camViewToWorldMatrix = glm::mat4(); // not used
-        cameraData[nEye].destWorldToViewMatrix = render_view_matrix[nEye][offset].other;
-        cameraData[nEye].srcWorldToViewMatrix = render_view_matrix[nEye][offset].curr;
-        cameraData[nEye].destViewToWorldMatrix = glm::inverse(cameraData[nEye].destWorldToViewMatrix);
-        cameraData[nEye].srcViewToWorldMatrix = glm::inverse(cameraData[nEye].srcWorldToViewMatrix);
+        cameraData[nEye].destViewToWorldMatrix = render_view_inv_matrix[nEye][offset].other;
+        cameraData[nEye].srcViewToWorldMatrix = render_view_inv_matrix[nEye][offset].curr;
+        cameraData[nEye].destWorldToViewMatrix = glm::inverse(cameraData[nEye].destViewToWorldMatrix);
+        cameraData[nEye].srcWorldToViewMatrix = glm::inverse(cameraData[nEye].srcViewToWorldMatrix);
 
         //float x = jitterOffset[0] / get_hmd_width();
         //float y = jitterOffset[1] / get_hmd_height();
@@ -8545,6 +8562,9 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                     //m_use_uint64->draw("Use UINT64");
                     m_clear_before_framewarp->draw("Clear Before Framewarp");
                     m_framewarp_debug->draw("Debug Framewarp");
+                    ImGui::Spacing();
+                    m_enable_sharpening->draw("Enable Sharpening");
+                    m_sharpness->draw("Sharpness");
                     ImGui::Spacing();
                     if (is_ghosting_fix_enabled()) {
                         m_fix_object_motion_vector->draw("Fix Object Motion Vector");

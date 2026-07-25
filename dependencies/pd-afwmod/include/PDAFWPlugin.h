@@ -146,7 +146,7 @@ namespace pd
 		EyeIndex         EyeIndex;
 		CameraData*      CameraData;  // required, camera matrices for this frame
 		bool             ClearBeforeWarping = false;
-		float            IgnoreMotionThreshold{ 2.5f };  // per-object motion vectors, ignore threshold in pixel space
+		float            IgnoreMotionThreshold{ 2.5f };  // per-object motion vectors ignore threshold
 		bool             IsHudlessColor = true;          // specify whether InEyeColor is hudless or contaning UI, if the latter, will use UIColorAndAlpha to avoid reprojecting UI.
 		MVType           MotionVectorsType = Normal;
 		bool             Debug = false;
@@ -175,15 +175,16 @@ namespace pd
 
 	struct CorrectMotionVectorsParams
 	{
-		TextureDesc*            InMotionVectors;
-		TextureDesc*            InDepth;
-		CameraDataMVCorrection* CameraData;
+		TextureDesc*            InMotionVectors = nullptr;
+		TextureDesc*            InDepth = nullptr;
+		CameraDataMVCorrection* CameraData = nullptr;
 		float                   InMotionScale[2] = { 0.0f, 0.0f };
 		CorrectMVType           CorrectMVType = SwapCameraMotion;
 		float                   ObjectMotionScale = 1.0f;
 		TextureDesc*            InUEVelocityPrev = nullptr;
 		TextureDesc*            InDepthPrev = nullptr;
 		float                   FixUEObjMotionRange = 3.0f;  // applying the object motion fix for object within certain range, or it will break the far away trees and such, for first person view this is prefered to be set to 0.5f
+		float                   IgnoreMotionThreshold{ 2.5f };  // per-object motion vectors ignore threshold
 		float                   Reserved[8] = { 0, 0 };
 	};
 
