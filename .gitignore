@@ -41,3 +41,42 @@ build_*.log
 
 # Shader debug symbols emitted during the shader compile step
 src/mods/vr/shaders/Compiled/*.pdb
+not-shipped/LUT-generation/JediSurvivor/jedi 1 - 0 default.png
+not-shipped/LUT-generation/JediSurvivor/jedi 2 - 0 default2.png
+not-shipped/LUT-generation/JediSurvivor/generated/lut_jedi_vr_black_caves_lifted.png
+not-shipped/LUT-generation/JediSurvivor/generated/lut_jedi_vr_black_caves.png
+not-shipped/LUT-generation/JediSurvivor/generated/lut_jedi_vr_dehaze_less_blue.png
+not-shipped/LUT-generation/JediSurvivor/generated/lut_jedi_vr_dehaze.png
+not-shipped/LUT-generation/JediSurvivor/generated/lut_jedi_vr_punchy_less_blue.png
+not-shipped/LUT-generation/JediSurvivor/generated/lut_jedi_vr_punchy.png
+not-shipped/LUT-generation/JediSurvivor/generated/lut_jedi_vr_soft_contrast.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/contact_sheet.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 1 - 0 default - lut_jedi_vr_black_caves_lifted.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 1 - 0 default - lut_jedi_vr_black_caves.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 1 - 0 default - lut_jedi_vr_dehaze_less_blue.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 1 - 0 default - lut_jedi_vr_dehaze.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 1 - 0 default - lut_jedi_vr_punchy_less_blue.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 1 - 0 default - lut_jedi_vr_punchy.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 1 - 0 default - lut_jedi_vr_soft_contrast.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 2 - 0 default2 - lut_jedi_vr_black_caves_lifted.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 2 - 0 default2 - lut_jedi_vr_black_caves.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 2 - 0 default2 - lut_jedi_vr_dehaze_less_blue.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 2 - 0 default2 - lut_jedi_vr_dehaze.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 2 - 0 default2 - lut_jedi_vr_punchy_less_blue.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 2 - 0 default2 - lut_jedi_vr_punchy.png
+not-shipped/LUT-generation/JediSurvivor/generated/previews/jedi 2 - 0 default2 - lut_jedi_vr_soft_contrast.png
+not-shipped/reshade-original/deblur 2.0/deblur.ini
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/BloomingHDR.fx
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/CAS.fx
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/Clarity2.fx
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/Curves.fx
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/DPX.fx
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/FakeHDR.fx
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/FastSharpen.fx
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/Levels.fx
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/LiftGammaGain.fx
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/LumaSharpen.fx
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/Technicolor2.fx
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/Tonemap.fx
+not-shipped/reshade-original/deblur 2.0/reshade-shaders/Shaders/Vibrance.fx
+not-shipped/reshade-original/universal reshade/Universal ReShade.ini
