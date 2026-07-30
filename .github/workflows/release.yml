@@ -1,0 +1,147 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{secrets.UESDK_PAT}}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Read base nightly tag
+        run: |
+          $tag = (Get-Content "${{github.workspace}}/BASE_NIGHTLY" -Raw).Trim()
+          echo "NIGHTLY_TAG=$tag" >> $env:GITHUB_ENV
+          if ($tag -match "nightly-(\d+)-") {
+            $num = $Matches[1]
+          } else {
+            $num = "00000"
+          }
+          echo "NIGHTLY_NUM=$num" >> $env:GITHUB_ENV
+          echo "ZIP_NAME=uevr-patched-$num-${{github.run_number}}" >> $env:GITHUB_ENV
+        shell: powershell
+
+      - name: Create annotated tag locally
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag -a "patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}" -m "UEVR Patched ${{env.NIGHTLY_NUM}}-${{github.run_number}}"
+        shell: bash
+
+      - name: Build
+        run: call build.bat
+        shell: cmd
+        env:
+          # build.bat defaults to a local out-of-source dir (A:\UEVR-build\...)
+          # which does not exist on the runner. Point it at the in-tree build\
+          # dir that the artifact steps below glob.
+          UEVR_BUILD_DIR: ${{github.workspace}}\build
+
+      - name: Compress artifacts
+        run: |
+          echo ${{github.sha}} > ${{github.workspace}}/revision.txt
+          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/uevr/*
+          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/vr-plugin-nullifier/UEVRPluginNullifier.dll
+          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/LuaVR/LuaVR.dll
+          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/revision.txt
+
+      - name: Package plugins zip
+        run: |
+          $staging = "${{github.workspace}}/plugins-staging"
+          New-Item -ItemType Directory -Path "$staging/plugins" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$staging/shipping_presets" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$staging/shader_assets" -Force | Out-Null
+
+          # Copy bare-named shader DLLs into staging, then run the ordering script
+          # to assign sequential NN_ prefixes based on render_order() in each .cpp.
+          # Bloom is excluded: kept in-tree for future fix attempts but broken in VR-LDR.
+          Get-ChildItem "${{github.workspace}}/build/${{env.BUILD_TYPE}}/*Shader.dll" |
+            Where-Object { $_.Name -notmatch "Bloom" } |
+            Copy-Item -Destination "$staging/plugins/"
+
+          # Assign sequential prefixes, copy LICENSE files, write shaders.manifest
+          # (all driven by render_order()).
+          python "${{github.workspace}}/scripts/assign_shader_order.py" "$staging/plugins" --exclude Bloom --copy-licenses
+
+          # Copy shipping presets (flat *.uevrpreset files only — subfolders like
+          # presets/experimental/ are intentionally excluded from releases).
+          Get-ChildItem "${{github.workspace}}/presets/*.uevrpreset" -File |
+            Copy-Item -Destination "$staging/shipping_presets/"
+
+          # Copy shipped shader assets (LUT pngs, etc.) flat into shader_assets/.
+          # install-plugins.bat detects this layout (vs dev examples/<plugin>/assets/)
+          # and copies into <UEVR_root>/data/plugins/shader_assets/, which is the
+          # fallback path resolve_shader_asset_path() consults at runtime.
+          # Excludes assets belonging to plugins not shipped (e.g. Bloom — see DLL filter above).
+          $excludedAssetPlugins = @('bloom_plugin')
+          Get-ChildItem "${{github.workspace}}/examples" -Directory |
+            Where-Object { $excludedAssetPlugins -notcontains $_.Name } |
+            ForEach-Object {
+              $assetsDir = Join-Path $_.FullName 'assets'
+              if (Test-Path $assetsDir) {
+                Get-ChildItem $assetsDir -File | Copy-Item -Destination "$staging/shader_assets/"
+              }
+            }
+
+          # Copy install/uninstall scripts
+          Copy-Item "${{github.workspace}}/install-plugins.bat" "$staging/"
+          Copy-Item "${{github.workspace}}/uninstall-plugins.bat" "$staging/"
+
+          # Create zip
+          7z a "${{github.workspace}}/uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip" "$staging/*"
+        shell: powershell
+
+      - name: Hash zips
+        run: |
+          $mainHash = Get-FileHash -Algorithm SHA256 ${{github.workspace}}/${{env.ZIP_NAME}}.zip
+          $mainHash.Hash | Out-File -FilePath ${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256
+          $pluginZip = "${{github.workspace}}/uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip"
+          $pluginHash = Get-FileHash -Algorithm SHA256 $pluginZip
+          $pluginHash.Hash | Out-File -FilePath "$pluginZip.sha256"
+        shell: powershell
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/praydog/UEVR.git
+          git fetch upstream master --no-tags
+        shell: bash
+
+      - name: Generate release notes
+        run: |
+          python "${{github.workspace}}/scripts/generate_release_notes.py" `
+            --nightly-tag "${{env.NIGHTLY_TAG}}" `
+            --zip-name "${{env.ZIP_NAME}}" `
+            --plugins-zip-name "uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}" `
+            --repo-slug "${{github.repository}}" `
+            --commit-sha "${{github.sha}}" `
+            --out-file "${{github.workspace}}/RELEASE_NOTES.md"
+        shell: powershell
+
+      - name: Push annotated tag
+        run: |
+          git push origin "patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}"
+        shell: bash
+
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}
+          name: "UEVR Patched ${{env.NIGHTLY_NUM}}-${{github.run_number}} (${{github.sha}})"
+          artifacts: "${{github.workspace}}/${{env.ZIP_NAME}}.zip,${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256,${{github.workspace}}/uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip,${{github.workspace}}/uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip.sha256"
+          bodyFile: ${{github.workspace}}/RELEASE_NOTES.md
+          makeLatest: true
+          token: ${{secrets.GITHUB_TOKEN}}

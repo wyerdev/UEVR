@@ -8,9 +8,22 @@ setlocal
 :: Each branch builds into its own directory, named after its UEVR_VARIANT_ID,
 :: so the variants never share a CMake cache or intermediate objects. Do not
 :: point this at the in-tree build\ directory.
+::
+:: Overridable via UEVR_BUILD_DIR. CI has no A: drive, so release.yml sets it
+:: to the in-tree build\ dir that its artifact steps glob. Never hardcode a
+:: local-only path here without leaving this escape hatch.
 :: ---------------------------------------------------------------------------
-set "BUILDDIR=A:\UEVR-build\afw"
+if defined UEVR_BUILD_DIR (
+    set "BUILDDIR=%UEVR_BUILD_DIR%"
+) else (
+    set "BUILDDIR=A:\UEVR-build\afw"
+)
 if not exist "%BUILDDIR%" mkdir "%BUILDDIR%"
+if not exist "%BUILDDIR%" (
+    echo BUILD DIR UNAVAILABLE: %BUILDDIR%
+    echo Set UEVR_BUILD_DIR to a writable path.
+    exit /b 1
+)
 
 :: Find cmake: prefer PATH, fall back to local VS 2026 install
 where cmake >nul 2>&1
