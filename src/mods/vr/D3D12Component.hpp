@@ -23,6 +23,9 @@
 #include "d3d12/CommandContext.hpp"
 #include "d3d12/TextureContext.hpp"
 
+// [fork] shader-plugin pre-render command list — see PluginCommandListD3D12.hpp
+#include "../pluginloader/PluginCommandListD3D12.hpp"
+
 #include "PDAFWPlugin.h"
 
 class VR;
@@ -46,7 +49,8 @@ public:
     void on_post_present(VR* vr);
     void on_reset(VR* vr);
 
-    void force_reset() { m_force_reset = true; }
+    // [fork] shader-plugin dispatch — also suspend plugin_cl until next setup()
+    void force_reset() { m_force_reset = true; m_plugin_cl.on_force_reset(); }
 
     const auto& get_backbuffer_size() const { return m_backbuffer_size; }
 
@@ -95,6 +99,9 @@ public:
 
     HitchFrameSnapshot get_hitch_frame_snapshot(VR* vr) const;
     bool has_game_and_ui_textures() const;
+
+    // [fork] shader-plugin pre-render command list — see PluginCommandListD3D12.hpp
+    uevr::PluginCommandListD3D12& plugin_cl() { return m_plugin_cl; }
 
 private:
     friend class render::FrameResourceInspector;
@@ -192,6 +199,9 @@ private:
     FrameTimingStats m_perf_openxr_submit{};
     FrameTimingStats m_perf_spectator_mirror{};
     FrameTimingStats m_perf_post_present{};
+
+    // [fork] shader-plugin pre-render command list — see PluginCommandListD3D12.hpp
+    uevr::PluginCommandListD3D12 m_plugin_cl{};
 
     d3d12::TextureContext m_backbuffer_copy{};
 

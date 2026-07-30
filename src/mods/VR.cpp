@@ -46,6 +46,8 @@
 #include "utility/Logging.hpp"
 
 #include "VR.hpp"
+// [fork] per-present shader-plugin dispatch — see PluginRenderDispatch.hpp
+#include "pluginloader/PluginRenderDispatch.hpp"
 #include <safetyhook.hpp>
 #include "UObjectHook.hpp"
 #include "GameSpecific.hpp"
@@ -8590,9 +8592,13 @@ void VR::on_present() {
         }
 
         m_is_d3d12 = false;
+        // [fork] shader-plugin dispatch — see PluginRenderDispatch.hpp
+        uevr::plugin_dispatch::on_present_dx11(*this);
         e = m_d3d11.on_frame(this);
     } else if (renderer == Framework::RendererType::D3D12) {
         m_is_d3d12 = true;
+        // [fork] shader-plugin dispatch — see PluginRenderDispatch.hpp
+        uevr::plugin_dispatch::on_present_dx12(*this);
         e = m_d3d12.on_frame(this);
     }
 

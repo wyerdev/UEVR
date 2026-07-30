@@ -29,7 +29,7 @@ for pair in \
   fi
 done
 
-# [fork] afw: do NOT deploy the built PDAFWPlugin.dll. The `pdafwmod` target in
+# [fork] do NOT deploy the built PDAFWPlugin.dll. The `pdafwmod` target in
 # cmake.toml builds a dummy stub (dependencies/pd-afwmod/dummy) whose InitDevice
 # returns nullptr; it exists only to produce an import library for the backend's
 # /DELAYLOAD:PDAFWPlugin.dll. The real plugin is a prebuilt proprietary binary
@@ -39,14 +39,68 @@ if [[ ! -f "$DST/PDAFWPlugin.dll" ]]; then
   echo "           Extract it from the AFW release zip; do not use the build output."
 fi
 
-# ---------------------------------------------------------------------------
-# [2026-07-31] Shader-plugin, preset and shader-asset deployment is absent on
-# purpose. None of it exists on this branch yet: no *Shader.dll targets, no
-# presets/, no examples/*/assets, no scripts/assign_shader_order.py. Port those
-# sections over from deploy.sh on wyerdev/afw in the same change that ports the
-# shader plugins themselves, and set VARIANT to reshade-afw-joeyhodge then --
-# it must match UEVR_VARIANT_ID in include/uevr/Variant.hpp.
-# ---------------------------------------------------------------------------
+
+# Deploy shader DLLs and their license files with sequential NN_ prefixes
+# [fork] variant-isolation: must match UEVR_VARIANT_ID in include/uevr/Variant.hpp.
+VARIANT="reshade-afw-joeyhodge"
+PLUGIN_DST="$UEVR_DATA/UEVR/plugins/$VARIANT"
+mkdir -p "$PLUGIN_DST"
+
+# Create a staging directory
+STAGE_TMP=$(mktemp -d 2>/dev/null || (mkdir -p "$BUILD_DIR/deploy_stage" && echo "$BUILD_DIR/deploy_stage"))
+
+# Copy bare-named DLLs to staging
+cp -f "$BUILD_DIR/Release"/*Shader.dll "$STAGE_TMP/"
+
+# Assign sequential NN_ prefixes from render_order() and copy LICENSE files
+python "$SCRIPT_DIR/scripts/assign_shader_order.py" "$STAGE_TMP" --exclude Bloom --license-src
+
+# Clean up previously-installed shader DLLs and their license files (both prefixed and unprefixed)
+rm -f "$PLUGIN_DST"/*Shader.dll
+rm -f "$PLUGIN_DST"/*Shader-LICENSE.txt
+
+# Copy all files from staging to target
+for file in "$STAGE_TMP"/*; do
+  if [[ -f "$file" ]]; then
+    cp -f "$file" "$PLUGIN_DST/"
+    echo "  Copied $(basename "$file")"
+    ((COPIED++))
+  fi
+done
+
+# Clean up staging directory
+rm -rf "$STAGE_TMP"
+
+# Deploy shipping presets (always overwrite — these are built-in, not user presets)
+PRESET_SRC="$SCRIPT_DIR/presets"
+PRESET_DST="$UEVR_DATA/UEVR/data/plugins/$VARIANT/shipping_presets"
+if [[ -d "$PRESET_SRC" ]]; then
+  mkdir -p "$PRESET_DST"
+  # Copy flat files. The release zip and runtime only expects flat .uevrpreset files in shipping_presets.
+  cp -f "$PRESET_SRC"/*.uevrpreset "$PRESET_DST/"
+  echo "  Deployed presets from $PRESET_SRC"
+  ((COPIED++))
+fi
+
+# Deploy shipped shader assets (LUTs, textures). The release zip ships these
+# flat in `shader_assets/`; the dev tree splits them per plugin under
+# `examples/<plugin>/assets/`, so flatten them here. Mirrors the per-plugin
+# branch of install-plugins.bat.
+ASSET_DST="$UEVR_DATA/UEVR/data/plugins/$VARIANT/shader_assets"
+shopt -s nullglob
+asset_dirs=("$SCRIPT_DIR/examples"/*/assets)
+if [[ ${#asset_dirs[@]} -gt 0 ]]; then
+  mkdir -p "$ASSET_DST"
+  for dir in "${asset_dirs[@]}"; do
+    for file in "$dir"/*; do
+      [[ -f "$file" ]] || continue
+      cp -f "$file" "$ASSET_DST/"
+      ((COPIED++))
+    done
+  done
+  echo "  Deployed shader assets to $ASSET_DST"
+fi
+shopt -u nullglob
 
 LOG="$UEVR_DATA/CreaturesOfAva-Win64-Shipping/log.txt"
 if [[ -f "$LOG" ]]; then

@@ -36,7 +36,8 @@ SOFTWARE.
 #define UEVR_OUT
 
 #define UEVR_PLUGIN_VERSION_MAJOR 2
-#define UEVR_PLUGIN_VERSION_MINOR 39
+/* [fork] shader-plugin: extend the public plugin ABI for render callbacks and settings */
+#define UEVR_PLUGIN_VERSION_MINOR 420
 #define UEVR_PLUGIN_VERSION_PATCH 0
 
 #define UEVR_RENDERER_D3D11 0
@@ -156,6 +157,9 @@ typedef void (*UEVR_OnPresentCb)();
 typedef void (*UEVR_OnDeviceResetCb)();
 
 /* VR Specific renderer callbacks */
+/* [fork] shader-plugin: pre-render callback types */
+typedef void (*UEVR_OnPreRenderVRFrameworkDX11Cb)(); /* called before VR eye textures are copied/submitted */
+typedef void (*UEVR_OnPreRenderVRFrameworkDX12Cb)(); /* called before VR eye textures are copied/submitted */
 typedef void (*UEVR_OnPostRenderVRFrameworkDX11Cb)(void*, void*, void*); /* immediate_context, ID3D11Texture2D* resource, ID3D11RenderTargetView* rtv */
 /* On DX12 the resource state is D3D12_RESOURCE_STATE_RENDER_TARGET */
 typedef void (*UEVR_OnPostRenderVRFrameworkDX12Cb)(void*, void*, void*); /* command_list, ID3D12Resource* resource, D3D12_CPU_DESCRIPTOR_HANDLE* rtv */
@@ -179,6 +183,9 @@ typedef bool (*UEVR_OnPresentFn)(UEVR_OnPresentCb);
 typedef bool (*UEVR_OnDeviceResetFn)(UEVR_OnDeviceResetCb);
 
 /* VR Renderer */
+/* [fork] shader-plugin: pre-render callback registration functions */
+typedef bool (*UEVR_OnPreRenderVRFrameworkDX11Fn)(UEVR_OnPreRenderVRFrameworkDX11Cb);
+typedef bool (*UEVR_OnPreRenderVRFrameworkDX12Fn)(UEVR_OnPreRenderVRFrameworkDX12Cb);
 typedef bool (*UEVR_OnPostRenderVRFrameworkDX11Fn)(UEVR_OnPostRenderVRFrameworkDX11Cb);
 typedef bool (*UEVR_OnPostRenderVRFrameworkDX12Fn)(UEVR_OnPostRenderVRFrameworkDX12Cb);
 
@@ -191,6 +198,10 @@ typedef bool (*UEVR_OnXInputSetStateFn)(UEVR_OnXInputSetStateCb);
 typedef void (*UEVR_OnCustomEventCb)(const char* evt, const char* evt_data);
 typedef bool (*UEVR_OnCustomEventFn)(UEVR_OnCustomEventCb);
 
+/* [fork] shader-plugin: plugin UI callback type */
+typedef void (*UEVR_OnDrawUICb)(void* imgui_context);
+typedef bool (*UEVR_OnDrawUIFn)(UEVR_OnDrawUICb);
+
 /* Engine */
 typedef bool (*UEVR_Engine_TickFn)(UEVR_Engine_TickCb);
 typedef bool (*UEVR_Slate_DrawWindow_RenderThreadFn)(UEVR_Slate_DrawWindow_RenderThreadCb);
@@ -202,6 +213,40 @@ typedef bool (*UEVR_UFunction_NativePostFn)(UEVR_UFunctionHandle, UEVR_UObjectHa
 
 typedef void (*UEVR_PluginRequiredVersionFn)(UEVR_PluginVersion*);
 
+/* [fork] shader-plugin: settings serializer contract */
+/* Settings serializer — used by register_settings_serializer.
+ *
+ * A plugin builds one of these (typically via the C++ adapter in
+ * include/uevr/PluginSettings.hpp) and registers it once during
+ * uevr_plugin_initialize so the host can persist the plugin's settings
+ * to a single shared .uevrpreset file.
+ *
+ * All callbacks receive the opaque user_data pointer the plugin passed
+ * to register_settings_serializer. The host never interprets it.
+ *
+ * - get_section_name: stable preset section name (e.g. "CAS"). Decoupled
+ *   from DLL filename so DLLs can be renamed without invalidating presets.
+ *   Must be unique across all loaded plugins.
+ * - get_render_order: sparse integer (100, 200, 300...). Lower = earlier
+ *   in the post-process pipeline. Used by the host for sorting; not
+ *   user-facing today.
+ * - serialize: emit the plugin's current settings as (key, value) string
+ *   pairs by calling the supplied emit() callback once per pair.
+ * - deserialize: apply a single (key, value) pair. Called once per key the
+ *   host reads from the preset file. Unknown keys should be ignored.
+ * - reset_to_defaults: revert all settings to their defaults. Host calls
+ *   this BEFORE replaying a preset so plugins not present in the preset
+ *   end up at defaults rather than at whatever they were last set to.
+ */
+typedef void (*UEVR_SettingsSerializeEmitFn)(const char* key, const char* value, void* ctx);
+typedef struct {
+    const char* (*get_section_name)(void* user_data);
+    int  (*get_render_order)(void* user_data);
+    void (*serialize)(void* user_data, UEVR_SettingsSerializeEmitFn emit, void* ctx);
+    void (*deserialize)(void* user_data, const char* key, const char* value);
+    void (*reset_to_defaults)(void* user_data);
+} UEVR_SettingsSerializer;
+
 typedef struct {
     UEVR_OnPresentFn on_present;
     UEVR_OnDeviceResetFn on_device_reset;
@@ -211,6 +256,11 @@ typedef struct {
     UEVR_OnPostRenderVRFrameworkDX11Fn on_post_render_vr_framework_dx11;
     UEVR_OnPostRenderVRFrameworkDX12Fn on_post_render_vr_framework_dx12;
     UEVR_OnCustomEventFn on_custom_event;
+    /* [fork] shader-plugin: append callback entries for ABI compatibility */
+    /* New entries appended at end for ABI compatibility with existing plugins */
+    UEVR_OnPreRenderVRFrameworkDX11Fn on_pre_render_vr_framework_dx11;
+    UEVR_OnPreRenderVRFrameworkDX12Fn on_pre_render_vr_framework_dx12;
+    UEVR_OnDrawUIFn on_draw_ui;
 } UEVR_PluginCallbacks;
 
 typedef struct {
@@ -235,6 +285,29 @@ typedef struct {
 
     /* Intended for C plugins to listen to via on_custom_event */
     void (*dispatch_custom_event)(const char* event_name, const char* event_data);
+
+    /* [fork] shader-plugin: append settings persistence functions for ABI compatibility */
+    /* New entries appended at end for ABI compatibility with existing plugins.
+     *
+     * register_settings_serializer:
+     *   Register a per-plugin settings serializer with the host. Call once
+     *   from uevr_plugin_initialize. The serializer struct is shallow-copied
+     *   by the host; the function pointers inside it must remain valid for
+     *   the lifetime of the plugin. user_data is passed back unchanged to
+     *   every callback. If two plugins register the same section name, the
+     *   second registration is rejected and an error is logged — the second
+     *   plugin's settings simply will not persist.
+     *
+     * notify_settings_changed:
+     *   Tell the host that this plugin's settings have changed (e.g. from a
+     *   slider in on_draw_ui). The host debounces these calls and rewrites
+     *   the auto-save preset file on idle. user_data must match what the
+     *   plugin used in register_settings_serializer; the host uses it to
+     *   identify the source plugin. Cheap to call every frame — debouncing
+     *   is the host's responsibility.
+     */
+    void (*register_settings_serializer)(const UEVR_SettingsSerializer* serializer, void* user_data);
+    void (*notify_settings_changed)(void* user_data);
 } UEVR_PluginFunctions;
 
 typedef struct {
@@ -426,6 +499,12 @@ typedef struct {
 typedef struct {
     UEVR_FRHITexture2DHandle (*get_scene_render_target)();
     UEVR_FRHITexture2DHandle (*get_ui_render_target)();
+    /* [fork] shader-plugin: native-stereo scene capture and pre-render command list */
+    UEVR_FRHITexture2DHandle (*get_scene_capture_render_target)();
+    /* Returns the open ID3D12GraphicsCommandList* for recording during on_pre_render_vr_framework_dx12.
+       Returns NULL outside of that callback or when not using DX12.
+       Plugin records commands into this list; UEVR handles submission on the game's queue. */
+    void* (*get_pre_render_command_list)();
 } UEVR_FFakeStereoRenderingHookFunctions;
 
 typedef struct {

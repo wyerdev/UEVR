@@ -1,0 +1,14 @@
+This is a very common VR issue — the game's tonemapping targets monitors, and VR headset optics + compositor raise the black floor. You already have the right tools deployed. Here's the recommended plugin stack and settings:
+
+Priority 1 — Fix grey blacks (biggest impact):
+
+LevelsPlus: Enable it. Set InputBlack to 15–25 (crushes the grey floor back to true black). Leave InputWhite at 255, OutputBlack at 0.
+Priority 2 — Restore color punch:
+
+Vibrance: Enable at 0.3–0.5. It selectively boosts undersaturated pixels without oversaturating already-vivid areas.
+Priority 3 — Add contrast depth:
+
+Curves: Enable with Mode = Luma, slightly positive Contrast (~0.15–0.25). The S-curve darkens shadows and brightens highlights simultaneously.
+Priority 4 — Fine-tune midtones (optional):
+
+Tonemap: Gamma = 0.90 darkens midtones slightly, Saturation = 0.1–0.2 adds warmth. Leave Bleach/Defog at 0.
