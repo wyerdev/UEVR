@@ -43,3 +43,7 @@ build_*.log
 src/mods/vr/shaders/Compiled/*.pdb
 not-shipped/
 
+# Python bytecode from the scripts/ helpers
+__pycache__/
+*.pyc
+

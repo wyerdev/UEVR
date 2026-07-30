@@ -28,15 +28,15 @@ for pair in \
   fi
 done
 
-# [fork] afw: AFW's own plugin is built to Release/, not bin/, and the backend
-# delay-loads it from the install dir. It must match the backend it was built
-# alongside, so deploy it together with UEVRBackend.dll.
-if [[ -f "$BUILD_DIR/Release/PDAFWPlugin.dll" ]]; then
-  cp "$BUILD_DIR/Release/PDAFWPlugin.dll" "$DST/PDAFWPlugin.dll"
-  echo "  Copied PDAFWPlugin.dll"
-  ((COPIED++))
+# [fork] afw: do NOT deploy the built PDAFWPlugin.dll. The `pdafwmod` target in
+# cmake.toml builds a dummy stub (dependencies/pd-afwmod/dummy) whose InitDevice
+# returns nullptr; it exists only to produce an import library for the backend's
+# /DELAYLOAD:PDAFWPlugin.dll. The real plugin is a prebuilt proprietary binary
+# from the AFW release zip and must be placed in $DST by hand.
+if [[ ! -f "$DST/PDAFWPlugin.dll" ]]; then
+  echo "  WARNING: $DST/PDAFWPlugin.dll missing - frame warp will be disabled."
+  echo "           Extract it from the AFW release zip; do not use the build output."
 fi
-
 
 # Deploy shader DLLs and their license files with sequential NN_ prefixes
 # [fork] variant-isolation: must match UEVR_VARIANT_ID in include/uevr/Variant.hpp.
