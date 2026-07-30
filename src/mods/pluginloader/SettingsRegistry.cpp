@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // Phase A scaffold for the .uevrpreset settings system. See SettingsRegistry.hpp.
 
 #include "SettingsRegistry.hpp"

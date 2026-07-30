@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 #pragma once
 
 // Tiny ImGui helper that surfaces a per-game warning when the scene render-target

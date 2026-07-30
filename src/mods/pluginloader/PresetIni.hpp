@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // Minimal INI reader/writer for the .uevrpreset file format.
 //
 // Format (all lines optional, missing keys keep defaults):

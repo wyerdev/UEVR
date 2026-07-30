@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // Plugin preset save/load/list/delete UI and IO. Owns the in-memory
 // "active preset" tracking that survives across plugin reloads, and the
 // `Plugin Presets` collapsing-header UI rendered inside PluginLoader's

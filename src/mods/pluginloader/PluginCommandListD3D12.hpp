@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // Plugin pre-render command list for D3D12.
 //
 // Owns the dedicated d3d12::CommandContext that plugins record into during

@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // See PluginCommandListD3D12.hpp for context.
 //
 // Implementation moved verbatim from vrmod::D3D12Component::{begin,end,

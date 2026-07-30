@@ -53,7 +53,7 @@ STAGE_TMP=$(mktemp -d 2>/dev/null || (mkdir -p "$BUILD_DIR/deploy_stage" && echo
 cp -f "$BUILD_DIR/Release"/*Shader.dll "$STAGE_TMP/"
 
 # Assign sequential NN_ prefixes from render_order() and copy LICENSE files
-python "$SCRIPT_DIR/scripts/assign_shader_order.py" "$STAGE_TMP" --exclude Bloom --license-src
+python "$SCRIPT_DIR/scripts/assign_shader_order.py" "$STAGE_TMP" --exclude Bloom --copy-licenses
 
 # Clean up previously-installed shader DLLs and their license files (both prefixed and unprefixed)
 rm -f "$PLUGIN_DST"/*Shader.dll

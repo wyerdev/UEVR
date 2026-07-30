@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // Phase A scaffold for the .uevrpreset settings system.
 //
 // Lives in its own translation unit (rather than inline in PluginLoader.cpp)
