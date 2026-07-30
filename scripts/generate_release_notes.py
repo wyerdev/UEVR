@@ -174,13 +174,23 @@ def git(*args: str) -> str:
         return ""
 
 
-def _resolve_upstream_ref() -> str:
-    """Return a ref representing upstream/master, or empty if not available.
+def _resolve_upstream_ref(explicit: str = "") -> str:
+    """Return a ref for this branch's upstream, or empty if none is available.
 
-    Tries common remote names so this works in CI (where workflow adds an
-    'upstream' remote) and locally (where a contributor may have configured
-    the upstream under a different name).
+    `explicit` is the commit the workflow already resolved from *this* branch's
+    own upstream branch (`--upstream-commit`, i.e. `UPSTREAM_SHA`). It is the
+    only reliable source: the name-based candidates below all assume the
+    upstream is praydog `master`, which is false on every integration branch.
+    On `wyerdev/afw` the workflow adds an `upstream` remote pointing at
+    PureDark and fetches only `AFW`, so none of the candidate *names* exist in
+    CI at all.
+
+    The candidates remain as a local-dev fallback, where a contributor on
+    `master` may not pass `--upstream-commit`.
     """
+    if explicit and git("rev-parse", "--verify", "--quiet", f"{explicit}^{{commit}}"):
+        return explicit
+
     candidates = ["upstream/master", "praydog/master", "upstream/main"]
     for ref in candidates:
         if git("rev-parse", "--verify", "--quiet", ref):
@@ -188,21 +198,30 @@ def _resolve_upstream_ref() -> str:
     return ""
 
 
-def get_changelog(repo_slug: str, commit_sha: str) -> str:
-    """Collect recent fix/feat commits unique to this fork (not in upstream master).
+def get_changelog(repo_slug: str, commit_sha: str, upstream_commit: str = "") -> str:
+    """Collect recent fix/feat commits unique to this fork (not in its upstream).
 
-    Uses `git log upstream..HEAD` so every contributor to the fork is
-    included, regardless of author name. Falls back to all reachable commits
-    if no upstream ref is found (e.g. local dev clone without the remote).
+    Uses `git log <upstream>..HEAD` so every contributor to the fork is
+    included, regardless of author name. `upstream_commit` is what the workflow
+    resolved from this branch's own upstream branch; without it the range
+    degrades to plain `HEAD`, i.e. **the entire history of UEVR**, upstream
+    commits and all. That is not hypothetical — it is what AFW release
+    beta5-44 shipped with, listing praydog commits from 2022.
 
-    That range is the fork's *entire* divergence from upstream, which on the
-    baseline line reaches back to 2023. A release body is meant to say what is
-    new in this build, not to restate the project's history, so the list is
-    capped twice: by age (`CHANGELOG_WINDOW`) and then by count
-    (`CHANGELOG_MAX_ENTRIES`). Whichever bites first wins. Anything trimmed is
-    still one click away via the full commit list.
+    Even with the right base, the range is the fork's whole divergence from
+    upstream, which on the baseline line reaches back to 2023. A release body
+    is meant to say what is new in this build, not to restate the project's
+    history, so the list is capped twice: by age (`CHANGELOG_WINDOW`) and then
+    by count (`CHANGELOG_MAX_ENTRIES`). Whichever bites first wins. Anything
+    trimmed is still one click away via the full commit list.
     """
-    upstream = _resolve_upstream_ref()
+    upstream = _resolve_upstream_ref(upstream_commit)
+    if not upstream:
+        print(
+            "warning: no upstream ref resolved; the changelog will cover all"
+            " reachable commits, not just this fork's. Pass --upstream-commit.",
+            file=sys.stderr,
+        )
     log_range = f"{upstream}..HEAD" if upstream else "HEAD"
 
     raw = git(
@@ -268,7 +287,7 @@ def main() -> None:
 
     base = BUILD_LINES[args.variant]
     nightly_url = f"https://github.com/{base['base_repo']}/releases/tag/{args.nightly_tag}"
-    changelog = get_changelog(args.repo_slug, args.commit_sha)
+    changelog = get_changelog(args.repo_slug, args.commit_sha, args.upstream_commit)
     header = build_line_header(args.variant, args.repo_slug, args.commit_sha)
 
     notes = f"""{header}
