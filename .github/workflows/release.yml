@@ -45,6 +45,11 @@ jobs:
       - name: Build
         run: call build.bat
         shell: cmd
+        env:
+          # build.bat defaults to a local out-of-source dir (A:\UEVR-build\...)
+          # which does not exist on the runner. Point it at the in-tree build\
+          # dir that the artifact steps below glob.
+          UEVR_BUILD_DIR: ${{github.workspace}}\build
 
       - name: Compress artifacts
         run: |
