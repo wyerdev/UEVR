@@ -57,6 +57,11 @@ own directory, named after its variant id (`master` -> `A:\UEVR-build\reshade`,
 or intermediate objects. The directory is set by `BUILDDIR` at the top of
 `build.bat`.
 
+Set the `UEVR_BUILD_DIR` environment variable to override it. The default is a
+local path that will not exist on other machines, so anything running elsewhere
+— CI in particular — must set this. `.github/workflows/release.yml` points it at
+the in-tree `build\` directory, which is what its packaging steps glob.
+
 The post-processing plugins are defined in `cmake.toml` and built alongside
 UEVR, so a plain `build.bat` builds everything. To build one plugin:
 

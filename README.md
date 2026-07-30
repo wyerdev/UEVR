@@ -3,9 +3,28 @@
 
 Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix washed-out colors and grey blacks in VR.
 
-**Credits:**
-- Big thanks to [Praydog](https://github.com/praydog), who created UEVR and made this fork possible. This fork modifies and extends [Praydog's UEVR](https://github.com/praydog/UEVR); the UEVR code is Praydog's work ([Original UEVR README below](#original-uevr-readme)).
-- Thanks also to [crosire's ReShade](https://github.com/crosire/reshade) project and the original ReShade shader creators: CeeJay.dk, AMD, SLSNe, Marty McFly, 3an, DKT70, Loadus, Martins Upitis, bacondither, Ioxa, kingeric1992, Niklas Haas (haasn), JPulowski, luluco250, brussell1, Alex Tuduran, and Timothy Lottes / NVIDIA. This fork does not ship ReShade itself; it ports selected shader work to native UEVR plugins so those effects can be used in UEVR ([license files](examples/)).
+**Credits:** This fork modifies and extends [Praydog's UEVR](https://github.com/praydog/UEVR)
+([original UEVR README below](#original-uevr-readme)), and turns selected
+[ReShade](https://github.com/crosire/reshade) shaders into native UEVR plugins.
+Praydog, PureDark, and the original shader authors are all credited in
+**[INSTALL.md → Credits](docs/reference/INSTALL.md#credits)**, which is the one
+place those credits are kept.
+
+# Release Index
+
+This fork comes in more than one build, each based on a different version of
+UEVR. All of them share one releases page and are listed together by date, so
+use the links below instead of scrolling it. The **Latest** badge always goes to
+the main ReShade build — that is on purpose, and does not mean the other builds
+are out of date.
+
+| Build line | Releases |
+|---|---|
+| **UEVR ReShade** (the main one) | [latest](https://github.com/wyerdev/UEVR/releases/latest) · [all](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-release) |
+| **UEVR ReShade AFW** | _not released yet_ |
+
+What each build is based on, how they can be installed at the same time, and
+which one you want: [Choose Your Build Line](docs/reference/INSTALL.md#choose-your-build-line).
 
 # [How to Install](docs/reference/INSTALL.md)
 
@@ -202,7 +221,7 @@ LUT is functionally lightweight despite running through the multi-pass runtime; 
 cmd.exe //c "build.bat"
 ```
 
-Plugin DLLs output to `<BUILDDIR>/Release/`, where `BUILDDIR` is the branch-specific out-of-source build directory set at the top of `build.bat` (`A:\UEVR-build\reshade` on `master`). Deploy with `bash deploy.sh`, which installs to `%APPDATA%/UnrealVRMod/UEVR/plugins/<variant>/` (global) or `%APPDATA%/UnrealVRMod/<game_executable>/data/plugins/<variant>/` (per-game).
+Plugin DLLs output to `<BUILDDIR>/Release/`, where `BUILDDIR` is the branch-specific out-of-source build directory set at the top of `build.bat` (`A:\UEVR-build\reshade` on `master`), overridable via the `UEVR_BUILD_DIR` environment variable. Deploy with `bash deploy.sh`, which installs to `%APPDATA%/UnrealVRMod/UEVR/plugins/<variant>/` (global) or `%APPDATA%/UnrealVRMod/<game_executable>/data/plugins/<variant>/` (per-game).
 
 ### Licenses
 
