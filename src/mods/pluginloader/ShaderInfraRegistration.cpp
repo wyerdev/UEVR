@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 #include "ShaderInfraRegistration.hpp"
 
 #include <filesystem>
@@ -8,6 +9,7 @@
 #include <spdlog/spdlog.h>
 
 #include "Framework.hpp"
+#include "uevr/Variant.hpp"
 
 namespace fs = std::filesystem;
 
@@ -19,22 +21,43 @@ namespace uevr::shader_infra {
 static constexpr std::string_view SHADER_SETTINGS_DIR_NAME = "shader_settings";
 
 void migrate_shader_settings_dir() {
-    // Migration: move shader settings from data/plugins/ to data/plugins/shader_settings/
-    // Runs every launch — handles partial migration (e.g. interrupted first run).
-    // Collect paths first to avoid iterator invalidation when renaming into a subdirectory.
-    const auto old_dir = Framework::get_persistent_dir() / "data" / "plugins";
-    const auto new_dir = old_dir / SHADER_SETTINGS_DIR_NAME;
-    if (!fs::exists(old_dir)) return;
+    // Migration into this build's variant-scoped settings dir. Runs every
+    // launch — handles partial migration (e.g. interrupted first run).
+    //
+    // Two legacy layouts are absorbed, in order:
+    //   1. data/plugins/*_settings.txt              (pre shader_settings/)
+    //   2. data/plugins/shader_settings/*           (pre variant scoping)
+    // Both are unqualified, so they cannot be attributed to a variant. They are
+    // moved, not copied: the first variant launched after the upgrade adopts
+    // them, and later variants simply start from defaults.
+    const auto plugins_dir = Framework::get_persistent_dir() / "data" / "plugins";
+    const auto new_dir = plugins_dir / UEVR_VARIANT_ID / SHADER_SETTINGS_DIR_NAME;
+    if (!fs::exists(plugins_dir)) return;
 
     std::vector<fs::path> to_migrate;
-    for (const auto& entry : fs::directory_iterator(old_dir)) {
+
+    std::error_code scan_ec;
+    for (const auto& entry : fs::directory_iterator(plugins_dir, scan_ec)) {
         if (!entry.is_regular_file()) continue;
         auto fname = entry.path().filename().string();
         if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
             to_migrate.push_back(entry.path());
         }
     }
+
+    const auto legacy_shader_settings_dir = plugins_dir / SHADER_SETTINGS_DIR_NAME;
+    if (fs::exists(legacy_shader_settings_dir)) {
+        for (const auto& entry : fs::directory_iterator(legacy_shader_settings_dir, scan_ec)) {
+            if (entry.is_regular_file()) {
+                to_migrate.push_back(entry.path());
+            }
+        }
+    }
+
     if (to_migrate.empty()) return;
+
+    spdlog::info("[PluginLoader] Migrating {} legacy shader settings file(s) into variant '{}'",
+        to_migrate.size(), UEVR_VARIANT_ID);
 
     fs::create_directories(new_dir);
     for (const auto& src : to_migrate) {
@@ -48,6 +71,10 @@ void migrate_shader_settings_dir() {
             if (!ec) spdlog::info("[PluginLoader] Migrated shader settings: {}", src.filename().string());
         }
     }
+
+    // Drop the now-empty unqualified dir so it stops looking authoritative.
+    std::error_code ec;
+    fs::remove(legacy_shader_settings_dir, ec);
 }
 
 // D3D11 pipeline state objects — created once, bound before every plugin

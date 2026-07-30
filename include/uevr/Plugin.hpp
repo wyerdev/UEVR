@@ -35,6 +35,7 @@ SOFTWARE.
 #include <d3d12.h>
 
 #include "API.hpp"
+#include "Variant.hpp"
 
 namespace uevr {
 class Plugin;
@@ -93,6 +94,13 @@ extern "C" __declspec(dllexport) void uevr_plugin_required_version(UEVR_PluginVe
     version->major = UEVR_PLUGIN_VERSION_MAJOR;
     version->minor = UEVR_PLUGIN_VERSION_MINOR;
     version->patch = UEVR_PLUGIN_VERSION_PATCH;
+}
+
+// [fork] variant-isolation: identity handshake. The loader rejects any plugin
+// whose variant ID does not match the backend's, even if the DLL is sitting in
+// the correct directory.
+extern "C" __declspec(dllexport) const char* uevr_plugin_variant_id() {
+    return UEVR_VARIANT_ID;
 }
 
 extern "C" __declspec(dllexport) bool uevr_plugin_initialize(const UEVR_PluginInitializeParam* param) {

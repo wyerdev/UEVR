@@ -20,9 +20,16 @@
 # compared to the cost of shipping an ABI-corrupted DLL.
 #
 # Skipped:
-# - build/_deps/        third-party (CMake FetchContent), tracked correctly
-# - build/<anything>/CMakeFiles/   CMake's own intermediates, not MSVC obj dirs
-# - dependencies/       submodules / vendored libs
+# - <build>/_deps/       third-party (CMake FetchContent), tracked correctly
+# - <build>/<anything>/CMakeFiles/   CMake's own intermediates, not MSVC obj dirs
+# - dependencies/        submodules / vendored libs
+
+param(
+    # CMake binary directory. build.bat passes the branch-specific directory
+    # (each branch builds outside the source tree), so it must not be assumed
+    # to live under the repo root.
+    [string]$BuildDir = 'build'
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -50,12 +57,14 @@ $newestHdr     = ($hdrs | Sort-Object LastWriteTime -Descending | Select-Object 
 $newestHdrTime = $newestHdr.LastWriteTime
 Write-Host ("  Newest header: {0} ({1:HH:mm:ss})" -f $newestHdr.Name, $newestHdrTime)
 
-# 2. For each MSBuild intermediate dir under build/ matching <target>.dir/<config>,
-#    if any .obj is older than the newest header, delete every .obj in that dir.
-if (-not (Test-Path 'build')) {
-    Write-Host "  No build/ dir; nothing to scan."
+# 2. For each MSBuild intermediate dir under the build dir matching
+#    <target>.dir/<config>, if any .obj is older than the newest header,
+#    delete every .obj in that dir.
+if (-not (Test-Path -LiteralPath $BuildDir)) {
+    Write-Host "  No build dir at '$BuildDir'; nothing to scan."
     exit 0
 }
+$buildRoot = (Resolve-Path -LiteralPath $BuildDir).Path
 
 $skipPatterns = @('\_deps\', '\CMakeFiles\', '\dependencies\', '\_cmkr')
 
@@ -69,7 +78,7 @@ $thirdPartyTargets = @(
     'sdk-test', 'cmkr', 'uesdk'
 )
 
-$objDirs = Get-ChildItem -Path 'build' -Recurse -Directory -ErrorAction SilentlyContinue |
+$objDirs = Get-ChildItem -LiteralPath $buildRoot -Recurse -Directory -ErrorAction SilentlyContinue |
            Where-Object {
                $_.Name -in @('Release', 'Debug', 'RelWithDebInfo', 'MinSizeRel') -and
                $_.Parent.Name -like '*.dir'
@@ -97,7 +106,7 @@ foreach ($d in $objDirs) {
 
     $oldestObj = ($objs | Sort-Object LastWriteTime | Select-Object -First 1).LastWriteTime
     if ($newestHdrTime -gt $oldestObj) {
-        $relDir = $d.FullName.Substring($repoRoot.Length).TrimStart('\', '/')
+        $relDir = $d.FullName.Substring($buildRoot.Length).TrimStart('\', '/')
         Write-Host ("  STALE in {0} (oldest obj {1:HH:mm:ss} < newest hdr {2:HH:mm:ss})" -f `
                     $relDir, $oldestObj, $newestHdrTime)
         foreach ($obj in $objs) {

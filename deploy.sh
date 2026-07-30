@@ -3,8 +3,11 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UEVR_DATA="$APPDATA/UnrealVRMod"
 
-SRC="$SCRIPT_DIR/build/bin"
-DST="A:/UEVR/uevr 2026-01-13 (1127) - Mine"
+# [fork] this branch builds out-of-source and installs to its own runtime dir.
+BUILD_DIR="A:/UEVR-build/reshade"
+SRC="$BUILD_DIR/bin"
+DST="A:/UEVR-build/reshade-run"
+mkdir -p "$DST"
 
 COPIED=0
 for pair in \
@@ -26,17 +29,19 @@ for pair in \
 done
 
 # Deploy shader DLLs and their license files with sequential NN_ prefixes
-PLUGIN_DST="$UEVR_DATA/UEVR/plugins"
+# [fork] variant-isolation: must match UEVR_VARIANT_ID in include/uevr/Variant.hpp.
+VARIANT="reshade"
+PLUGIN_DST="$UEVR_DATA/UEVR/plugins/$VARIANT"
 mkdir -p "$PLUGIN_DST"
 
 # Create a staging directory
-STAGE_TMP=$(mktemp -d 2>/dev/null || (mkdir -p "$SCRIPT_DIR/build/deploy_stage" && echo "$SCRIPT_DIR/build/deploy_stage"))
+STAGE_TMP=$(mktemp -d 2>/dev/null || (mkdir -p "$BUILD_DIR/deploy_stage" && echo "$BUILD_DIR/deploy_stage"))
 
 # Copy bare-named DLLs to staging
-cp -f "$SCRIPT_DIR/build/Release"/*Shader.dll "$STAGE_TMP/"
+cp -f "$BUILD_DIR/Release"/*Shader.dll "$STAGE_TMP/"
 
 # Assign sequential NN_ prefixes from render_order() and copy LICENSE files
-python "$SCRIPT_DIR/scripts/assign_shader_order.py" "$STAGE_TMP" --exclude Bloom --license-src
+python "$SCRIPT_DIR/scripts/assign_shader_order.py" "$STAGE_TMP" --exclude Bloom --copy-licenses
 
 # Clean up previously-installed shader DLLs and their license files (both prefixed and unprefixed)
 rm -f "$PLUGIN_DST"/*Shader.dll
@@ -56,7 +61,7 @@ rm -rf "$STAGE_TMP"
 
 # Deploy shipping presets (always overwrite — these are built-in, not user presets)
 PRESET_SRC="$SCRIPT_DIR/presets"
-PRESET_DST="$UEVR_DATA/UEVR/data/plugins/shipping_presets"
+PRESET_DST="$UEVR_DATA/UEVR/data/plugins/$VARIANT/shipping_presets"
 if [[ -d "$PRESET_SRC" ]]; then
   mkdir -p "$PRESET_DST"
   # Copy flat files. The release zip and runtime only expects flat .uevrpreset files in shipping_presets.
@@ -64,6 +69,26 @@ if [[ -d "$PRESET_SRC" ]]; then
   echo "  Deployed presets from $PRESET_SRC"
   ((COPIED++))
 fi
+
+# Deploy shipped shader assets (LUTs, textures). The release zip ships these
+# flat in `shader_assets/`; the dev tree splits them per plugin under
+# `examples/<plugin>/assets/`, so flatten them here. Mirrors the per-plugin
+# branch of install-plugins.bat.
+ASSET_DST="$UEVR_DATA/UEVR/data/plugins/$VARIANT/shader_assets"
+shopt -s nullglob
+asset_dirs=("$SCRIPT_DIR/examples"/*/assets)
+if [[ ${#asset_dirs[@]} -gt 0 ]]; then
+  mkdir -p "$ASSET_DST"
+  for dir in "${asset_dirs[@]}"; do
+    for file in "$dir"/*; do
+      [[ -f "$file" ]] || continue
+      cp -f "$file" "$ASSET_DST/"
+      ((COPIED++))
+    done
+  done
+  echo "  Deployed shader assets to $ASSET_DST"
+fi
+shopt -u nullglob
 
 LOG="$UEVR_DATA/CreaturesOfAva-Win64-Shipping/log.txt"
 if [[ -f "$LOG" ]]; then

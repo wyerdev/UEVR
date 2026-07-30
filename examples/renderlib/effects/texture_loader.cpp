@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // PNG/JPG/etc. → RGBA8 decoder. Wraps stb_image (vendored at
 // dependencies/stb/stb_image.h, MIT or Public Domain).
 //

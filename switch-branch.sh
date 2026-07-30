@@ -16,8 +16,8 @@
 # silently carry AFW's patch into the other branch's build. Hence this script.
 #
 # Usage:
-#   ./scripts/switch-branch.sh master
-#   ./scripts/switch-branch.sh wyerdev/afw
+#   ./switch-branch.sh master
+#   ./switch-branch.sh wyerdev/afw
 #
 # The script only ever reverts a submodule file whose entire diff is a known
 # checked-in patch. Any other dirt aborts the switch untouched.

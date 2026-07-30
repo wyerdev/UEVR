@@ -1,9 +1,11 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // Phase A scaffold for the .uevrpreset settings system. See SettingsRegistry.hpp.
 
 #include "SettingsRegistry.hpp"
 #include "PresetIni.hpp"
 
 #include "Framework.hpp"
+#include "uevr/Variant.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -66,7 +68,7 @@ std::string canonical_preset_section_name(const std::string& section_name) {
 }
 
 std::filesystem::path auto_preset_path_impl() {
-    return Framework::get_persistent_dir() / "data" / "plugins"
+    return Framework::get_persistent_dir() / "data" / "plugins" / UEVR_VARIANT_ID
         / kShaderSettingsDirName / "auto.uevrpreset";
 }
 

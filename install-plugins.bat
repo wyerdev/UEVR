@@ -11,9 +11,11 @@ set "SCRIPT_DIR=%~dp0"
 
 :: Target directories
 set "UEVR_DATA=%APPDATA%\UnrealVRMod"
-set "PLUGIN_DST=%UEVR_DATA%\UEVR\plugins"
-set "PRESET_DST=%UEVR_DATA%\UEVR\data\plugins\shipping_presets"
-set "ASSET_DST=%UEVR_DATA%\UEVR\data\plugins\shader_assets"
+:: [fork] variant-isolation: must match UEVR_VARIANT_ID in include\uevr\Variant.hpp.
+set "VARIANT=reshade"
+set "PLUGIN_DST=%UEVR_DATA%\UEVR\plugins\%VARIANT%"
+set "PRESET_DST=%UEVR_DATA%\UEVR\data\plugins\%VARIANT%\shipping_presets"
+set "ASSET_DST=%UEVR_DATA%\UEVR\data\plugins\%VARIANT%\shader_assets"
 
 :: Since the release zip layout uses pre-indexed "NN_*Shader.dll" filenames,
 :: we want local installation to behave exactly the same way to ensure the
@@ -26,17 +28,20 @@ set "ASSET_DST=%UEVR_DATA%\UEVR\data\plugins\shader_assets"
 ::      already-prefixed `NN_*Shader.dll` files. No Python required; we just
 ::      install immediately.
 ::   2) Dev / local-build layout: this script is at the repo root and bare-named
-::      `*Shader.dll` files live in `build\Release\`. We stage them into a temp
-::      directory, run the Python script to assign the NN_ prefixes and copy
-::      LICENSE files, and then install from that staged folder.
+::      `*Shader.dll` files live in the branch-specific build dir. We stage them
+::      into a temp directory, run the Python script to assign the NN_ prefixes
+::      and copy LICENSE files, and then install from that staged folder.
+:: [fork] must match BUILDDIR in build.bat: each branch builds out-of-source
+:: into its own directory so the variants never share a cache or objects.
+set "BUILDDIR=A:\UEVR-build\reshade"
 set "STAGE_TMP="
 if exist "%SCRIPT_DIR%plugins\" (
     set "PLUGIN_SRC=%SCRIPT_DIR%plugins"
-) else if exist "%SCRIPT_DIR%build\Release\LevelsPlusShader.dll" (
+) else if exist "%BUILDDIR%\Release\LevelsPlusShader.dll" (
     rem Dev mode: need Python to stage with correct NN_ prefixes.
     where python >nul 2>&1
     if errorlevel 1 (
-        echo ERROR: Local build detected at build\Release\ but Python is not on PATH.
+        echo ERROR: Local build detected at %BUILDDIR%\Release\ but Python is not on PATH.
         echo Python is required to assign NN_ shader prefixes from render_order^(^).
         echo Install Python or run via deploy.sh.
         echo.
@@ -48,10 +53,10 @@ if exist "%SCRIPT_DIR%plugins\" (
         echo ERROR: Could not create staging dir !STAGE_TMP!
         goto :fail
     )
-    echo Staging bare-named DLLs from build\Release\ to !STAGE_TMP! ...
-    copy /Y "%SCRIPT_DIR%build\Release\*Shader.dll" "!STAGE_TMP!\" >nul
+    echo Staging bare-named DLLs from %BUILDDIR%\Release\ to !STAGE_TMP! ...
+    copy /Y "%BUILDDIR%\Release\*Shader.dll" "!STAGE_TMP!\" >nul
     echo Assigning NN_ prefixes from render_order^(^) ...
-    python "%SCRIPT_DIR%scripts\assign_shader_order.py" "!STAGE_TMP!" --exclude Bloom --license-src
+    python "%SCRIPT_DIR%scripts\assign_shader_order.py" "!STAGE_TMP!" --exclude Bloom --copy-licenses
     if errorlevel 1 (
         echo ERROR: assign_shader_order.py failed.
         rmdir /s /q "!STAGE_TMP!" >nul 2>&1
@@ -62,7 +67,7 @@ if exist "%SCRIPT_DIR%plugins\" (
     echo ERROR: Cannot find shader DLLs.
     echo Expected one of:
     echo   - a "plugins" folder next to this script ^(release-zip layout^), or
-    echo   - build\Release\*Shader.dll ^(dev build layout, requires Python^).
+    echo   - %BUILDDIR%\Release\*Shader.dll ^(dev build layout, requires Python^).
     echo.
     goto :fail
 )

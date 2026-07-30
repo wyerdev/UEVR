@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 #include <d3d12.h>
 
 #include "../VR.hpp"

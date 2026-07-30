@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 #pragma once
 
 #include <filesystem>
@@ -11,9 +12,9 @@
 
 // Shader asset path resolution for plugin DLLs.
 //
-// Two locations:
-//   per-game: <persistent_dir>/data/plugins/shader_settings/<filename>
-//   global:   <persistent_dir>/../UEVR/data/plugins/shader_assets/<filename>
+// Two locations, both variant-scoped (see uevr/Variant.hpp):
+//   per-game: <persistent_dir>/data/plugins/<variant>/shader_settings/<filename>
+//   global:   <persistent_dir>/../UEVR/data/plugins/<variant>/shader_assets/<filename>
 //
 // The global dir is populated by deploy.sh / install-plugins.bat from
 // `examples/<plugin>/assets/`. Per-game files (dropped in by the user) shadow
@@ -22,11 +23,12 @@
 
 namespace uevr::assets::detail {
 inline std::filesystem::path per_game_dir() {
-    return uevr::API::get()->get_persistent_dir() / L"data" / L"plugins" / L"shader_settings";
+    return uevr::API::get()->get_persistent_dir() / L"data" / L"plugins"
+        / UEVR_VARIANT_ID_W / L"shader_settings";
 }
 inline std::filesystem::path global_dir() {
     return uevr::API::get()->get_persistent_dir() / L".." / L"UEVR"
-        / L"data" / L"plugins" / L"shader_assets";
+        / L"data" / L"plugins" / UEVR_VARIANT_ID_W / L"shader_assets";
 }
 } // namespace uevr::assets::detail
 

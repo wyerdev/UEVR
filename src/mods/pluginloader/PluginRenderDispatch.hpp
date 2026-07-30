@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // Per-present plugin pre-render dispatch.
 //
 // Extracted from VR::on_present() to keep src/mods/VR.cpp diff-clean against

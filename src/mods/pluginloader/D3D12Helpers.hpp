@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // Free-function shims around d3d12::CommandContext / d3d12::TextureContext
 // so the fork-only behavior (SEH-protected execute, recovery, discard,
 // in-place TextureContext update) lives outside the upstream-owned

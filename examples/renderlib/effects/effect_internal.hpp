@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // Internal helpers shared by the DX11 and DX12 backends.
 // Not a public header — do not include from plugin code.
 

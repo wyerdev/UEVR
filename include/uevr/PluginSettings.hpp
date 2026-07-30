@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // Plugin settings serializer — C++ adapter over the C ABI defined in API.h.
 //
 // A plugin author subclasses Serializable, fills in the five virtual methods,

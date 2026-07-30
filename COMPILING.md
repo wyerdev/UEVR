@@ -51,13 +51,22 @@ cmake --build ./build --config Release --target uevr
 <!-- [fork] shader-plugin: document plugin build and deployment workflow -->
 ### Building plugins
 
-The post-processing plugins are defined in `cmake.toml` and built alongside UEVR:
+Use `build.bat` from the repo root. Each branch builds out-of-source into its
+own directory, named after its variant id (`master` -> `A:\UEVR-build\reshade`,
+`wyerdev/afw` -> `A:\UEVR-build\afw`), so the variants never share a CMake cache
+or intermediate objects. The directory is set by `BUILDDIR` at the top of
+`build.bat`.
+
+The post-processing plugins are defined in `cmake.toml` and built alongside
+UEVR, so a plain `build.bat` builds everything. To build one plugin:
 
 ```
-cmake --build ./build --config Release --target fakehdr_plugin
+cmake --build A:/UEVR-build/reshade --config Release --target fakehdr_plugin
 ```
 
-Or build all targets at once. Plugin DLLs are output to `build/Release/` with numeric prefixes (e.g. `07_FakeHDRShader.dll`).
+Plugin DLLs are output bare-named to `<BUILDDIR>/Release/` (e.g.
+`FakeHDRShader.dll`). The numeric `NN_` prefixes are assigned at install time by
+`scripts/assign_shader_order.py` from each plugin's `render_order()`.
 
 To deploy plugins, licenses, and shipping presets:
 
