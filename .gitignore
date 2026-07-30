@@ -47,3 +47,7 @@ not-shipped/
 __pycache__/
 *.pyc
 
+# Agent instruction files — local only, kept identical across branches
+.github/copilot-instructions.md
+.github/instructions/
+
