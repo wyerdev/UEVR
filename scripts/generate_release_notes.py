@@ -36,6 +36,10 @@ BUILD_LINES = {
         "upstream_branch": "master",
         "tag_query": "uevr-reshade-release",
         "published": True,
+        # Where BASE_NIGHTLY's tag lives, and what to call it in the install
+        # steps. Each line is patched against a different upstream build.
+        "base_repo": "praydog/UEVR-nightly",
+        "base_label": "base UEVR nightly",
     },
     "reshade-afw": {
         "name": "UEVR ReShade AFW",
@@ -45,6 +49,11 @@ BUILD_LINES = {
         "upstream_branch": "AFW",
         "tag_query": "uevr-reshade-afw-release",
         "published": False,
+        # AFW is not a praydog nightly: the base is PureDark's own release,
+        # which is also the only source of the proprietary PDAFWPlugin.dll
+        # this build line delay-loads.
+        "base_repo": "PureDark/UEVR",
+        "base_label": "base UEVR AFW release",
     },
 }
 
@@ -229,14 +238,15 @@ def main() -> None:
     parser.add_argument("--out-file", required=True)
     args = parser.parse_args()
 
-    nightly_url = f"https://github.com/praydog/UEVR-nightly/releases/tag/{args.nightly_tag}"
+    base = BUILD_LINES[args.variant]
+    nightly_url = f"https://github.com/{base['base_repo']}/releases/tag/{args.nightly_tag}"
     changelog = get_changelog()
     header = build_line_header(args.variant, args.repo_slug, args.commit_sha)
 
     notes = f"""{header}
 ## How to install
 
-1. Download the **base UEVR nightly** this build is patched against:
+1. Download the **{base['base_label']}** this build is patched against:
    **[{args.nightly_tag}]({nightly_url})**
 2. Extract the nightly zip to a folder.
 3. Download **{args.zip_name}.zip** from this release.

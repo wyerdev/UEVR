@@ -2,7 +2,7 @@ name: Build & Release
 
 on:
   push:
-    branches: [master]
+    branches: [wyerdev/afw]
   workflow_dispatch:
 
 env:
@@ -13,11 +13,11 @@ env:
   # five values and nothing else, so its releases get their own tag names and
   # zip names and never mix with the main build's. Only the main build sets
   # IS_LATEST to true — GitHub only has one "Latest" badge for the whole repo.
-  VARIANT_ID: reshade
-  LINE_NAME: UEVR ReShade
-  LINE_FILE_ID: ReShade
-  TAG_PREFIX: uevr-reshade-release
-  IS_LATEST: true
+  VARIANT_ID: reshade-afw
+  LINE_NAME: UEVR ReShade AFW
+  LINE_FILE_ID: AFW
+  TAG_PREFIX: uevr-reshade-afw-release
+  IS_LATEST: false
 
 permissions:
   contents: write
@@ -37,8 +37,13 @@ jobs:
         run: |
           $tag = (Get-Content "${{github.workspace}}/BASE_NIGHTLY" -Raw).Trim()
           echo "NIGHTLY_TAG=$tag" >> $env:GITHUB_ENV
+          # praydog nightlies look like nightly-01132-<sha>; PureDark's AFW
+          # releases look like UEVR_AFW_v1.0-beta.5. Without the second pattern
+          # the AFW line would tag every release "00000-<run>".
           if ($tag -match "nightly-(\d+)-") {
             $num = $Matches[1]
+          } elseif ($tag -match "beta\.(\d+)") {
+            $num = "beta$($Matches[1])"
           } else {
             $num = "00000"
           }
@@ -131,9 +136,9 @@ jobs:
 
       - name: Add upstream remote
         run: |
-          git remote add upstream https://github.com/praydog/UEVR.git
-          git fetch upstream master --no-tags
-          echo "UPSTREAM_SHA=$(git rev-parse upstream/master)" >> "$GITHUB_ENV"
+          git remote add upstream https://github.com/PureDark/UEVR.git
+          git fetch upstream AFW --no-tags
+          echo "UPSTREAM_SHA=$(git rev-parse upstream/AFW)" >> "$GITHUB_ENV"
         shell: bash
 
       - name: Generate release notes
