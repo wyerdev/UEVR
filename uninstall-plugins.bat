@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 
 echo ============================================
 echo   UEVR VR Post-Processing Shaders Uninstaller
-echo   Built for variant: reshade
+echo   Built for variant: reshade-afw
 echo ============================================
 echo.
 
@@ -27,14 +27,17 @@ set "DATA_ROOT=%UEVR_DATA%\UEVR\data\plugins"
 :: Discover every installed variant.
 ::
 :: A subdirectory of plugins\ counts as one of ours only if it contains at least
-:: one NN_<Name>Shader.dll. That prefix is auto-assigned by
-:: scripts/assign_shader_order.py from each plugin's render_order(), so the shape
-:: is unique to our releases: a third-party plugin folder can never match.
+:: one *Shader.dll. That suffix is the naming shape every plugin in this suite
+:: is built with, so a third-party plugin folder will not match.
+::
+:: Do NOT additionally require the NN_ prefix here: scripts/assign_shader_order.py
+:: excludes some plugins (Bloom) from prefixing, so a prefix-only match silently
+:: leaves those DLLs behind.
 :: --------------------------------------------------------------------------
 set "VARIANT_COUNT=0"
 for /d %%v in ("%PLUGIN_ROOT%\*") do (
     set "HAS_SHADERS=0"
-    for /f "delims=" %%f in ('dir /b "%%v\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do set "HAS_SHADERS=1"
+    for /f "delims=" %%f in ('dir /b "%%v\*Shader.dll" 2^>nul') do set "HAS_SHADERS=1"
     if "!HAS_SHADERS!"=="1" (
         set /a VARIANT_COUNT+=1
         set "VARIANT_!VARIANT_COUNT!=%%~nxv"
@@ -43,7 +46,7 @@ for /d %%v in ("%PLUGIN_ROOT%\*") do (
 
 :: Legacy unqualified install sitting directly in plugins\.
 set "LEGACY_FOUND=0"
-for /f "delims=" %%f in ('dir /b "%PLUGIN_ROOT%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do set "LEGACY_FOUND=1"
+for /f "delims=" %%f in ('dir /b "%PLUGIN_ROOT%\*Shader.dll" 2^>nul') do set "LEGACY_FOUND=1"
 
 if %VARIANT_COUNT%==0 if "%LEGACY_FOUND%"=="0" (
     echo No post-processing shaders found in:
@@ -145,13 +148,13 @@ set "V_DATA_DIR=%DATA_ROOT%\%V%"
 echo.
 echo --- %V% ---
 
-:: Shader DLLs and their license files. Match pattern "<digits>*Shader.dll".
-:: All shaders we ship are installed as NN_<Name>Shader.dll. This pattern is
-:: unique to our releases -- any third-party plugin DLL, or any file a user
-:: dropped here manually, will not have a leading-digit prefix and is not
-:: touched. It also handles every past / future shader rename or removal without
-:: tracking a list of historical names: the glob catches them all by shape.
-for /f "delims=" %%f in ('dir /b "%V_PLUGIN_DIR%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do (
+:: Shader DLLs and their license files. Match pattern "*Shader.dll".
+:: Every plugin in this suite is built with that suffix, and the whole variant
+:: directory belongs to this build, so the glob catches every past / future
+:: shader rename or removal without tracking a list of historical names.
+:: The NN_ prefix is deliberately NOT required: assign_shader_order.py excludes
+:: some plugins (Bloom) from prefixing, and those would otherwise be left behind.
+for /f "delims=" %%f in ('dir /b "%V_PLUGIN_DIR%\*Shader.dll" 2^>nul') do (
     del /f "%V_PLUGIN_DIR%\%%f" 2>&1
     if exist "%V_PLUGIN_DIR%\%%f" (
         echo   FAILED: %%f
@@ -161,9 +164,16 @@ for /f "delims=" %%f in ('dir /b "%V_PLUGIN_DIR%\*Shader.dll" 2^>nul ^| findstr 
         set /a REMOVED+=1
     )
 )
-for /f "delims=" %%f in ('dir /b "%V_PLUGIN_DIR%\*Shader-LICENSE.txt" 2^>nul ^| findstr /r "^[0-9]"') do (
+for /f "delims=" %%f in ('dir /b "%V_PLUGIN_DIR%\*Shader-LICENSE.txt" 2^>nul') do (
     del /f "%V_PLUGIN_DIR%\%%f" 2>&1
     if not exist "%V_PLUGIN_DIR%\%%f" set /a REMOVED+=1
+)
+
+:: The installer drops a copy of this script next to the DLLs; remove it too,
+:: otherwise the variant directory can never be emptied.
+if exist "%V_PLUGIN_DIR%\uninstall-plugins.bat" (
+    del /f "%V_PLUGIN_DIR%\uninstall-plugins.bat" >nul 2>&1
+    if not exist "%V_PLUGIN_DIR%\uninstall-plugins.bat" set /a REMOVED+=1
 )
 
 :: Global data: shipping presets, user presets, shipped assets.
@@ -205,7 +215,7 @@ goto :eof
 echo.
 echo --- legacy (pre-variant) ---
 
-for /f "delims=" %%f in ('dir /b "%PLUGIN_ROOT%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do (
+for /f "delims=" %%f in ('dir /b "%PLUGIN_ROOT%\*Shader.dll" 2^>nul') do (
     del /f "%PLUGIN_ROOT%\%%f" 2>&1
     if exist "%PLUGIN_ROOT%\%%f" (
         echo   FAILED: %%f
@@ -215,9 +225,15 @@ for /f "delims=" %%f in ('dir /b "%PLUGIN_ROOT%\*Shader.dll" 2^>nul ^| findstr /
         set /a REMOVED+=1
     )
 )
-for /f "delims=" %%f in ('dir /b "%PLUGIN_ROOT%\*Shader-LICENSE.txt" 2^>nul ^| findstr /r "^[0-9]"') do (
+for /f "delims=" %%f in ('dir /b "%PLUGIN_ROOT%\*Shader-LICENSE.txt" 2^>nul') do (
     del /f "%PLUGIN_ROOT%\%%f" 2>&1
     if not exist "%PLUGIN_ROOT%\%%f" set /a REMOVED+=1
+)
+
+:: Pre-variant installs also dropped this script directly in plugins\.
+if exist "%PLUGIN_ROOT%\uninstall-plugins.bat" (
+    del /f "%PLUGIN_ROOT%\uninstall-plugins.bat" >nul 2>&1
+    if not exist "%PLUGIN_ROOT%\uninstall-plugins.bat" set /a REMOVED+=1
 )
 
 for %%d in (shipping_presets presets shader_assets shader_settings) do (

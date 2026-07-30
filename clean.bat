@@ -3,7 +3,7 @@ setlocal
 
 :: [fork] must match BUILDDIR in build.bat: each branch builds out-of-source
 :: into its own directory so the variants never share a cache or objects.
-set "BUILDDIR=A:\UEVR-build\reshade"
+set "BUILDDIR=A:\UEVR-build\afw"
 
 :: Find cmake: prefer PATH, fall back to local VS install
 where cmake >nul 2>&1
