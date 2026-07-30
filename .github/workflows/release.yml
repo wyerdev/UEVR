@@ -15,7 +15,10 @@ env:
   # IS_LATEST to true — GitHub only has one "Latest" badge for the whole repo.
   VARIANT_ID: reshade-afw
   LINE_NAME: UEVR ReShade AFW
-  LINE_FILE_ID: AFW
+  # LINE_FILE_ID must carry "ReShade" on every line. It is the only part of the
+  # asset filename a user sees once the zip is downloaded, and a bare "AFW" zip
+  # is indistinguishable from PureDark's own AFW release.
+  LINE_FILE_ID: ReShade-AFW
   TAG_PREFIX: uevr-reshade-afw-release
   IS_LATEST: false
 
