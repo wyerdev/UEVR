@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // DX12 backend for the effect runtime.
 //
 // UEVR opens its own command context for plugins and dispatches them sequentially

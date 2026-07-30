@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // Backend-agnostic dispatch for `EffectRuntime`. Owns the user's declared
 // graph (RTDescs, external-texture paths, PassDescs), constructs a backend
 // lazily on first execute() based on UEVR renderer type, and forwards.

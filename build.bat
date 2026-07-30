@@ -5,9 +5,9 @@ setlocal
 :: Branch-specific build output directory.
 ::
 :: This is the wyerdev/afw integration branch (upstream: PureDark/UEVR:AFW).
-:: Each integration branch builds into its own directory so the variants never
-:: share a CMake cache or intermediate objects. Do not point this at the
-:: in-tree build\ directory; that belongs to the master / reshade build line.
+:: Each branch builds into its own directory, named after its UEVR_VARIANT_ID,
+:: so the variants never share a CMake cache or intermediate objects. Do not
+:: point this at the in-tree build\ directory.
 :: ---------------------------------------------------------------------------
 set "BUILDDIR=A:\UEVR-build\afw"
 if not exist "%BUILDDIR%" mkdir "%BUILDDIR%"

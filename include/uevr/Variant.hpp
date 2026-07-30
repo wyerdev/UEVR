@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 #pragma once
 
 // [fork] variant-isolation: compile-time build-variant identity.

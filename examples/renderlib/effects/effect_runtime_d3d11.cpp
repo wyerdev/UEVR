@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // DX11 backend for the effect runtime. Implements the same proven pipeline
 // the existing 16 plugins use (snapshot scene → bind SRV → fullscreen tri →
 // write back to scene RT) but generalized to handle:

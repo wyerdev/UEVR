@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // Shader-plugin host infrastructure: things called from inside PluginLoader
 // methods that were originally inlined in upstream PluginLoader.cpp as fork
 // additions. Moving them here keeps the upstream-owned file's diff small.

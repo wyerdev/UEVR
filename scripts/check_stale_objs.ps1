@@ -26,7 +26,7 @@
 
 param(
     # CMake binary directory. build.bat passes the branch-specific directory
-    # (this branch builds outside the source tree), so it must not be assumed
+    # (each branch builds outside the source tree), so it must not be assumed
     # to live under the repo root.
     [string]$BuildDir = 'build'
 )

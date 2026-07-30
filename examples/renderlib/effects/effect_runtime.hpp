@@ -1,3 +1,4 @@
+// [fork-file] Ours — not in praydog/UEVR. Free to edit; no merge risk.
 // uevr::fx — multi-pass effect runtime for UEVR plugins.
 //
 // Centralizes the ~250 lines of identical DX11+DX12 boilerplate that every
