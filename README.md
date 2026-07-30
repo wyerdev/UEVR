@@ -14,14 +14,14 @@ place those credits are kept.
 
 This fork comes in more than one build, each based on a different version of
 UEVR. All of them share one releases page and are listed together by date, so
-use the links below instead of scrolling it. The **Latest** badge always goes to
-the main ReShade build — that is on purpose, and does not mean the other builds
-are out of date.
+use the links below instead of scrolling it — each one shows only that build's
+releases, newest first. The **Latest** badge always goes to the main Mainline
+build — that is on purpose, and does not mean the other builds are out of date.
 
 | Build line | Releases |
 |---|---|
-| **UEVR ReShade** (the main one) | [latest](https://github.com/wyerdev/UEVR/releases/latest) · [all](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-release) |
-| **UEVR ReShade AFW** | [all](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-afw-release) |
+| **UEVR ReShade Mainline** (the main one) | [all Mainline releases](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-mainline-release) |
+| **UEVR ReShade AFW** | [all AFW releases](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-afw-release) |
 
 What each build is based on, how they can be installed at the same time, and
 which one you want: [Choose Your Build Line](docs/reference/INSTALL.md#choose-your-build-line).

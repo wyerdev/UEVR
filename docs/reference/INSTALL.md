@@ -10,13 +10,14 @@ This fork is published as more than one build line. Each one patches a
 
 | Build line | Upstream core it patches | Filename / folder ID | Get it |
 |---|---|---|---|
-| **UEVR ReShade** (the main one) | [praydog/UEVR](https://github.com/praydog/UEVR) `master` | `reshade` | [Latest ReShade release](https://github.com/wyerdev/UEVR/releases/latest) · [all](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-release) |
-| **UEVR ReShade AFW** | [PureDark/UEVR](https://github.com/PureDark/UEVR) `AFW` — asynchronous frame warp | `reshade-afw` | [all AFW releases](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-afw-release) |
+| **UEVR ReShade Mainline** (the main one) | [praydog/UEVR](https://github.com/praydog/UEVR) `master` | `reshade` | [All Mainline releases](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-mainline-release) |
+| **UEVR ReShade AFW** | [PureDark/UEVR](https://github.com/PureDark/UEVR) `AFW` — asynchronous frame warp | `reshade-afw` | [All AFW releases](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-afw-release) |
 
-Use the links above rather than scrolling the [releases page](https://github.com/wyerdev/UEVR/releases)
+Each link shows only that build line's releases, newest first. Use them rather
+than scrolling the [full releases page](https://github.com/wyerdev/UEVR/releases)
 — releases from all build lines are interleaved there by date, so the newest
 release of your line can be buried. The **Latest** badge always goes to the
-main ReShade line; that is on purpose and does not mean the AFW line is
+main Mainline line; that is on purpose and does not mean the AFW line is
 outdated.
 
 The build lines **do not conflict**. Each one installs its shaders into its own
@@ -37,7 +38,7 @@ line's ID from the table (e.g. `reshade`).
 
    | Build line | Base download |
    |---|---|
-   | **UEVR ReShade** | [praydog UEVR Nightly](https://github.com/praydog/UEVR-nightly/releases) |
+   | **UEVR ReShade Mainline** | [praydog UEVR Nightly](https://github.com/praydog/UEVR-nightly/releases) |
    | **UEVR ReShade AFW** | [PureDark UEVR AFW release](https://github.com/PureDark/UEVR/releases) — also the only source of `PDAFWPlugin.dll`, which the AFW line needs |
 
    Every release body names the exact base build it was made against, and links
