@@ -27,6 +27,15 @@ permissions:
 
 jobs:
   build-and-release:
+    # Escape hatch: put "(skip)" in the commit message to push without cutting
+    # a release. For docs, plan notes, or a fix you intend to squash into the
+    # next real release. Matches anywhere in the message, not just the subject
+    # line — GitHub's expression syntax cannot split it. A manual
+    # workflow_dispatch has no head commit and therefore always runs, which is
+    # also how you release a "(skip)" commit after the fact.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !contains(github.event.head_commit.message, '(skip)')
     runs-on: windows-latest
     steps:
       - name: Checkout

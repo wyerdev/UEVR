@@ -21,7 +21,7 @@ are out of date.
 | Build line | Releases |
 |---|---|
 | **UEVR ReShade** (the main one) | [latest](https://github.com/wyerdev/UEVR/releases/latest) · [all](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-release) |
-| **UEVR ReShade AFW** | _not released yet_ |
+| **UEVR ReShade AFW** | [all](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-afw-release) |
 
 What each build is based on, how they can be installed at the same time, and
 which one you want: [Choose Your Build Line](docs/reference/INSTALL.md#choose-your-build-line).

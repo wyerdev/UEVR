@@ -11,7 +11,7 @@ This fork is published as more than one build line. Each one patches a
 | Build line | Upstream core it patches | Filename / folder ID | Get it |
 |---|---|---|---|
 | **UEVR ReShade** (the main one) | [praydog/UEVR](https://github.com/praydog/UEVR) `master` | `reshade` | [Latest ReShade release](https://github.com/wyerdev/UEVR/releases/latest) · [all](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-release) |
-| **UEVR ReShade AFW** | [PureDark/UEVR](https://github.com/PureDark/UEVR) `AFW` — asynchronous frame warp | `reshade-afw` | _not released yet_ |
+| **UEVR ReShade AFW** | [PureDark/UEVR](https://github.com/PureDark/UEVR) `AFW` — asynchronous frame warp | `reshade-afw` | [all AFW releases](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-afw-release) |
 
 Use the links above rather than scrolling the [releases page](https://github.com/wyerdev/UEVR/releases)
 — releases from all build lines are interleaved there by date, so the newest
@@ -32,8 +32,18 @@ line's ID from the table (e.g. `reshade`).
 
 ## Steps
 
-1. **Download the [UEVR Nightly](https://github.com/praydog/UEVR-nightly/releases)** and extract it
-2. **Download the core zip from your build line's release** (must match your nightly version) and **overwrite** the nightly files with it
+1. **Download the upstream build your build line patches**, and extract it.
+   It is not the same download for every line:
+
+   | Build line | Base download |
+   |---|---|
+   | **UEVR ReShade** | [praydog UEVR Nightly](https://github.com/praydog/UEVR-nightly/releases) |
+   | **UEVR ReShade AFW** | [PureDark UEVR AFW release](https://github.com/PureDark/UEVR/releases) — also the only source of `PDAFWPlugin.dll`, which the AFW line needs |
+
+   Every release body names the exact base build it was made against, and links
+   straight to it. Use that link rather than picking the newest one yourself.
+2. **Download the core zip from that same release** and **overwrite** the files
+   from step 1 with it
 
 ### Install Shaders
 

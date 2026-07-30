@@ -20,6 +20,12 @@ from pathlib import Path
 # Match commits starting with fix or feat (case-insensitive)
 COMMIT_RE = re.compile(r"^(fix|feat)", re.IGNORECASE)
 
+# How much history a release body is allowed to show. Both limits apply; see
+# get_changelog(). CHANGELOG_WINDOW is used both in prose and, with " ago"
+# appended, as git's --since argument.
+CHANGELOG_WINDOW = "3 months"
+CHANGELOG_MAX_ENTRIES = 7
+
 # Build lines, keyed by variant ID (must match UEVR_VARIANT_ID in
 # include/uevr/Variant.hpp). Deferred lines are deliberately absent; see
 # docs/active/joeyhodge-support-plan.md.
@@ -48,7 +54,7 @@ BUILD_LINES = {
         "upstream_repo": "PureDark/UEVR",
         "upstream_branch": "AFW",
         "tag_query": "uevr-reshade-afw-release",
-        "published": False,
+        "published": True,
         # AFW is not a praydog nightly: the base is PureDark's own release,
         # which is also the only source of the proprietary PDAFWPlugin.dll
         # this build line delay-loads.
@@ -168,13 +174,23 @@ def git(*args: str) -> str:
         return ""
 
 
-def _resolve_upstream_ref() -> str:
-    """Return a ref representing upstream/master, or empty if not available.
+def _resolve_upstream_ref(explicit: str = "") -> str:
+    """Return a ref for this branch's upstream, or empty if none is available.
 
-    Tries common remote names so this works in CI (where workflow adds an
-    'upstream' remote) and locally (where a contributor may have configured
-    the upstream under a different name).
+    `explicit` is the commit the workflow already resolved from *this* branch's
+    own upstream branch (`--upstream-commit`, i.e. `UPSTREAM_SHA`). It is the
+    only reliable source: the name-based candidates below all assume the
+    upstream is praydog `master`, which is false on every integration branch.
+    On `wyerdev/afw` the workflow adds an `upstream` remote pointing at
+    PureDark and fetches only `AFW`, so none of the candidate *names* exist in
+    CI at all.
+
+    The candidates remain as a local-dev fallback, where a contributor on
+    `master` may not pass `--upstream-commit`.
     """
+    if explicit and git("rev-parse", "--verify", "--quiet", f"{explicit}^{{commit}}"):
+        return explicit
+
     candidates = ["upstream/master", "praydog/master", "upstream/main"]
     for ref in candidates:
         if git("rev-parse", "--verify", "--quiet", ref):
@@ -182,24 +198,46 @@ def _resolve_upstream_ref() -> str:
     return ""
 
 
-def get_changelog() -> str:
-    """Collect fix/feat commits unique to this fork (not in upstream master).
+def get_changelog(repo_slug: str, commit_sha: str, upstream_commit: str = "") -> str:
+    """Collect recent fix/feat commits unique to this fork (not in its upstream).
 
-    Uses `git log upstream..HEAD` so every contributor to the fork is
-    included, regardless of author name. Falls back to all reachable commits
-    if no upstream ref is found (e.g. local dev clone without the remote).
+    Uses `git log <upstream>..HEAD` so every contributor to the fork is
+    included, regardless of author name. `upstream_commit` is what the workflow
+    resolved from this branch's own upstream branch; without it the range
+    degrades to plain `HEAD`, i.e. **the entire history of UEVR**, upstream
+    commits and all. That is not hypothetical — it is what AFW release
+    beta5-44 shipped with, listing praydog commits from 2022.
+
+    Even with the right base, the range is the fork's whole divergence from
+    upstream, which on the baseline line reaches back to 2023. A release body
+    is meant to say what is new in this build, not to restate the project's
+    history, so the list is capped twice: by age (`CHANGELOG_WINDOW`) and then
+    by count (`CHANGELOG_MAX_ENTRIES`). Whichever bites first wins. Anything
+    trimmed is still one click away via the full commit list.
     """
-    upstream = _resolve_upstream_ref()
+    upstream = _resolve_upstream_ref(upstream_commit)
+    if not upstream:
+        print(
+            "warning: no upstream ref resolved; the changelog will cover all"
+            " reachable commits, not just this fork's. Pass --upstream-commit.",
+            file=sys.stderr,
+        )
     log_range = f"{upstream}..HEAD" if upstream else "HEAD"
 
     raw = git(
         "log", log_range,
         "--no-merges",
+        f"--since={CHANGELOG_WINDOW} ago",
         "--pretty=format:%s|%h|%as",
     )
 
+    empty = (
+        f"- No fix/feat commits in the last {CHANGELOG_WINDOW}"
+        f" \u2014 [full commit list](https://github.com/{repo_slug}/commits/{commit_sha})"
+    )
+
     if not raw:
-        return "- No fix/feat commits in this build"
+        return empty
 
     entries = []
     for line in raw.splitlines():
@@ -215,9 +253,18 @@ def get_changelog() -> str:
         entries.append(f"- [{date}] {subject} ({short_sha})")
 
     if not entries:
-        return "- No fix/feat commits in this build"
+        return empty
 
-    return "\n".join(entries)
+    # git log is newest-first, so the head of the list is what to keep.
+    trimmed = len(entries) - CHANGELOG_MAX_ENTRIES
+    shown = entries[:CHANGELOG_MAX_ENTRIES]
+    if trimmed > 0:
+        shown.append(
+            f"- \u2026and {trimmed} more in the last {CHANGELOG_WINDOW}"
+            f" \u2014 [full commit list](https://github.com/{repo_slug}/commits/{commit_sha})"
+        )
+
+    return "\n".join(shown)
 
 
 def main() -> None:
@@ -240,7 +287,7 @@ def main() -> None:
 
     base = BUILD_LINES[args.variant]
     nightly_url = f"https://github.com/{base['base_repo']}/releases/tag/{args.nightly_tag}"
-    changelog = get_changelog()
+    changelog = get_changelog(args.repo_slug, args.commit_sha, args.upstream_commit)
     header = build_line_header(args.variant, args.repo_slug, args.commit_sha)
 
     notes = f"""{header}
@@ -248,7 +295,7 @@ def main() -> None:
 
 1. Download the **{base['base_label']}** this build is patched against:
    **[{args.nightly_tag}]({nightly_url})**
-2. Extract the nightly zip to a folder.
+2. Extract the base zip to a folder.
 3. Download **{args.zip_name}.zip** from this release.
 4. Extract and **overwrite/replace** the files from step 2 with the files from this release.
 5. Download **{args.plugins_zip_name}.zip** and run ``install-plugins.bat`` to install shaders and presets.
@@ -260,6 +307,9 @@ def main() -> None:
 > nightly or on another build line.
 
 ## Changes
+
+_Recent fix/feat commits, from the last {CHANGELOG_WINDOW}._
+
 {changelog}
 
 {provenance(args.variant, args.upstream_commit, args.commit_sha, args.repo_slug)}
