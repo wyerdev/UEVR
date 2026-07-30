@@ -1,0 +1,16 @@
+# UEVR Shader Preset
+format = 1
+name = Sharpen Only
+
+[CAS]
+enabled = 1
+contrast = 0
+sharpening = 1
+
+[LumaSharpen]
+enabled = 1
+sharp_strength = 0.65
+sharp_clamp = 0.035
+pattern = 1
+offset_bias = 1
+show_sharpen = 0

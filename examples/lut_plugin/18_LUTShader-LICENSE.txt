@@ -1,0 +1,38 @@
+LUTPlugin for UEVR
+==================
+
+Original shader:
+  Marty's LUT shader 1.0 for ReShade 3.0
+  Copyright (c) 2008-2016 Marty McFly (Pascal Gilcher)
+  Source: https://github.com/crosire/reshade-shaders/blob/slim/Shaders/LUT.fx
+
+Modifications:
+  - Ported from ReShade FX to DX11/DX12 C++ plugin with embedded HLSL pixel shader.
+  - LUT image (`lut.png`, 1024x32 RGBA8) loaded as an external texture via
+    `EffectRuntime::replace_external_texture_png()`; selection is hot-swappable.
+  - Added preset discovery across `<UEVR>/data/plugins/shader_assets/` (shipped)
+    and `<persistent>/data/plugins/shader_settings/` (per-game override).
+
+License notice
+--------------
+The upstream `LUT.fx` carries a copyright header but no explicit license grant:
+
+    // ReShade effect file
+    // visit facebook.com/MartyMcModding for news/updates
+    // Marty's LUT shader 1.0 for ReShade 3.0
+    // Copyright (c) 2008-2016 Marty McFly
+
+This plugin includes a derivative HLSL implementation of that algorithm, ported
+with attribution per the same fork precedent used for the CeeJay.dk shaders
+(see `docs/shader-candidates.md`). Credit to Marty McFly / Pascal Gilcher is
+retained here and in the plugin source. No additional grant is claimed.
+
+The C++ wrapper code in `LUTPlugin.cpp` is MIT-licensed.
+
+Bundled LUT images
+------------------
+The PNG LUT images shipped in `examples/lut_plugin/assets/` (`lut.png`,
+`lut_bleach.png`, `lut_cinematic.png`, `lut_cool.png`, `lut_warm.png`) are
+generated procedurally by `scripts/make_test_luts.py` (pure mathematical
+transforms — identity, warm, cool, teal-and-orange, bleach-bypass) and are
+distributed under the same MIT terms as the plugin wrapper.

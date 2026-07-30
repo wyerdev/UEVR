@@ -19,6 +19,9 @@
 #include "ScriptContext.hpp"
 
 namespace uevr {
+// [fork] VEH: define the thread-local script execution depth
+thread_local uint32_t g_is_in_script_call = 0;
+
 class ScriptContexts {
 public:
     void add(std::shared_ptr<ScriptContext> ctx) {
@@ -1161,6 +1164,7 @@ int ScriptContext::setup_bindings() {
 }
 
 bool ScriptContext::global_ufunction_pre_handler(uevr::API::UFunction* fn, uevr::API::UObject* obj, void* frame, void* out_result) {
+    // [fork] VEH: guard Lua UFunction callbacks during crash-handler classification
     bool any_false = false;
 
     g_contexts.for_each([=, &any_false](auto ctx) {
@@ -1177,6 +1181,7 @@ bool ScriptContext::global_ufunction_pre_handler(uevr::API::UFunction* fn, uevr:
             auto fn_obj = sol::make_object(ctx->m_lua.lua_state(), fn);
 
             for (auto& cb : it->second->pre_hooks) try {
+                ScopedScriptCall _sc{};
                 if (sol::object result = ctx->handle_protected_result(cb(fn_obj, obj_obj, locals_obj, out_result)); !result.is<sol::nil_t>() && result.is<bool>() && result.as<bool>() == false) {
                     any_false = true;
                 }
@@ -1192,6 +1197,7 @@ bool ScriptContext::global_ufunction_pre_handler(uevr::API::UFunction* fn, uevr:
 }
 
 void ScriptContext::global_ufunction_post_handler(uevr::API::UFunction* fn, uevr::API::UObject* obj, void* frame, void* result) {
+    // [fork] VEH: guard Lua post-hook callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
         std::scoped_lock __{ ctx->m_ufunction_hooks_mtx };
@@ -1206,6 +1212,7 @@ void ScriptContext::global_ufunction_post_handler(uevr::API::UFunction* fn, uevr
             auto fn_obj = sol::make_object(ctx->m_lua.lua_state(), fn);
 
             for (auto& cb : it->second->post_hooks) try {
+                ScopedScriptCall _sc{};
                 ctx->handle_protected_result(cb(fn_obj, obj_obj, locals_obj, result));
             } catch (const std::exception& e) {
                 ctx->log_error("Exception in global_ufunction_post_handler: " + std::string(e.what()));
@@ -1217,10 +1224,12 @@ void ScriptContext::global_ufunction_post_handler(uevr::API::UFunction* fn, uevr
 }
 
 void ScriptContext::on_xinput_get_state(uint32_t* retval, uint32_t user_index, void* state) {
+    // [fork] VEH: guard Lua input and engine callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
         for (auto& fn : ctx->m_on_xinput_get_state_callbacks) try {
+            ScopedScriptCall _sc{};
             ctx->handle_protected_result(fn(retval, user_index, (XINPUT_STATE*)state));
         } catch (const std::exception& e) {
             ctx->log_error("Exception in on_xinput_get_state: " + std::string(e.what()));
@@ -1231,10 +1240,12 @@ void ScriptContext::on_xinput_get_state(uint32_t* retval, uint32_t user_index, v
 }
 
 void ScriptContext::on_xinput_set_state(uint32_t* retval, uint32_t user_index, void* vibration) {
+    // [fork] VEH: guard Lua input callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
         for (auto& fn : ctx->m_on_xinput_set_state_callbacks) try {
+            ScopedScriptCall _sc{};
             ctx->handle_protected_result(fn(retval, user_index, (XINPUT_VIBRATION*)vibration));
         } catch (const std::exception& e) {
             ctx->log_error("Exception in on_xinput_set_state: " + std::string(e.what()));
@@ -1245,12 +1256,14 @@ void ScriptContext::on_xinput_set_state(uint32_t* retval, uint32_t user_index, v
 }
 
 void ScriptContext::on_pre_engine_tick(UEVR_UGameEngineHandle engine, float delta_seconds) {
+    // [fork] VEH: guard Lua pre-engine callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
         
         auto engine_obj = sol::make_object(ctx->m_lua.lua_state(), (uevr::API::UObject*)engine);
 
         for (auto& fn : ctx->m_on_pre_engine_tick_callbacks) try {
+            ScopedScriptCall _sc{};
             ctx->handle_protected_result(fn(engine_obj, delta_seconds));
         } catch (const std::exception& e) {
             ctx->log_error("Exception in on_pre_engine_tick: " + std::string(e.what()));
@@ -1261,12 +1274,14 @@ void ScriptContext::on_pre_engine_tick(UEVR_UGameEngineHandle engine, float delt
 }
 
 void ScriptContext::on_post_engine_tick(UEVR_UGameEngineHandle engine, float delta_seconds) {
+    // [fork] VEH: guard Lua post-engine callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
         auto engine_obj = sol::make_object(ctx->m_lua.lua_state(), (uevr::API::UObject*)engine);
 
         for (auto& fn : ctx->m_on_post_engine_tick_callbacks) try {
+            ScopedScriptCall _sc{};
             ctx->handle_protected_result(fn(engine_obj, delta_seconds));
         } catch (const std::exception& e) {
             ctx->log_error("Exception in on_post_engine_tick: " + std::string(e.what()));
@@ -1277,10 +1292,12 @@ void ScriptContext::on_post_engine_tick(UEVR_UGameEngineHandle engine, float del
 }
 
 void ScriptContext::on_pre_slate_draw_window_render_thread(UEVR_FSlateRHIRendererHandle renderer, UEVR_FViewportInfoHandle viewport_info) {
+    // [fork] VEH: guard Lua render-thread callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
         for (auto& fn : ctx->m_on_pre_slate_draw_window_render_thread_callbacks) try {
+            ScopedScriptCall _sc{};
             ctx->handle_protected_result(fn(renderer, viewport_info));
         } catch (const std::exception& e) {
             ctx->log_error("Exception in on_pre_slate_draw_window_render_thread: " + std::string(e.what()));
@@ -1291,10 +1308,12 @@ void ScriptContext::on_pre_slate_draw_window_render_thread(UEVR_FSlateRHIRendere
 }
 
 void ScriptContext::on_post_slate_draw_window_render_thread(UEVR_FSlateRHIRendererHandle renderer, UEVR_FViewportInfoHandle viewport_info) {
+    // [fork] VEH: guard Lua render-thread callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
         for (auto& fn : ctx->m_on_post_slate_draw_window_render_thread_callbacks) try {
+            ScopedScriptCall _sc{};
             ctx->handle_protected_result(fn(renderer, viewport_info));
         } catch (const std::exception& e) {
             ctx->log_error("Exception in on_post_slate_draw_window_render_thread: " + std::string(e.what()));
@@ -1305,6 +1324,7 @@ void ScriptContext::on_post_slate_draw_window_render_thread(UEVR_FSlateRHIRender
 }
 
 void ScriptContext::on_early_calculate_stereo_view_offset(UEVR_StereoRenderingDeviceHandle device, int view_index, float world_to_meters, UEVR_Vector3f* position, UEVR_Rotatorf* rotation, bool is_double) {
+    // [fork] VEH: guard Lua stereo callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
@@ -1321,6 +1341,7 @@ void ScriptContext::on_early_calculate_stereo_view_offset(UEVR_StereoRenderingDe
         const auto is_ue5 = lua::utility::is_ue5();
 
         for (auto& fn : ctx->m_on_early_calculate_stereo_view_offset_callbacks) try {
+            ScopedScriptCall _sc{};
             if (is_ue5) {
                 ctx->handle_protected_result(fn(device, view_index, world_to_meters, ue5_position, ue5_rotation, is_double));
             } else {
@@ -1335,6 +1356,7 @@ void ScriptContext::on_early_calculate_stereo_view_offset(UEVR_StereoRenderingDe
 }
 
 void ScriptContext::on_pre_calculate_stereo_view_offset(UEVR_StereoRenderingDeviceHandle device, int view_index, float world_to_meters, UEVR_Vector3f* position, UEVR_Rotatorf* rotation, bool is_double) {
+    // [fork] VEH: guard Lua stereo callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
@@ -1351,6 +1373,7 @@ void ScriptContext::on_pre_calculate_stereo_view_offset(UEVR_StereoRenderingDevi
         const auto is_ue5 = lua::utility::is_ue5();
 
         for (auto& fn : ctx->m_on_pre_calculate_stereo_view_offset_callbacks) try {
+            ScopedScriptCall _sc{};
             if (is_ue5) {
                 ctx->handle_protected_result(fn(device, view_index, world_to_meters, ue5_position, ue5_rotation, is_double));
             } else {
@@ -1365,6 +1388,7 @@ void ScriptContext::on_pre_calculate_stereo_view_offset(UEVR_StereoRenderingDevi
 }
 
 void ScriptContext::on_post_calculate_stereo_view_offset(UEVR_StereoRenderingDeviceHandle device, int view_index, float world_to_meters, UEVR_Vector3f* position, UEVR_Rotatorf* rotation, bool is_double) {
+    // [fork] VEH: guard Lua stereo callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
@@ -1381,6 +1405,7 @@ void ScriptContext::on_post_calculate_stereo_view_offset(UEVR_StereoRenderingDev
         const auto is_ue5 = lua::utility::is_ue5();
 
         for (auto& fn : ctx->m_on_post_calculate_stereo_view_offset_callbacks) try {
+            ScopedScriptCall _sc{};
             if (is_ue5) {
                 ctx->handle_protected_result(fn(device, view_index, world_to_meters, ue5_position, ue5_rotation, is_double));
             } else {
@@ -1395,6 +1420,7 @@ void ScriptContext::on_post_calculate_stereo_view_offset(UEVR_StereoRenderingDev
 }
 
 void ScriptContext::on_pre_viewport_client_draw(UEVR_UGameViewportClientHandle viewport_client, UEVR_FViewportHandle viewport, UEVR_FCanvasHandle canvas) {
+    // [fork] VEH: guard Lua viewport callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
@@ -1405,6 +1431,7 @@ void ScriptContext::on_pre_viewport_client_draw(UEVR_UGameViewportClientHandle v
         auto vpc_sol = sol::make_object(ctx->m_lua.lua_state(), (uevr::API::UGameViewportClient*)viewport_client);
 
         for (auto& fn : ctx->m_on_pre_viewport_client_draw_callbacks) try {
+            ScopedScriptCall _sc{};
             ctx->handle_protected_result(fn(vpc_sol, (uintptr_t)viewport, (uintptr_t)canvas));
         } catch (const std::exception& e) {
             ctx->log_error("Exception in on_pre_viewport_client_draw: " + std::string(e.what()));
@@ -1415,6 +1442,7 @@ void ScriptContext::on_pre_viewport_client_draw(UEVR_UGameViewportClientHandle v
 }
 
 void ScriptContext::on_post_viewport_client_draw(UEVR_UGameViewportClientHandle viewport_client, UEVR_FViewportHandle viewport, UEVR_FCanvasHandle canvas) {
+    // [fork] VEH: guard Lua viewport callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
@@ -1425,6 +1453,7 @@ void ScriptContext::on_post_viewport_client_draw(UEVR_UGameViewportClientHandle 
         auto vpc_sol = sol::make_object(ctx->m_lua.lua_state(), (uevr::API::UGameViewportClient*)viewport_client);
 
         for (auto& fn : ctx->m_on_post_viewport_client_draw_callbacks) try {
+            ScopedScriptCall _sc{};
             ctx->handle_protected_result(fn(vpc_sol, (uintptr_t)viewport, (uintptr_t)canvas));
         } catch (const std::exception& e) {
             ctx->log_error("Exception in on_post_viewport_client_draw: " + std::string(e.what()));
@@ -1435,10 +1464,12 @@ void ScriptContext::on_post_viewport_client_draw(UEVR_UGameViewportClientHandle 
 }
 
 void ScriptContext::on_frame() {
+    // [fork] VEH: guard Lua lifecycle callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
         for (auto& fn : ctx->m_on_frame_callbacks) try {
+            ScopedScriptCall _sc{};
             ctx->handle_protected_result(fn());
         } catch (const std::exception& e) {
             ctx->log_error("Exception in on_frame: " + std::string(e.what()));
@@ -1449,10 +1480,12 @@ void ScriptContext::on_frame() {
 }
 
 void ScriptContext::on_draw_ui() {
+    // [fork] VEH: guard Lua UI callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
         for (auto& fn : ctx->m_on_draw_ui_callbacks) try {
+            ScopedScriptCall _sc{};
             ctx->handle_protected_result(fn());
         } catch (const std::exception& e) {
             ctx->log_error("Exception in on_draw_ui: " + std::string(e.what()));
@@ -1463,10 +1496,12 @@ void ScriptContext::on_draw_ui() {
 }
 
 void ScriptContext::on_script_reset() {
+    // [fork] VEH: guard Lua reset callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
         for (auto& fn : ctx->m_on_script_reset_callbacks) try {
+            ScopedScriptCall _sc{};
             ctx->handle_protected_result(fn());
         } catch (const std::exception& e) {
             ctx->log_error("Exception in on_script_reset: " + std::string(e.what()));
@@ -1477,6 +1512,7 @@ void ScriptContext::on_script_reset() {
 }
 
 void ScriptContext::on_lua_event(std::string_view event_name, std::string_view event_data) {
+    // [fork] VEH: guard Lua event callbacks during crash-handler classification
     g_contexts.for_each([=](auto ctx) {
         std::scoped_lock _{ ctx->m_mtx };
 
@@ -1484,6 +1520,7 @@ void ScriptContext::on_lua_event(std::string_view event_name, std::string_view e
         const char* event_data_data = event_data.data();
 
         for (auto& fn : ctx->m_on_lua_event_callbacks) try {
+            ScopedScriptCall _sc{};
             ctx->handle_protected_result(fn(event_name_data, event_data_data));
         } catch (const std::exception& e) {
             ctx->log_error("Exception in on_lua_event: " + std::string(e.what()));

@@ -1,0 +1,61 @@
+# UEVR Shader Preset
+format = 1
+name = Cinematic
+
+[Curves]
+enabled = 1
+mode = 0
+formula = 4
+contrast = 0.2
+
+[DPX]
+enabled = 1
+rgb_curve_r = 8
+rgb_curve_g = 8
+rgb_curve_b = 8
+rgb_c_r = 0.36
+rgb_c_g = 0.36
+rgb_c_b = 0.34
+contrast = 0.1
+saturation = 3
+colorfulness = 2.5
+strength = 0.15
+
+[LevelsPlus]
+enabled = 1
+enable_levels = 1
+in_black_r = 0.059
+in_black_g = 0.059
+in_black_b = 0.059
+in_white_r = 0.9137
+in_white_g = 0.8706
+in_white_b = 0.8275
+in_gamma_r = 1
+in_gamma_g = 1
+in_gamma_b = 1
+out_black_r = 0
+out_black_g = 0
+out_black_b = 0
+out_white_r = 1
+out_white_g = 1
+out_white_b = 1
+range_shift_r = 0
+range_shift_g = 0
+range_shift_b = 0
+range_shift_sw = 0
+aces_mode = 0
+aces_lum_r = 100
+aces_lum_g = 100
+aces_lum_b = 100
+highlight_clipping = 0
+
+[Tonemap]
+enabled = 1
+gamma = 0.95
+exposure = 0.05
+saturation = 0.15
+bleach = 0
+defog = 0
+fog_color_r = 0
+fog_color_g = 0
+fog_color_b = 1

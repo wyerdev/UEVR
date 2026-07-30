@@ -17,6 +17,11 @@
 #include "d3d12/DirectXTK.hpp"
 
 #include "D3D12Component.hpp"
+// [fork] shader-plugin: notify plugins when D3D12 resources are rebuilt
+#include "../PluginLoader.hpp"
+
+// [fork] shader-plugin: in-place TextureContext update lives in pluginloader/
+#include "../pluginloader/D3D12Helpers.hpp"
 
 //#define AFR_DEPTH_TEMP_DISABLED
 
@@ -1003,7 +1008,8 @@ void D3D12Component::draw_spectator_view(ID3D12GraphicsCommandList* command_list
     const auto desc = backbuffer->GetDesc();
 
     if (backbuffer_ctx.texture.Get() != backbuffer.Get()) {
-        if (!backbuffer_ctx.setup(device, backbuffer.Get(), std::nullopt, std::nullopt, L"Backbuffer")) {
+        // [fork] shader-plugin: free-function in-place texture update
+        if (!uevr::d3d12_helpers::update_texture(backbuffer_ctx, device, backbuffer.Get(), std::nullopt, std::nullopt, L"Backbuffer")) {
             spdlog::error("[VR] Failed to setup backbuffer RTV (D3D12)");
             return;
         }
@@ -1186,7 +1192,8 @@ void D3D12Component::clear_backbuffer() {
     auto& backbuffer_ctx = *backbuffer_ctx_ptr;
 
     if (backbuffer_ctx.texture.Get() != backbuffer.Get()) {
-        if (!backbuffer_ctx.setup(device, backbuffer.Get(), std::nullopt, std::nullopt, L"Backbuffer")) {
+        // [fork] shader-plugin: free-function in-place texture update
+        if (!uevr::d3d12_helpers::update_texture(backbuffer_ctx, device, backbuffer.Get(), std::nullopt, std::nullopt, L"Backbuffer")) {
             spdlog::error("[VR] Failed to setup backbuffer RTV (D3D12)");
             return;
         }
@@ -1224,6 +1231,9 @@ void D3D12Component::on_post_present(VR* vr) {
 
 void D3D12Component::on_reset(VR* vr) {
     m_force_reset = true;
+
+    // [fork] shader-plugin pre-render command list — drain GPU + release
+    m_plugin_cl.on_reset();
 
     auto runtime = vr->get_runtime();
 
@@ -1496,6 +1506,13 @@ bool D3D12Component::setup() {
 
     spdlog::info("[VR] d3d12 textures have been setup");
     m_force_reset = false;
+
+    // [fork] shader-plugin pre-render command list — re-enable dispatch after successful setup
+    m_plugin_cl.on_setup_complete();
+
+    // Notify plugins that the D3D12 pipeline was rebuilt so they can
+    // release stale resources (cached textures, descriptor heaps, etc.).
+    PluginLoader::get()->on_device_reset();
 
     return true;
 }

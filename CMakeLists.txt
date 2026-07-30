@@ -382,13 +382,21 @@ set(CMKR_TARGET plugin_renderlib)
 set(plugin_renderlib_SOURCES "")
 
 list(APPEND plugin_renderlib_SOURCES
+	"examples/renderlib/effects/effect_runtime.cpp"
+	"examples/renderlib/effects/effect_runtime_d3d11.cpp"
+	"examples/renderlib/effects/effect_runtime_d3d12.cpp"
+	"examples/renderlib/effects/texture_loader.cpp"
 	"examples/renderlib/imgui/imgui_impl_dx11.cpp"
 	"examples/renderlib/imgui/imgui_impl_dx12.cpp"
 	"examples/renderlib/imgui/imgui_impl_win32.cpp"
 	"examples/renderlib/rendering/d3d11.cpp"
 	"examples/renderlib/rendering/d3d12.cpp"
+	"examples/renderlib/effects/effect_internal.hpp"
+	"examples/renderlib/effects/effect_runtime.hpp"
+	"examples/renderlib/effects/scene_warning.hpp"
 	"examples/renderlib/imgui/font_robotomedium.hpp"
 	"examples/renderlib/imgui/re2_imconfig.hpp"
+	"examples/renderlib/plugin_assets.hpp"
 	"examples/renderlib/rendering/d3d11.hpp"
 	"examples/renderlib/rendering/d3d12.hpp"
 	"examples/renderlib/rendering/shared.hpp"
@@ -422,6 +430,7 @@ target_compile_options(plugin_renderlib PUBLIC
 target_include_directories(plugin_renderlib PUBLIC
 	"examples/renderlib"
 	"include/"
+	"dependencies/stb"
 )
 
 target_link_libraries(plugin_renderlib PUBLIC
@@ -463,6 +472,1056 @@ target_include_directories(example_plugin PUBLIC
 
 target_link_libraries(example_plugin PUBLIC
 	plugin_renderlib
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target fakehdr_plugin
+set(CMKR_TARGET fakehdr_plugin)
+set(fakehdr_plugin_SOURCES "")
+
+list(APPEND fakehdr_plugin_SOURCES
+	"examples/fakehdr_plugin/FakeHDRPlugin.cpp"
+)
+
+list(APPEND fakehdr_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${fakehdr_plugin_SOURCES})
+add_library(fakehdr_plugin SHARED)
+
+if(fakehdr_plugin_SOURCES)
+	target_sources(fakehdr_plugin PRIVATE ${fakehdr_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${fakehdr_plugin_SOURCES})
+
+target_compile_features(fakehdr_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(fakehdr_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(fakehdr_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(fakehdr_plugin PROPERTIES
+	OUTPUT_NAME
+		FakeHDRShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target curves_plugin
+set(CMKR_TARGET curves_plugin)
+set(curves_plugin_SOURCES "")
+
+list(APPEND curves_plugin_SOURCES
+	"examples/curves_plugin/CurvesPlugin.cpp"
+)
+
+list(APPEND curves_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${curves_plugin_SOURCES})
+add_library(curves_plugin SHARED)
+
+if(curves_plugin_SOURCES)
+	target_sources(curves_plugin PRIVATE ${curves_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${curves_plugin_SOURCES})
+
+target_compile_features(curves_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(curves_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(curves_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(curves_plugin PROPERTIES
+	OUTPUT_NAME
+		CurvesShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target technicolor_plugin
+set(CMKR_TARGET technicolor_plugin)
+set(technicolor_plugin_SOURCES "")
+
+list(APPEND technicolor_plugin_SOURCES
+	"examples/technicolor_plugin/TechnicolorPlugin.cpp"
+)
+
+list(APPEND technicolor_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${technicolor_plugin_SOURCES})
+add_library(technicolor_plugin SHARED)
+
+if(technicolor_plugin_SOURCES)
+	target_sources(technicolor_plugin PRIVATE ${technicolor_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${technicolor_plugin_SOURCES})
+
+target_compile_features(technicolor_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(technicolor_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(technicolor_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(technicolor_plugin PROPERTIES
+	OUTPUT_NAME
+		TechnicolorShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target technicolor2_plugin
+set(CMKR_TARGET technicolor2_plugin)
+set(technicolor2_plugin_SOURCES "")
+
+list(APPEND technicolor2_plugin_SOURCES
+	"examples/technicolor2_plugin/Technicolor2Plugin.cpp"
+)
+
+list(APPEND technicolor2_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${technicolor2_plugin_SOURCES})
+add_library(technicolor2_plugin SHARED)
+
+if(technicolor2_plugin_SOURCES)
+	target_sources(technicolor2_plugin PRIVATE ${technicolor2_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${technicolor2_plugin_SOURCES})
+
+target_compile_features(technicolor2_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(technicolor2_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(technicolor2_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(technicolor2_plugin PROPERTIES
+	OUTPUT_NAME
+		Technicolor2Shader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target filmgrain2_plugin
+set(CMKR_TARGET filmgrain2_plugin)
+set(filmgrain2_plugin_SOURCES "")
+
+list(APPEND filmgrain2_plugin_SOURCES
+	"examples/filmgrain2_plugin/FilmGrain2Plugin.cpp"
+)
+
+list(APPEND filmgrain2_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${filmgrain2_plugin_SOURCES})
+add_library(filmgrain2_plugin SHARED)
+
+if(filmgrain2_plugin_SOURCES)
+	target_sources(filmgrain2_plugin PRIVATE ${filmgrain2_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${filmgrain2_plugin_SOURCES})
+
+target_compile_features(filmgrain2_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(filmgrain2_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(filmgrain2_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(filmgrain2_plugin PROPERTIES
+	OUTPUT_NAME
+		FilmGrain2Shader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target levelsplus_plugin
+set(CMKR_TARGET levelsplus_plugin)
+set(levelsplus_plugin_SOURCES "")
+
+list(APPEND levelsplus_plugin_SOURCES
+	"examples/levelsplus_plugin/LevelsPlusPlugin.cpp"
+)
+
+list(APPEND levelsplus_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${levelsplus_plugin_SOURCES})
+add_library(levelsplus_plugin SHARED)
+
+if(levelsplus_plugin_SOURCES)
+	target_sources(levelsplus_plugin PRIVATE ${levelsplus_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${levelsplus_plugin_SOURCES})
+
+target_compile_features(levelsplus_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(levelsplus_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(levelsplus_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(levelsplus_plugin PROPERTIES
+	OUTPUT_NAME
+		LevelsPlusShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target colourfulness_plugin
+set(CMKR_TARGET colourfulness_plugin)
+set(colourfulness_plugin_SOURCES "")
+
+list(APPEND colourfulness_plugin_SOURCES
+	"examples/colourfulness_plugin/ColourfulnessPlugin.cpp"
+)
+
+list(APPEND colourfulness_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${colourfulness_plugin_SOURCES})
+add_library(colourfulness_plugin SHARED)
+
+if(colourfulness_plugin_SOURCES)
+	target_sources(colourfulness_plugin PRIVATE ${colourfulness_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${colourfulness_plugin_SOURCES})
+
+target_compile_features(colourfulness_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(colourfulness_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(colourfulness_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(colourfulness_plugin PROPERTIES
+	OUTPUT_NAME
+		ColourfulnessShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target liftgammagain_plugin
+set(CMKR_TARGET liftgammagain_plugin)
+set(liftgammagain_plugin_SOURCES "")
+
+list(APPEND liftgammagain_plugin_SOURCES
+	"examples/liftgammagain_plugin/LiftGammaGainPlugin.cpp"
+)
+
+list(APPEND liftgammagain_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${liftgammagain_plugin_SOURCES})
+add_library(liftgammagain_plugin SHARED)
+
+if(liftgammagain_plugin_SOURCES)
+	target_sources(liftgammagain_plugin PRIVATE ${liftgammagain_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${liftgammagain_plugin_SOURCES})
+
+target_compile_features(liftgammagain_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(liftgammagain_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(liftgammagain_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(liftgammagain_plugin PROPERTIES
+	OUTPUT_NAME
+		LiftGammaGainShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target vibrance_plugin
+set(CMKR_TARGET vibrance_plugin)
+set(vibrance_plugin_SOURCES "")
+
+list(APPEND vibrance_plugin_SOURCES
+	"examples/vibrance_plugin/VibrancePlugin.cpp"
+)
+
+list(APPEND vibrance_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${vibrance_plugin_SOURCES})
+add_library(vibrance_plugin SHARED)
+
+if(vibrance_plugin_SOURCES)
+	target_sources(vibrance_plugin PRIVATE ${vibrance_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${vibrance_plugin_SOURCES})
+
+target_compile_features(vibrance_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(vibrance_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(vibrance_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(vibrance_plugin PROPERTIES
+	OUTPUT_NAME
+		VibranceShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target tonemap_plugin
+set(CMKR_TARGET tonemap_plugin)
+set(tonemap_plugin_SOURCES "")
+
+list(APPEND tonemap_plugin_SOURCES
+	"examples/tonemap_plugin/TonemapPlugin.cpp"
+)
+
+list(APPEND tonemap_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${tonemap_plugin_SOURCES})
+add_library(tonemap_plugin SHARED)
+
+if(tonemap_plugin_SOURCES)
+	target_sources(tonemap_plugin PRIVATE ${tonemap_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${tonemap_plugin_SOURCES})
+
+target_compile_features(tonemap_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(tonemap_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(tonemap_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(tonemap_plugin PROPERTIES
+	OUTPUT_NAME
+		TonemapShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target dpx_plugin
+set(CMKR_TARGET dpx_plugin)
+set(dpx_plugin_SOURCES "")
+
+list(APPEND dpx_plugin_SOURCES
+	"examples/dpx_plugin/DPXPlugin.cpp"
+)
+
+list(APPEND dpx_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${dpx_plugin_SOURCES})
+add_library(dpx_plugin SHARED)
+
+if(dpx_plugin_SOURCES)
+	target_sources(dpx_plugin PRIVATE ${dpx_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${dpx_plugin_SOURCES})
+
+target_compile_features(dpx_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(dpx_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(dpx_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(dpx_plugin PROPERTIES
+	OUTPUT_NAME
+		DPXShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target hslshift_plugin
+set(CMKR_TARGET hslshift_plugin)
+set(hslshift_plugin_SOURCES "")
+
+list(APPEND hslshift_plugin_SOURCES
+	"examples/hslshift_plugin/HSLShiftPlugin.cpp"
+)
+
+list(APPEND hslshift_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${hslshift_plugin_SOURCES})
+add_library(hslshift_plugin SHARED)
+
+if(hslshift_plugin_SOURCES)
+	target_sources(hslshift_plugin PRIVATE ${hslshift_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${hslshift_plugin_SOURCES})
+
+target_compile_features(hslshift_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(hslshift_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(hslshift_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(hslshift_plugin PROPERTIES
+	OUTPUT_NAME
+		HSLShiftShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target filmicpass_plugin
+set(CMKR_TARGET filmicpass_plugin)
+set(filmicpass_plugin_SOURCES "")
+
+list(APPEND filmicpass_plugin_SOURCES
+	"examples/filmicpass_plugin/FilmicPassPlugin.cpp"
+)
+
+list(APPEND filmicpass_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${filmicpass_plugin_SOURCES})
+add_library(filmicpass_plugin SHARED)
+
+if(filmicpass_plugin_SOURCES)
+	target_sources(filmicpass_plugin PRIVATE ${filmicpass_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${filmicpass_plugin_SOURCES})
+
+target_compile_features(filmicpass_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(filmicpass_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(filmicpass_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(filmicpass_plugin PROPERTIES
+	OUTPUT_NAME
+		FilmicPassShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target clarity_plugin
+set(CMKR_TARGET clarity_plugin)
+set(clarity_plugin_SOURCES "")
+
+list(APPEND clarity_plugin_SOURCES
+	"examples/clarity_plugin/ClarityPlugin.cpp"
+)
+
+list(APPEND clarity_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${clarity_plugin_SOURCES})
+add_library(clarity_plugin SHARED)
+
+if(clarity_plugin_SOURCES)
+	target_sources(clarity_plugin PRIVATE ${clarity_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${clarity_plugin_SOURCES})
+
+target_compile_features(clarity_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(clarity_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(clarity_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(clarity_plugin PROPERTIES
+	OUTPUT_NAME
+		ClarityShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target cas_plugin
+set(CMKR_TARGET cas_plugin)
+set(cas_plugin_SOURCES "")
+
+list(APPEND cas_plugin_SOURCES
+	"examples/cas_plugin/CASPlugin.cpp"
+)
+
+list(APPEND cas_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${cas_plugin_SOURCES})
+add_library(cas_plugin SHARED)
+
+if(cas_plugin_SOURCES)
+	target_sources(cas_plugin PRIVATE ${cas_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${cas_plugin_SOURCES})
+
+target_compile_features(cas_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(cas_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(cas_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(cas_plugin PROPERTIES
+	OUTPUT_NAME
+		CASShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target lumasharpen_plugin
+set(CMKR_TARGET lumasharpen_plugin)
+set(lumasharpen_plugin_SOURCES "")
+
+list(APPEND lumasharpen_plugin_SOURCES
+	"examples/lumasharpen_plugin/LumaSharpenPlugin.cpp"
+)
+
+list(APPEND lumasharpen_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${lumasharpen_plugin_SOURCES})
+add_library(lumasharpen_plugin SHARED)
+
+if(lumasharpen_plugin_SOURCES)
+	target_sources(lumasharpen_plugin PRIVATE ${lumasharpen_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${lumasharpen_plugin_SOURCES})
+
+target_compile_features(lumasharpen_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(lumasharpen_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(lumasharpen_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(lumasharpen_plugin PROPERTIES
+	OUTPUT_NAME
+		LumaSharpenShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target deband_plugin
+set(CMKR_TARGET deband_plugin)
+set(deband_plugin_SOURCES "")
+
+list(APPEND deband_plugin_SOURCES
+	"examples/deband_plugin/DebandPlugin.cpp"
+)
+
+list(APPEND deband_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${deband_plugin_SOURCES})
+add_library(deband_plugin SHARED)
+
+if(deband_plugin_SOURCES)
+	target_sources(deband_plugin PRIVATE ${deband_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${deband_plugin_SOURCES})
+
+target_compile_features(deband_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(deband_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(deband_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(deband_plugin PROPERTIES
+	OUTPUT_NAME
+		DebandShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target lut_plugin
+set(CMKR_TARGET lut_plugin)
+set(lut_plugin_SOURCES "")
+
+list(APPEND lut_plugin_SOURCES
+	"examples/lut_plugin/LUTPlugin.cpp"
+)
+
+list(APPEND lut_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${lut_plugin_SOURCES})
+add_library(lut_plugin SHARED)
+
+if(lut_plugin_SOURCES)
+	target_sources(lut_plugin PRIVATE ${lut_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${lut_plugin_SOURCES})
+
+target_compile_features(lut_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(lut_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(lut_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(lut_plugin PROPERTIES
+	OUTPUT_NAME
+		LUTShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target fxaa_plugin
+set(CMKR_TARGET fxaa_plugin)
+set(fxaa_plugin_SOURCES "")
+
+list(APPEND fxaa_plugin_SOURCES
+	"examples/fxaa_plugin/FXAAPlugin.cpp"
+)
+
+list(APPEND fxaa_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${fxaa_plugin_SOURCES})
+add_library(fxaa_plugin SHARED)
+
+if(fxaa_plugin_SOURCES)
+	target_sources(fxaa_plugin PRIVATE ${fxaa_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${fxaa_plugin_SOURCES})
+
+target_compile_features(fxaa_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(fxaa_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(fxaa_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(fxaa_plugin PROPERTIES
+	OUTPUT_NAME
+		FXAAShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target bloom_plugin
+set(CMKR_TARGET bloom_plugin)
+set(bloom_plugin_SOURCES "")
+
+list(APPEND bloom_plugin_SOURCES
+	"examples/bloom_plugin/BloomPlugin.cpp"
+)
+
+list(APPEND bloom_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${bloom_plugin_SOURCES})
+add_library(bloom_plugin SHARED)
+
+if(bloom_plugin_SOURCES)
+	target_sources(bloom_plugin PRIVATE ${bloom_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${bloom_plugin_SOURCES})
+
+target_compile_features(bloom_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(bloom_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(bloom_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(bloom_plugin PROPERTIES
+	OUTPUT_NAME
+		BloomShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target adaptive_tonemapper_plugin
+set(CMKR_TARGET adaptive_tonemapper_plugin)
+set(adaptive_tonemapper_plugin_SOURCES "")
+
+list(APPEND adaptive_tonemapper_plugin_SOURCES
+	"examples/adaptive_tonemapper_plugin/AdaptiveTonemapperPlugin.cpp"
+)
+
+list(APPEND adaptive_tonemapper_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${adaptive_tonemapper_plugin_SOURCES})
+add_library(adaptive_tonemapper_plugin SHARED)
+
+if(adaptive_tonemapper_plugin_SOURCES)
+	target_sources(adaptive_tonemapper_plugin PRIVATE ${adaptive_tonemapper_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${adaptive_tonemapper_plugin_SOURCES})
+
+target_compile_features(adaptive_tonemapper_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(adaptive_tonemapper_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(adaptive_tonemapper_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(adaptive_tonemapper_plugin PROPERTIES
+	OUTPUT_NAME
+		AdaptiveTonemapperShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target fgfx_large_scale_perceptual_obscurance_irradiance_plugin
+set(CMKR_TARGET fgfx_large_scale_perceptual_obscurance_irradiance_plugin)
+set(fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES "")
+
+list(APPEND fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES
+	"examples/fgfx_large_scale_perceptual_obscurance_irradiance_plugin/FGFXLargeScalePerceptualObscuranceIrradiancePlugin.cpp"
+)
+
+list(APPEND fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES})
+add_library(fgfx_large_scale_perceptual_obscurance_irradiance_plugin SHARED)
+
+if(fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES)
+	target_sources(fgfx_large_scale_perceptual_obscurance_irradiance_plugin PRIVATE ${fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${fgfx_large_scale_perceptual_obscurance_irradiance_plugin_SOURCES})
+
+target_compile_features(fgfx_large_scale_perceptual_obscurance_irradiance_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(fgfx_large_scale_perceptual_obscurance_irradiance_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(fgfx_large_scale_perceptual_obscurance_irradiance_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(fgfx_large_scale_perceptual_obscurance_irradiance_plugin PROPERTIES
+	OUTPUT_NAME
+		FGFXLargeScalePerceptualObscuranceIrradianceShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target eyeadaption_plugin
+set(CMKR_TARGET eyeadaption_plugin)
+set(eyeadaption_plugin_SOURCES "")
+
+list(APPEND eyeadaption_plugin_SOURCES
+	"examples/eyeadaption_plugin/EyeAdaptionPlugin.cpp"
+)
+
+list(APPEND eyeadaption_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${eyeadaption_plugin_SOURCES})
+add_library(eyeadaption_plugin SHARED)
+
+if(eyeadaption_plugin_SOURCES)
+	target_sources(eyeadaption_plugin PRIVATE ${eyeadaption_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${eyeadaption_plugin_SOURCES})
+
+target_compile_features(eyeadaption_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(eyeadaption_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(eyeadaption_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(eyeadaption_plugin PROPERTIES
+	OUTPUT_NAME
+		EyeAdaptionShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target blackcrush_plugin
+set(CMKR_TARGET blackcrush_plugin)
+set(blackcrush_plugin_SOURCES "")
+
+list(APPEND blackcrush_plugin_SOURCES
+	"examples/blackcrush_plugin/BlackCrushPlugin.cpp"
+)
+
+list(APPEND blackcrush_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${blackcrush_plugin_SOURCES})
+add_library(blackcrush_plugin SHARED)
+
+if(blackcrush_plugin_SOURCES)
+	target_sources(blackcrush_plugin PRIVATE ${blackcrush_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${blackcrush_plugin_SOURCES})
+
+target_compile_features(blackcrush_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(blackcrush_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(blackcrush_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(blackcrush_plugin PROPERTIES
+	OUTPUT_NAME
+		BlackCrushShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target cartoon_plugin
+set(CMKR_TARGET cartoon_plugin)
+set(cartoon_plugin_SOURCES "")
+
+list(APPEND cartoon_plugin_SOURCES
+	"examples/cartoon_plugin/CartoonPlugin.cpp"
+)
+
+list(APPEND cartoon_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${cartoon_plugin_SOURCES})
+add_library(cartoon_plugin SHARED)
+
+if(cartoon_plugin_SOURCES)
+	target_sources(cartoon_plugin PRIVATE ${cartoon_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${cartoon_plugin_SOURCES})
+
+target_compile_features(cartoon_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(cartoon_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(cartoon_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(cartoon_plugin PROPERTIES
+	OUTPUT_NAME
+		CartoonShader
 )
 
 unset(CMKR_TARGET)
@@ -784,10 +1843,17 @@ list(APPEND uevr_SOURCES
 	"src/mods/bindings/FS.cpp"
 	"src/mods/bindings/ImGui.cpp"
 	"src/mods/bindings/Json.cpp"
+	"src/mods/pluginloader/D3D12Helpers.cpp"
 	"src/mods/pluginloader/FFakeStereoRenderingFunctions.cpp"
 	"src/mods/pluginloader/FRHITexture2DFunctions.cpp"
 	"src/mods/pluginloader/FRenderTargetPoolHook.cpp"
 	"src/mods/pluginloader/FUObjectArrayFunctions.cpp"
+	"src/mods/pluginloader/PluginCommandListD3D12.cpp"
+	"src/mods/pluginloader/PluginRenderDispatch.cpp"
+	"src/mods/pluginloader/PresetIni.cpp"
+	"src/mods/pluginloader/PresetSystem.cpp"
+	"src/mods/pluginloader/SettingsRegistry.cpp"
+	"src/mods/pluginloader/ShaderInfraRegistration.cpp"
 	"src/mods/pluginloader/UScriptStructFunctions.cpp"
 	"src/mods/uobjecthook/SDKDumper.cpp"
 	"src/mods/vr/Bindings.cpp"
@@ -831,10 +1897,17 @@ list(APPEND uevr_SOURCES
 	"src/mods/bindings/FS.hpp"
 	"src/mods/bindings/ImGui.hpp"
 	"src/mods/bindings/Json.hpp"
+	"src/mods/pluginloader/D3D12Helpers.hpp"
 	"src/mods/pluginloader/FFakeStereoRenderingFunctions.hpp"
 	"src/mods/pluginloader/FRHITexture2DFunctions.hpp"
 	"src/mods/pluginloader/FRenderTargetPoolHook.hpp"
 	"src/mods/pluginloader/FUObjectArrayFunctions.hpp"
+	"src/mods/pluginloader/PluginCommandListD3D12.hpp"
+	"src/mods/pluginloader/PluginRenderDispatch.hpp"
+	"src/mods/pluginloader/PresetIni.hpp"
+	"src/mods/pluginloader/PresetSystem.hpp"
+	"src/mods/pluginloader/SettingsRegistry.hpp"
+	"src/mods/pluginloader/ShaderInfraRegistration.hpp"
 	"src/mods/pluginloader/UScriptStructFunctions.hpp"
 	"src/mods/uobjecthook/SDKDumper.hpp"
 	"src/mods/vr/CVarManager.hpp"

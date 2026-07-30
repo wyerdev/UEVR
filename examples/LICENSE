@@ -1,4 +1,8 @@
-This license governs the files in this directory ("examples"), its subdirectories, and is separate from the license for the rest of the UEVR codebase.
+This license governs original UEVR example/plugin wrapper code in this directory
+("examples") and its subdirectories. It does not replace or relicense bundled or
+ported third-party shader code, shader math, textures, or other assets. Those
+materials remain governed by their own upstream notices, which are documented in
+the per-plugin `*-LICENSE.txt` files.
 
 The MIT License
 
