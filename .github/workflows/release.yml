@@ -7,6 +7,17 @@ on:
 
 env:
   BUILD_TYPE: Release
+  # Which build this workflow releases. VARIANT_ID must match UEVR_VARIANT_ID
+  # in include/uevr/Variant.hpp and the BUILD_LINES table in
+  # scripts/generate_release_notes.py. Each integration branch changes these
+  # five values and nothing else, so its releases get their own tag names and
+  # zip names and never mix with the main build's. Only the main build sets
+  # IS_LATEST to true — GitHub only has one "Latest" badge for the whole repo.
+  VARIANT_ID: reshade
+  LINE_NAME: UEVR ReShade
+  LINE_FILE_ID: ReShade
+  TAG_PREFIX: uevr-reshade-release
+  IS_LATEST: true
 
 permissions:
   contents: write
@@ -32,14 +43,18 @@ jobs:
             $num = "00000"
           }
           echo "NIGHTLY_NUM=$num" >> $env:GITHUB_ENV
-          echo "ZIP_NAME=uevr-patched-$num-${{github.run_number}}" >> $env:GITHUB_ENV
+          $build = "$num-${{github.run_number}}"
+          echo "BUILD_ID=$build" >> $env:GITHUB_ENV
+          echo "RELEASE_TAG=${{env.TAG_PREFIX}}-$build" >> $env:GITHUB_ENV
+          echo "ZIP_NAME=UEVR-${{env.LINE_FILE_ID}}-$build-Core" >> $env:GITHUB_ENV
+          echo "PLUGINS_ZIP_NAME=UEVR-${{env.LINE_FILE_ID}}-$build-ShaderPlugins" >> $env:GITHUB_ENV
         shell: powershell
 
       - name: Create annotated tag locally
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git tag -a "patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}" -m "UEVR Patched ${{env.NIGHTLY_NUM}}-${{github.run_number}}"
+          git tag -a "${{env.RELEASE_TAG}}" -m "${{env.LINE_NAME}} | ${{env.BUILD_ID}}"
         shell: bash
 
       - name: Build
@@ -102,14 +117,14 @@ jobs:
           Copy-Item "${{github.workspace}}/uninstall-plugins.bat" "$staging/"
 
           # Create zip
-          7z a "${{github.workspace}}/uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip" "$staging/*"
+          7z a "${{github.workspace}}/${{env.PLUGINS_ZIP_NAME}}.zip" "$staging/*"
         shell: powershell
 
       - name: Hash zips
         run: |
           $mainHash = Get-FileHash -Algorithm SHA256 ${{github.workspace}}/${{env.ZIP_NAME}}.zip
           $mainHash.Hash | Out-File -FilePath ${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256
-          $pluginZip = "${{github.workspace}}/uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip"
+          $pluginZip = "${{github.workspace}}/${{env.PLUGINS_ZIP_NAME}}.zip"
           $pluginHash = Get-FileHash -Algorithm SHA256 $pluginZip
           $pluginHash.Hash | Out-File -FilePath "$pluginZip.sha256"
         shell: powershell
@@ -118,6 +133,7 @@ jobs:
         run: |
           git remote add upstream https://github.com/praydog/UEVR.git
           git fetch upstream master --no-tags
+          echo "UPSTREAM_SHA=$(git rev-parse upstream/master)" >> "$GITHUB_ENV"
         shell: bash
 
       - name: Generate release notes
@@ -125,23 +141,27 @@ jobs:
           python "${{github.workspace}}/scripts/generate_release_notes.py" `
             --nightly-tag "${{env.NIGHTLY_TAG}}" `
             --zip-name "${{env.ZIP_NAME}}" `
-            --plugins-zip-name "uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}" `
+            --plugins-zip-name "${{env.PLUGINS_ZIP_NAME}}" `
             --repo-slug "${{github.repository}}" `
             --commit-sha "${{github.sha}}" `
+            --variant "${{env.VARIANT_ID}}" `
+            --upstream-commit "${{env.UPSTREAM_SHA}}" `
             --out-file "${{github.workspace}}/RELEASE_NOTES.md"
         shell: powershell
 
       - name: Push annotated tag
         run: |
-          git push origin "patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}"
+          git push origin "${{env.RELEASE_TAG}}"
         shell: bash
 
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          tag: patched-${{env.NIGHTLY_NUM}}-${{github.run_number}}
-          name: "UEVR Patched ${{env.NIGHTLY_NUM}}-${{github.run_number}} (${{github.sha}})"
-          artifacts: "${{github.workspace}}/${{env.ZIP_NAME}}.zip,${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256,${{github.workspace}}/uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip,${{github.workspace}}/uevr-plugins-${{env.NIGHTLY_NUM}}-${{github.run_number}}.zip.sha256"
+          tag: ${{env.RELEASE_TAG}}
+          name: "${{env.LINE_NAME}} | ${{env.BUILD_ID}}"
+          artifacts: "${{github.workspace}}/${{env.ZIP_NAME}}.zip,${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256,${{github.workspace}}/${{env.PLUGINS_ZIP_NAME}}.zip,${{github.workspace}}/${{env.PLUGINS_ZIP_NAME}}.zip.sha256"
           bodyFile: ${{github.workspace}}/RELEASE_NOTES.md
-          makeLatest: true
+          # Only the main build gets GitHub's "Latest" badge. The other builds
+          # publish as normal releases so they never take it over.
+          makeLatest: ${{env.IS_LATEST}}
           token: ${{secrets.GITHUB_TOKEN}}
