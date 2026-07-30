@@ -34,13 +34,30 @@ CHANGELOG_MAX_ENTRIES = 7
 # one release. Unpublished lines are still listed, but never linked, so we
 # never point people at an empty search. Flip it to True in the same change
 # that adds the line's release workflow.
+#
+# "keyword" is the word that identifies this line on the releases page.
+# GitHub's releases filter is an AND over the words of the query, matched
+# against each release's title and body (measured 2026-07-30). So
+# `?q=<tag_prefix>` returns exactly this line's releases, but only while two
+# rules hold:
+#
+#   1. No line's word set may be a subset of another's -- that is what
+#      "mainline" is for. Without it, `uevr-reshade-release` is a subset of
+#      `uevr-reshade-afw-release` and the main line's filter also returns AFW.
+#   2. No release body may contain another line's keyword, or that release
+#      shows up under the other line's filter. check_keywords() enforces this.
+#
+# A keyword must therefore be a word that appears nowhere else in a release
+# body. "core" and "base" are already used by the install steps; both were
+# rejected for that reason.
 BUILD_LINES = {
     "reshade": {
-        "name": "UEVR ReShade",
+        "name": "UEVR ReShade Mainline",
         "upstream": "[praydog/UEVR](https://github.com/praydog/UEVR) `master`",
         "upstream_repo": "praydog/UEVR",
         "upstream_branch": "master",
-        "tag_query": "uevr-reshade-release",
+        "tag_prefix": "uevr-reshade-mainline-release",
+        "keyword": "mainline",
         "published": True,
         # Where BASE_NIGHTLY's tag lives, and what to call it in the install
         # steps. Each line is patched against a different upstream build.
@@ -53,7 +70,8 @@ BUILD_LINES = {
                     " \u2014 asynchronous frame warp",
         "upstream_repo": "PureDark/UEVR",
         "upstream_branch": "AFW",
-        "tag_query": "uevr-reshade-afw-release",
+        "tag_prefix": "uevr-reshade-afw-release",
+        "keyword": "afw",
         "published": True,
         # AFW is not a praydog nightly: the base is PureDark's own release,
         # which is also the only source of the proprietary PDAFWPlugin.dll
@@ -70,12 +88,16 @@ CREDITS_DOC = Path(__file__).resolve().parent.parent / "docs" / "reference" / "I
 CREDITS_HEADING = "## Credits"
 
 
-def credits(repo_slug: str, commit_sha: str) -> str:
+def credits(repo_slug: str, commit_sha: str, variant: str) -> str:
     """Return INSTALL.md's Credits section, ready to paste into a release body.
 
     The text is copied into the release rather than linked, so the credits are
     visible on the release page itself. It is copied from INSTALL.md every
     time, so that file stays the only place the credits are written down.
+
+    Bullets crediting a *different* build line are dropped. A release only
+    ships one line's code, so crediting the others is wrong anyway -- and it
+    would put their keyword in this body, breaking the releases filter.
     """
     text = CREDITS_DOC.read_text(encoding="utf-8")
     start = text.find(CREDITS_HEADING)
@@ -86,6 +108,19 @@ def credits(repo_slug: str, commit_sha: str) -> str:
 
     end = text.find("\n## ", start + len(CREDITS_HEADING))
     section = text[start:] if end == -1 else text[start:end]
+
+    foreign = [
+        other["keyword"] for other_id, other in BUILD_LINES.items()
+        if other_id != variant
+    ]
+    kept = [
+        para for para in section.split("\n")
+        if not (para.startswith("- ") and any(
+            re.search(rf"\b{re.escape(word)}\b", para, re.IGNORECASE)
+            for word in foreign
+        ))
+    ]
+    section = "\n".join(kept)
 
     # Links inside INSTALL.md point at paths relative to docs/reference/, which
     # means nothing on a release page. Turn them into full github.com links.
@@ -117,47 +152,60 @@ def provenance(variant: str, upstream_commit: str, commit_sha: str,
 
 
 def build_line_header(variant: str, repo_slug: str, commit_sha: str) -> str:
-    """Banner saying which build line this release is, with links to the others.
+    """Banner saying which build line this release is, and where the others are.
 
     Every build line shares one releases page and the releases are mixed
     together by date, so it is easy to land on the wrong one. This block goes
     at the top of every release body so people can find their way back.
+
+    **Never name another build line here.** GitHub's releases filter matches
+    body text, so mentioning another line puts this release under that line's
+    filter. That is why this block links only to its own line and sends
+    everyone else to INSTALL.md, which is not a release body and can name them
+    all. check_keywords() enforces it.
     """
     line = BUILD_LINES[variant]
     install_url = (
         f"https://github.com/{repo_slug}/blob/{commit_sha}"
         "/docs/reference/INSTALL.md"
     )
-
-    others = []
-    for other_id, other in BUILD_LINES.items():
-        is_this_one = other_id == variant
-        # A line that has not shipped yet has no releases to link to. The line
-        # being released now obviously has, whatever the table says.
-        if other["published"] or is_this_one:
-            url = (f"https://github.com/{repo_slug}/releases"
-                   f"?q={other['tag_query']}")
-            entry = f"- [{other['name']}]({url})"
-        else:
-            entry = f"- {other['name']} — not released yet"
-        if is_this_one:
-            entry += " ← **this build line**"
-        others.append(entry)
-    other_lines = "\n".join(others)
+    own_filter = f"https://github.com/{repo_slug}/releases?q={line['tag_prefix']}"
 
     return f"""# {line['name']}
 
 This release patches **{line['upstream']}**. The core zip, the shaders zip, and
-your installed shader folder must all come from this same build line — you
+your installed shader folder must all come from this same build line \u2014 you
 cannot mix them.
 
-**On the wrong page?** Pick your build line:
+**All builds of this line:** [{line['name']}]({own_filter})
 
-{other_lines}
-
-Not sure which one you want, or how they coexist?
-See [How to Install → Choose Your Build Line]({install_url}#choose-your-build-line).
+On the wrong page, or not sure which line you want?
+See [How to Install \u2192 Choose Your Build Line]({install_url}#choose-your-build-line).
 """
+
+
+def check_keywords(variant: str, notes: str) -> None:
+    """Fail if the body names a build line other than its own.
+
+    The releases filter matches body text, so one stray mention of another
+    line's keyword makes this release appear under that line's filter -- the
+    exact bug this design replaced. Catching it here is the only reason the
+    filter can be trusted, so this is a hard failure, not a warning.
+
+    The likeliest trigger is a changelog entry: a commit subject on this branch
+    that happens to mention another line by name.
+    """
+    for other_id, other in BUILD_LINES.items():
+        if other_id == variant:
+            continue
+        keyword = other["keyword"]
+        if re.search(rf"\b{re.escape(keyword)}\b", notes, re.IGNORECASE):
+            raise SystemExit(
+                f"error: these notes for '{variant}' contain the word"
+                f" '{keyword}', which identifies the '{other_id}' build line."
+                f" This release would show up under that line's filter."
+                f" Remove the mention (usually a changelog entry) and retry."
+            )
 
 
 def git(*args: str) -> str:
@@ -313,7 +361,9 @@ _Recent fix/feat commits, from the last {CHANGELOG_WINDOW}._
 {changelog}
 
 {provenance(args.variant, args.upstream_commit, args.commit_sha, args.repo_slug)}
-{credits(args.repo_slug, args.commit_sha)}"""
+{credits(args.repo_slug, args.commit_sha, args.variant)}"""
+
+    check_keywords(args.variant, notes)
 
     with open(args.out_file, "w", encoding="utf-8") as f:
         f.write(notes)

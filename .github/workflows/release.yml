@@ -13,10 +13,19 @@ env:
   # five values and nothing else, so its releases get their own tag names and
   # zip names and never mix with the main build's. Only the main build sets
   # IS_LATEST to true — GitHub only has one "Latest" badge for the whole repo.
+  #
+  # TAG_PREFIX doubles as the line's filter on the releases page:
+  # /releases?q=<TAG_PREFIX> lists this line's builds and no others. GitHub
+  # matches every word of the query against each release's title and body
+  # (measured 2026-07-30), so a new line's prefix must contain a word that no
+  # other line has, and must not be a subset of another line's words. That is
+  # why the main line is "mainline" and not just "uevr-reshade-release", which
+  # is a subset of "uevr-reshade-afw-release". scripts/generate_release_notes.py
+  # documents the rules and fails the build if a body breaks them.
   VARIANT_ID: reshade
-  LINE_NAME: UEVR ReShade
+  LINE_NAME: UEVR ReShade Mainline
   LINE_FILE_ID: ReShade
-  TAG_PREFIX: uevr-reshade-release
+  TAG_PREFIX: uevr-reshade-mainline-release
   IS_LATEST: true
 
 permissions:
@@ -179,3 +188,4 @@ jobs:
           # publish as normal releases so they never take it over.
           makeLatest: ${{env.IS_LATEST}}
           token: ${{secrets.GITHUB_TOKEN}}
+
