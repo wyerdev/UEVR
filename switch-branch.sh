@@ -38,6 +38,8 @@ declare -A BRANCHES=(
     [master]="master"
     [afw]="wyerdev/afw"
     [wyerdev/afw]="wyerdev/afw"
+    [joey]="wyerdev/afw-joeyhodge"
+    [wyerdev/afw-joeyhodge]="wyerdev/afw-joeyhodge"
 )
 
 if [[ $# -ne 1 ]]; then
@@ -65,17 +67,43 @@ fi
 sdk_dir="dependencies/submodules/UESDK"
 sdk_patch="patches/UESDK-StereoStuff-renderdoc.patch"
 
+# Revert the submodule dirt if -- and only if -- it is byte-exactly one of our
+# checked-in patches.
+#
+# [2026-07-31] The patch text must be looked up across branches, not just in the
+# working tree. patches/ exists only on the branches that apply it; on master
+# there is no such directory. So when AFW's patch had leaked into the submodule
+# and we were standing on master, this check could not find the patch file, fell
+# through, and hard-aborted on precisely the leak the script exists to clean up.
+# We therefore also read the patch out of every known integration branch.
+revert_known_patch() {
+    local tmp src
+    tmp="$(mktemp)"
+    for src in worktree "${BRANCHES[@]}"; do
+        if [[ "$src" == worktree ]]; then
+            [[ -f "$sdk_patch" ]] || continue
+            cp "$sdk_patch" "$tmp"
+        else
+            git show "$src:$sdk_patch" >"$tmp" 2>/dev/null || continue
+        fi
+        if git -C "$sdk_dir" apply --reverse --check "$tmp" >/dev/null 2>&1; then
+            git -C "$sdk_dir" apply --reverse "$tmp"
+            echo "  Dirt matches $sdk_patch (source: $src) exactly; reverted it."
+            rm -f "$tmp"
+            return 0
+        fi
+    done
+    rm -f "$tmp"
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # 1. Leave the UESDK submodule clean.
 # ---------------------------------------------------------------------------
 if [[ -d "$sdk_dir" ]] && [[ -n "$(git -C "$sdk_dir" status --porcelain)" ]]; then
     echo "UESDK submodule is dirty; checking whether it is only the known patch..."
 
-    if [[ -f "$sdk_patch" ]] &&
-       git -C "$sdk_dir" apply --reverse --check "$repo_root/$sdk_patch" >/dev/null 2>&1; then
-        echo "  Dirt matches $sdk_patch exactly; reverting it."
-        git -C "$sdk_dir" apply --reverse "$repo_root/$sdk_patch"
-    fi
+    revert_known_patch || true
 
     # Re-check: anything left is not ours to discard.
     remaining="$(git -C "$sdk_dir" status --porcelain)"
