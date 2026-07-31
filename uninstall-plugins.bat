@@ -95,10 +95,9 @@ if not "%SELECTED%"=="" (
     echo This will remove, for variant^(s^)%SELECTED%:
     echo   - All post-processing shader DLLs from global plugins
     echo   - Their license files
-    echo   - Built-in shipping presets
-    echo   - User-saved presets
-    echo   - Shipped shader assets
-    echo   - Per-game shader settings
+    echo.
+    echo Presets, settings and shader assets are shared by every build line, so
+    echo they are only removed once no build line is left installed.
     echo.
 )
 if "%LEGACY_FOUND%"=="1" echo Leftovers from pre-variant releases of these same shaders will also go.
@@ -120,6 +119,8 @@ for %%v in (%SELECTED%) do call :remove_variant "%%v"
 
 call :remove_legacy
 
+call :remove_shared_data
+
 echo.
 echo ============================================
 if !ERRORS! GTR 0 (
@@ -137,8 +138,8 @@ exit /b 0
 :: --------------------------------------------------------------------------
 :: :remove_variant <variant-name>
 ::
-:: Everything a variant ever wrote is confined to two trees, both qualified by
-:: the variant name, so this can never reach another build's files.
+:: Only the variant's own plugin DLL tree, plus any pre-sharing data dirs still
+:: qualified by this variant name. Shared data is handled by :remove_shared_data.
 :: --------------------------------------------------------------------------
 :remove_variant
 set "V=%~1"
@@ -176,7 +177,7 @@ if exist "%V_PLUGIN_DIR%\uninstall-plugins.bat" (
     if not exist "%V_PLUGIN_DIR%\uninstall-plugins.bat" set /a REMOVED+=1
 )
 
-:: Global data: shipping presets, user presets, shipped assets.
+:: Global data left over from when data was still variant-scoped.
 for %%d in (shipping_presets presets shader_assets shader_settings) do (
     if exist "%V_DATA_DIR%\%%d" (
         rmdir /s /q "%V_DATA_DIR%\%%d" >nul 2>&1
@@ -190,7 +191,7 @@ for %%d in (shipping_presets presets shader_assets shader_settings) do (
     )
 )
 
-:: Per-game data is variant-scoped, so the whole directory can go.
+:: Per-game data, likewise only present on installs predating shared data.
 for /d %%g in ("%UEVR_DATA%\*") do (
     if exist "%%g\data\plugins\%V%" (
         rmdir /s /q "%%g\data\plugins\%V%" >nul 2>&1
@@ -235,6 +236,33 @@ if exist "%PLUGIN_ROOT%\uninstall-plugins.bat" (
     del /f "%PLUGIN_ROOT%\uninstall-plugins.bat" >nul 2>&1
     if not exist "%PLUGIN_ROOT%\uninstall-plugins.bat" set /a REMOVED+=1
 )
+goto :eof
+
+:: --------------------------------------------------------------------------
+:: :remove_shared_data
+::
+:: Presets, settings and shader assets are unqualified: every build line reads
+:: and writes the same files. Removing them while another line is still
+:: installed would destroy that line's configuration, so this runs only once no
+:: build line remains -- i.e. no plugins\<variant>\ dir holds a *Shader.dll and
+:: no legacy unqualified *Shader.dll is left in plugins\ either.
+:: --------------------------------------------------------------------------
+:remove_shared_data
+set "STILL_INSTALLED=0"
+for /d %%v in ("%PLUGIN_ROOT%\*") do (
+    for /f "delims=" %%f in ('dir /b "%%v\*Shader.dll" 2^>nul') do set "STILL_INSTALLED=1"
+)
+for /f "delims=" %%f in ('dir /b "%PLUGIN_ROOT%\*Shader.dll" 2^>nul') do set "STILL_INSTALLED=1"
+
+if "%STILL_INSTALLED%"=="1" (
+    echo.
+    echo --- shared data ---
+    echo   Kept: another build line is still installed.
+    goto :eof
+)
+
+echo.
+echo --- shared data ---
 
 for %%d in (shipping_presets presets shader_assets shader_settings) do (
     if exist "%DATA_ROOT%\%%d" (

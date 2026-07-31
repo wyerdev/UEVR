@@ -28,7 +28,7 @@ static bool s_active_preset_is_builtin = false;
 static bool s_active_preset_loaded_from_disk = false;
 
 static std::filesystem::path get_active_preset_file() {
-    return Framework::get_persistent_dir() / "data" / "plugins" / UEVR_VARIANT_ID / "active_preset.txt";
+    return Framework::get_persistent_dir() / "data" / "plugins" / "active_preset.txt";
 }
 
 static void save_active_preset_to_disk() {
@@ -62,7 +62,7 @@ static void restore_active_preset_from_disk() {
 }
 
 std::filesystem::path get_local_presets_dir() {
-    auto dir = Framework::get_persistent_dir() / "data" / "plugins" / UEVR_VARIANT_ID / "presets";
+    auto dir = Framework::get_persistent_dir() / "data" / "plugins" / "presets";
     std::filesystem::create_directories(dir);
     return dir;
 }
@@ -70,7 +70,7 @@ std::filesystem::path get_local_presets_dir() {
 std::filesystem::path get_global_presets_dir() {
     wchar_t app_data_path[MAX_PATH]{};
     SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
-    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "UEVR" / "data" / "plugins" / UEVR_VARIANT_ID / "presets";
+    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "UEVR" / "data" / "plugins" / "presets";
     std::filesystem::create_directories(dir);
     return dir;
 }
@@ -78,7 +78,7 @@ std::filesystem::path get_global_presets_dir() {
 std::filesystem::path get_shipping_presets_dir() {
     wchar_t app_data_path[MAX_PATH]{};
     SHGetSpecialFolderPathW(0, app_data_path, CSIDL_APPDATA, false);
-    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "UEVR" / "data" / "plugins" / UEVR_VARIANT_ID / "shipping_presets";
+    auto dir = std::filesystem::path(app_data_path) / "UnrealVRMod" / "UEVR" / "data" / "plugins" / "shipping_presets";
     // Don't create — this dir is managed by the release package, not created at runtime
     return dir;
 }
@@ -133,7 +133,7 @@ bool load_preset(const std::filesystem::path& preset_path, std::string& status_o
         }
 
         const auto persistent_dir = Framework::get_persistent_dir();
-        const auto shader_settings_dir = persistent_dir / "data" / "plugins" / UEVR_VARIANT_ID / kShaderSettingsDirName;
+        const auto shader_settings_dir = persistent_dir / "data" / "plugins" / kShaderSettingsDirName;
         std::filesystem::create_directories(shader_settings_dir);
         const auto auto_path = shader_settings_dir / "auto.uevrpreset";
 

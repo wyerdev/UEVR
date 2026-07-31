@@ -1,0 +1,195 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [wyerdev/afw]
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+  # Which build this workflow releases. VARIANT_ID must match UEVR_VARIANT_ID
+  # in include/uevr/Variant.hpp and the BUILD_LINES table in
+  # scripts/generate_release_notes.py. Each integration branch changes these
+  # five values and nothing else, so its releases get their own tag names and
+  # zip names and never mix with the main build's. Only the main build sets
+  # IS_LATEST to true — GitHub only has one "Latest" badge for the whole repo.
+  #
+  # The line's filter on the releases page is its opaque "marker" token, set
+  # in BUILD_LINES in scripts/generate_release_notes.py and printed once at the
+  # bottom of every release body — /releases?q=buildline2afw. Not
+  # TAG_PREFIX, and not a natural word. GitHub ANDs every word of the query
+  # against each release's title and body and highlights each match, so the
+  # full prefix highlights "uevr", "reshade" and "release" all over every card,
+  # and a word like "afw" also matches any future combined line whose name
+  # contains it. scripts/generate_release_notes.py documents the marker rules
+  # and fails the build if a body breaks them.
+  VARIANT_ID: reshade-afw
+  LINE_NAME: UEVR ReShade AFW
+  # LINE_FILE_ID must carry "ReShade" on every line. It is the only part of the
+  # asset filename a user sees once the zip is downloaded, and a bare "AFW" zip
+  # is indistinguishable from PureDark's own AFW release.
+  LINE_FILE_ID: ReShade-AFW
+  TAG_PREFIX: uevr-reshade-afw-release
+  IS_LATEST: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    # Escape hatch: put "(skip)" in the commit message to push without cutting
+    # a release. For docs, plan notes, or a fix you intend to squash into the
+    # next real release. Matches anywhere in the message, not just the subject
+    # line — GitHub's expression syntax cannot split it. A manual
+    # workflow_dispatch has no head commit and therefore always runs, which is
+    # also how you release a "(skip)" commit after the fact.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !contains(github.event.head_commit.message, '(skip)')
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{secrets.UESDK_PAT}}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Read base nightly tag
+        run: |
+          $tag = (Get-Content "${{github.workspace}}/BASE_NIGHTLY" -Raw).Trim()
+          echo "NIGHTLY_TAG=$tag" >> $env:GITHUB_ENV
+          # praydog nightlies look like nightly-01132-<sha>; PureDark's AFW
+          # releases look like UEVR_AFW_v1.0-beta.5. Without the second pattern
+          # the AFW line would tag every release "00000-<run>".
+          if ($tag -match "nightly-(\d+)-") {
+            $num = $Matches[1]
+          } elseif ($tag -match "beta\.(\d+)") {
+            $num = "beta$($Matches[1])"
+          } else {
+            $num = "00000"
+          }
+          echo "NIGHTLY_NUM=$num" >> $env:GITHUB_ENV
+          $build = "$num-${{github.run_number}}"
+          echo "BUILD_ID=$build" >> $env:GITHUB_ENV
+          echo "RELEASE_TAG=${{env.TAG_PREFIX}}-$build" >> $env:GITHUB_ENV
+          echo "ZIP_NAME=UEVR-${{env.LINE_FILE_ID}}-$build-Core" >> $env:GITHUB_ENV
+          echo "PLUGINS_ZIP_NAME=UEVR-${{env.LINE_FILE_ID}}-$build-ShaderPlugins" >> $env:GITHUB_ENV
+        shell: powershell
+
+      - name: Create annotated tag locally
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag -a "${{env.RELEASE_TAG}}" -m "${{env.LINE_NAME}} | ${{env.BUILD_ID}}"
+        shell: bash
+
+      - name: Build
+        run: call build.bat
+        shell: cmd
+        env:
+          # build.bat defaults to a local out-of-source dir (A:\UEVR-build\...)
+          # which does not exist on the runner. Point it at the in-tree build\
+          # dir that the artifact steps below glob.
+          UEVR_BUILD_DIR: ${{github.workspace}}\build
+
+      - name: Compress artifacts
+        run: |
+          echo ${{github.sha}} > ${{github.workspace}}/revision.txt
+          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/uevr/*
+          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/vr-plugin-nullifier/UEVRPluginNullifier.dll
+          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/LuaVR/LuaVR.dll
+          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/revision.txt
+
+      - name: Package plugins zip
+        run: |
+          $staging = "${{github.workspace}}/plugins-staging"
+          New-Item -ItemType Directory -Path "$staging/plugins" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$staging/shipping_presets" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$staging/shader_assets" -Force | Out-Null
+
+          # Copy bare-named shader DLLs into staging, then run the ordering script
+          # to assign sequential NN_ prefixes based on render_order() in each .cpp.
+          # Bloom is excluded: kept in-tree for future fix attempts but broken in VR-LDR.
+          Get-ChildItem "${{github.workspace}}/build/${{env.BUILD_TYPE}}/*Shader.dll" |
+            Where-Object { $_.Name -notmatch "Bloom" } |
+            Copy-Item -Destination "$staging/plugins/"
+
+          # Assign sequential prefixes, copy LICENSE files, write shaders.manifest
+          # (all driven by render_order()).
+          python "${{github.workspace}}/scripts/assign_shader_order.py" "$staging/plugins" --exclude Bloom --copy-licenses
+
+          # Copy shipping presets (flat *.uevrpreset files only — subfolders like
+          # presets/experimental/ are intentionally excluded from releases).
+          Get-ChildItem "${{github.workspace}}/presets/*.uevrpreset" -File |
+            Copy-Item -Destination "$staging/shipping_presets/"
+
+          # Copy shipped shader assets (LUT pngs, etc.) flat into shader_assets/.
+          # install-plugins.bat detects this layout (vs dev examples/<plugin>/assets/)
+          # and copies into <UEVR_root>/data/plugins/shader_assets/, which is the
+          # fallback path resolve_shader_asset_path() consults at runtime.
+          # Excludes assets belonging to plugins not shipped (e.g. Bloom — see DLL filter above).
+          $excludedAssetPlugins = @('bloom_plugin')
+          Get-ChildItem "${{github.workspace}}/examples" -Directory |
+            Where-Object { $excludedAssetPlugins -notcontains $_.Name } |
+            ForEach-Object {
+              $assetsDir = Join-Path $_.FullName 'assets'
+              if (Test-Path $assetsDir) {
+                Get-ChildItem $assetsDir -File | Copy-Item -Destination "$staging/shader_assets/"
+              }
+            }
+
+          # Copy install/uninstall scripts
+          Copy-Item "${{github.workspace}}/install-plugins.bat" "$staging/"
+          Copy-Item "${{github.workspace}}/uninstall-plugins.bat" "$staging/"
+
+          # Create zip
+          7z a "${{github.workspace}}/${{env.PLUGINS_ZIP_NAME}}.zip" "$staging/*"
+        shell: powershell
+
+      - name: Hash zips
+        run: |
+          $mainHash = Get-FileHash -Algorithm SHA256 ${{github.workspace}}/${{env.ZIP_NAME}}.zip
+          $mainHash.Hash | Out-File -FilePath ${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256
+          $pluginZip = "${{github.workspace}}/${{env.PLUGINS_ZIP_NAME}}.zip"
+          $pluginHash = Get-FileHash -Algorithm SHA256 $pluginZip
+          $pluginHash.Hash | Out-File -FilePath "$pluginZip.sha256"
+        shell: powershell
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/PureDark/UEVR.git
+          git fetch upstream AFW --no-tags
+          echo "UPSTREAM_SHA=$(git rev-parse upstream/AFW)" >> "$GITHUB_ENV"
+        shell: bash
+
+      - name: Generate release notes
+        run: |
+          python "${{github.workspace}}/scripts/generate_release_notes.py" `
+            --nightly-tag "${{env.NIGHTLY_TAG}}" `
+            --zip-name "${{env.ZIP_NAME}}" `
+            --plugins-zip-name "${{env.PLUGINS_ZIP_NAME}}" `
+            --repo-slug "${{github.repository}}" `
+            --commit-sha "${{github.sha}}" `
+            --variant "${{env.VARIANT_ID}}" `
+            --upstream-commit "${{env.UPSTREAM_SHA}}" `
+            --out-file "${{github.workspace}}/RELEASE_NOTES.md"
+        shell: powershell
+
+      - name: Push annotated tag
+        run: |
+          git push origin "${{env.RELEASE_TAG}}"
+        shell: bash
+
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{env.RELEASE_TAG}}
+          name: "${{env.LINE_NAME}} | ${{env.BUILD_ID}}"
+          artifacts: "${{github.workspace}}/${{env.ZIP_NAME}}.zip,${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256,${{github.workspace}}/${{env.PLUGINS_ZIP_NAME}}.zip,${{github.workspace}}/${{env.PLUGINS_ZIP_NAME}}.zip.sha256"
+          bodyFile: ${{github.workspace}}/RELEASE_NOTES.md
+          # Only the main build gets GitHub's "Latest" badge. The other builds
+          # publish as normal releases so they never take it over.
+          makeLatest: ${{env.IS_LATEST}}
+          token: ${{secrets.GITHUB_TOKEN}}
+

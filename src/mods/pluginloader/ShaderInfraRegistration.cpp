@@ -2,6 +2,7 @@
 #include "ShaderInfraRegistration.hpp"
 
 #include <filesystem>
+#include <string_view>
 #include <vector>
 
 #include <wrl.h>
@@ -9,7 +10,6 @@
 #include <spdlog/spdlog.h>
 
 #include "Framework.hpp"
-#include "uevr/Variant.hpp"
 
 namespace fs = std::filesystem;
 
@@ -20,61 +20,90 @@ namespace uevr::shader_infra {
 // If this path changes, update that header too.
 static constexpr std::string_view SHADER_SETTINGS_DIR_NAME = "shader_settings";
 
-void migrate_shader_settings_dir() {
-    // Migration into this build's variant-scoped settings dir. Runs every
-    // launch — handles partial migration (e.g. interrupted first run).
-    //
-    // Two legacy layouts are absorbed, in order:
-    //   1. data/plugins/*_settings.txt              (pre shader_settings/)
-    //   2. data/plugins/shader_settings/*           (pre variant scoping)
-    // Both are unqualified, so they cannot be attributed to a variant. They are
-    // moved, not copied: the first variant launched after the upgrade adopts
-    // them, and later variants simply start from defaults.
-    const auto plugins_dir = Framework::get_persistent_dir() / "data" / "plugins";
-    const auto new_dir = plugins_dir / UEVR_VARIANT_ID / SHADER_SETTINGS_DIR_NAME;
-    if (!fs::exists(plugins_dir)) return;
+// Build-line variant IDs whose data was scoped under `data/plugins/<variant>/`
+// before data became shared. Only plugin DLLs are variant-scoped now, so these
+// dirs are folded back. Add a new build line's ID here when it is created.
+static constexpr std::string_view LEGACY_VARIANT_DIR_NAMES[] = {
+    "reshade",
+    "reshade-afw",
+    "reshade-afw-joeyhodge",
+};
 
-    std::vector<fs::path> to_migrate;
+// Move `src` to `dest`, merging directories recursively. An existing
+// destination file always wins and the source is discarded, so the first build
+// line launched after the upgrade adopts the data and later ones no-op.
+static void merge_move(const fs::path& src, const fs::path& dest) {
+    std::error_code ec;
 
-    std::error_code scan_ec;
-    for (const auto& entry : fs::directory_iterator(plugins_dir, scan_ec)) {
-        if (!entry.is_regular_file()) continue;
-        auto fname = entry.path().filename().string();
-        if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
-            to_migrate.push_back(entry.path());
+    if (fs::is_directory(src, ec)) {
+        fs::create_directories(dest, ec);
+        std::error_code scan_ec;
+        for (const auto& entry : fs::directory_iterator(src, scan_ec)) {
+            merge_move(entry.path(), dest / entry.path().filename());
         }
+        // Only succeeds once the dir is empty, which is what we want.
+        fs::remove(src, ec);
+        return;
     }
 
-    const auto legacy_shader_settings_dir = plugins_dir / SHADER_SETTINGS_DIR_NAME;
-    if (fs::exists(legacy_shader_settings_dir)) {
-        for (const auto& entry : fs::directory_iterator(legacy_shader_settings_dir, scan_ec)) {
-            if (entry.is_regular_file()) {
-                to_migrate.push_back(entry.path());
+    if (fs::exists(dest, ec)) {
+        fs::remove(src, ec);
+        return;
+    }
+
+    fs::rename(src, dest, ec);
+    if (ec) spdlog::warn("[PluginLoader] Could not migrate {}: {}", src.string(), ec.message());
+}
+
+// Fold `<plugins_dir>/<variant>/**` back into `<plugins_dir>/**`.
+static void fold_variant_dirs(const fs::path& plugins_dir) {
+    std::error_code ec;
+    if (!fs::exists(plugins_dir, ec)) return;
+
+    for (const auto& name : LEGACY_VARIANT_DIR_NAMES) {
+        const auto variant_dir = plugins_dir / name;
+        if (!fs::is_directory(variant_dir, ec)) continue;
+
+        spdlog::info("[PluginLoader] Folding legacy variant data dir {} into shared layout",
+            variant_dir.string());
+        merge_move(variant_dir, plugins_dir);
+    }
+}
+
+void migrate_legacy_data_dirs() {
+    // Runs every launch — handles partial migration (e.g. interrupted first run).
+    const auto plugins_dir = Framework::get_persistent_dir() / "data" / "plugins";
+
+    std::error_code ec;
+    if (fs::exists(plugins_dir, ec)) {
+        // Pre-`shader_settings/` layout: loose `*_settings.txt` in data/plugins.
+        const auto shader_settings_dir = plugins_dir / SHADER_SETTINGS_DIR_NAME;
+        std::vector<fs::path> loose_settings;
+
+        std::error_code scan_ec;
+        for (const auto& entry : fs::directory_iterator(plugins_dir, scan_ec)) {
+            if (!entry.is_regular_file()) continue;
+            auto fname = entry.path().filename().string();
+            if (fname.size() > 13 && fname.substr(fname.size() - 13) == "_settings.txt") {
+                loose_settings.push_back(entry.path());
+            }
+        }
+
+        if (!loose_settings.empty()) {
+            spdlog::info("[PluginLoader] Migrating {} loose shader settings file(s) into {}",
+                loose_settings.size(), SHADER_SETTINGS_DIR_NAME);
+            fs::create_directories(shader_settings_dir, ec);
+            for (const auto& src : loose_settings) {
+                merge_move(src, shader_settings_dir / src.filename());
             }
         }
     }
 
-    if (to_migrate.empty()) return;
+    fold_variant_dirs(plugins_dir);
 
-    spdlog::info("[PluginLoader] Migrating {} legacy shader settings file(s) into variant '{}'",
-        to_migrate.size(), UEVR_VARIANT_ID);
-
-    fs::create_directories(new_dir);
-    for (const auto& src : to_migrate) {
-        const auto dest = new_dir / src.filename();
-        if (fs::exists(dest)) {
-            // Already migrated previously; remove orphan in old location.
-            std::error_code ec; fs::remove(src, ec);
-            if (!ec) spdlog::info("[PluginLoader] Removed orphan shader settings: {}", src.filename().string());
-        } else {
-            std::error_code ec; fs::rename(src, dest, ec);
-            if (!ec) spdlog::info("[PluginLoader] Migrated shader settings: {}", src.filename().string());
-        }
-    }
-
-    // Drop the now-empty unqualified dir so it stops looking authoritative.
-    std::error_code ec;
-    fs::remove(legacy_shader_settings_dir, ec);
+    // Global (cross-game) presets and shader assets live beside the per-game
+    // dir, under the shared UEVR folder. Mirrors PresetSystem.cpp.
+    fold_variant_dirs(Framework::get_persistent_dir() / ".." / "UEVR" / "data" / "plugins");
 }
 
 // D3D11 pipeline state objects — created once, bound before every plugin

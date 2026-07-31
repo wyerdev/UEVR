@@ -68,7 +68,7 @@ std::string canonical_preset_section_name(const std::string& section_name) {
 }
 
 std::filesystem::path auto_preset_path_impl() {
-    return Framework::get_persistent_dir() / "data" / "plugins" / UEVR_VARIANT_ID
+    return Framework::get_persistent_dir() / "data" / "plugins"
         / kShaderSettingsDirName / "auto.uevrpreset";
 }
 

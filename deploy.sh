@@ -42,6 +42,8 @@ fi
 
 # Deploy shader DLLs and their license files with sequential NN_ prefixes
 # [fork] variant-isolation: must match UEVR_VARIANT_ID in include/uevr/Variant.hpp.
+# Only the plugin DLL dir is variant-scoped; presets/settings/assets are shared
+# by every build line.
 VARIANT="reshade-afw-joeyhodge"
 PLUGIN_DST="$UEVR_DATA/UEVR/plugins/$VARIANT"
 mkdir -p "$PLUGIN_DST"
@@ -73,7 +75,7 @@ rm -rf "$STAGE_TMP"
 
 # Deploy shipping presets (always overwrite — these are built-in, not user presets)
 PRESET_SRC="$SCRIPT_DIR/presets"
-PRESET_DST="$UEVR_DATA/UEVR/data/plugins/$VARIANT/shipping_presets"
+PRESET_DST="$UEVR_DATA/UEVR/data/plugins/shipping_presets"
 if [[ -d "$PRESET_SRC" ]]; then
   mkdir -p "$PRESET_DST"
   # Copy flat files. The release zip and runtime only expects flat .uevrpreset files in shipping_presets.
@@ -86,7 +88,7 @@ fi
 # flat in `shader_assets/`; the dev tree splits them per plugin under
 # `examples/<plugin>/assets/`, so flatten them here. Mirrors the per-plugin
 # branch of install-plugins.bat.
-ASSET_DST="$UEVR_DATA/UEVR/data/plugins/$VARIANT/shader_assets"
+ASSET_DST="$UEVR_DATA/UEVR/data/plugins/shader_assets"
 shopt -s nullglob
 asset_dirs=("$SCRIPT_DIR/examples"/*/assets)
 if [[ ${#asset_dirs[@]} -gt 0 ]]; then
