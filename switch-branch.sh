@@ -17,10 +17,18 @@
 #
 # Usage:
 #   ./switch-branch.sh master
-#   ./switch-branch.sh wyerdev/afw
+#   ./switch-branch.sh wyerdev/afw     (or the short alias: afw)
 #
 # The script only ever reverts a submodule file whose entire diff is a known
 # checked-in patch. Any other dirt aborts the switch untouched.
+#
+# Only the integration branches listed in BRANCHES below may be checked out.
+# [2026-07-30] This guard exists because the script used to pass its argument
+# straight to `git checkout`. `./switch-branch.sh afw` then landed on a stray
+# local branch named `afw` that pointed at upstream puredark/AFW, silently and
+# with exit code 0. Worse, had that branch not existed, git's DWIM would have
+# created a new local branch tracking puredark/AFW instead -- same wrong
+# result. A bare upstream name is never one of our integration branches.
 
 set -euo pipefail
 
@@ -36,12 +44,25 @@ declare -A BRANCHES=(
 
 if [[ $# -ne 1 ]]; then
     echo "usage: $0 <branch>" >&2
+    printf 'known: %s\n' "${!BRANCHES[*]}" >&2
     exit 2
 fi
 
-target="$1"
+if [[ -z "${BRANCHES[$1]+set}" ]]; then
+    echo "REFUSING: '$1' is not one of our integration branches." >&2
+    printf 'known: %s\n' "${!BRANCHES[*]}" >&2
+    exit 2
+fi
+
+target="${BRANCHES[$1]}"
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
+
+# The branch must already exist locally. This script switches; it never creates.
+if ! git show-ref --verify --quiet "refs/heads/$target"; then
+    echo "ABORT: local branch '$target' does not exist. Create it yourself." >&2
+    exit 1
+fi
 
 sdk_dir="dependencies/submodules/UESDK"
 sdk_patch="patches/UESDK-StereoStuff-renderdoc.patch"
@@ -99,7 +120,8 @@ fi
 # 2. Switch the parent repo. git refuses if it would clobber local work.
 # ---------------------------------------------------------------------------
 echo "Switching to $target ..."
-git checkout "$target"
+# --no-guess: never invent a branch from a remote-tracking ref.
+git checkout --no-guess "$target"
 
 # ---------------------------------------------------------------------------
 # 3. Move submodules to the revisions this branch pins.
