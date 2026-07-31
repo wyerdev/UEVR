@@ -23,7 +23,7 @@ green is Y, blue selects the tile. The shader samples two adjacent tiles and
 linearly interpolates on blue.
 
 LUT discovery (via `enumerate_shader_assets`):
-  - All `lut_*.png` files in `<UEVR>/data/plugins/<variant>/shader_assets/`  (shipped presets)
+  - All `lut_*.png` files in `<UEVR>/data/plugins/shader_assets/`         (shipped presets)
   - All `lut_*.png` files in `<persistent>/data/plugins/shader_settings/` (per-game; shadows global by name)
   - Plus `lut.png` (the legacy default name) if it exists in either location.
 
@@ -271,7 +271,7 @@ public:
             ImGui::TextDisabled("v%s based on ReShade LUT.fx (see LUTShader-LICENSE.txt)", LUT_VERSION);
             ImGui::TextWrapped(
                 "Color grading via a 1024x32 LUT PNG. Add presets as `lut_<name>.png` in:\n"
-                "  Global  : <UEVR>/data/plugins/" UEVR_VARIANT_ID "/shader_assets/   (all games)\n"
+                "  Global  : <UEVR>/data/plugins/shader_assets/   (all games)\n"
                 "  Per-game: <persistent>/data/plugins/shader_settings/   (override)");
 
             bool changed = false;

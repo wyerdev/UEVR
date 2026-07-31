@@ -7,11 +7,13 @@
 // baseline shader build and the AFW build, for example). They ship different
 // UEVRBackend.dll ABIs and different plugin DLLs, but they all read from
 // %APPDATA%\UnrealVRMod. Without a variant qualifier the loader would happily
-// pick up another build's plugin DLLs and another build's presets/settings.
+// pick up another build's plugin DLLs.
 //
-// Every variant-scoped path is qualified by UEVR_VARIANT_ID, and every plugin
-// exports its own variant ID so the loader can reject a foreign DLL even when
-// it is sitting in the correct directory.
+// Only the plugin DLL directory is qualified by UEVR_VARIANT_ID, and every
+// plugin exports its own variant ID so the loader can reject a foreign DLL even
+// when it is sitting in the correct directory. Presets, settings and shader
+// assets are deliberately NOT qualified: the build lines differ in renderer
+// internals, not in shader configuration, so they share one set of data.
 //
 // The value is per-branch. Keep it in sync with the installer scripts and with
 // deploy.sh.

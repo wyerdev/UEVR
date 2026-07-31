@@ -1774,7 +1774,7 @@ void PluginLoader::early_init() try {
     spdlog::info("[PluginLoader] Loading plugins...");
 
     // [fork] shader-plugin: shader_settings subdir migration lives in pluginloader/
-    uevr::shader_infra::migrate_shader_settings_dir();
+    uevr::shader_infra::migrate_legacy_data_dirs();
 
     auto load_plugins_from_dir = [this](std::filesystem::path path) {
         uevr::variant_guard::log_scan(path, fs::is_directory(path)); // [fork]
