@@ -221,7 +221,7 @@ LUT is functionally lightweight despite running through the multi-pass runtime; 
 cmd.exe //c "build.bat"
 ```
 
-Plugin DLLs output to `<BUILDDIR>/Release/`, where `BUILDDIR` is the branch-specific out-of-source build directory set at the top of `build.bat` (`A:\UEVR-build\reshade` on `master`), overridable via the `UEVR_BUILD_DIR` environment variable. Deploy with `bash deploy.sh`, which installs to `%APPDATA%/UnrealVRMod/UEVR/plugins/<variant>/` (global) or `%APPDATA%/UnrealVRMod/<game_executable>/data/plugins/<variant>/` (per-game).
+Plugin DLLs output to `<BUILDDIR>/Release/`, where `BUILDDIR` is the branch-specific out-of-source build directory set at the top of `build.bat` (`A:\UEVR-build\reshade` on `master`), overridable via the `UEVR_BUILD_DIR` environment variable. Deploy with `bash deploy.sh`, which installs the DLLs to `%APPDATA%/UnrealVRMod/UEVR/plugins/<variant>/` and the shipping presets and shader assets to `%APPDATA%/UnrealVRMod/UEVR/data/plugins/` — only the DLL directory is variant-scoped, the data is shared by every build line.
 
 ### Licenses
 
