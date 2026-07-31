@@ -12,10 +12,12 @@ set "SCRIPT_DIR=%~dp0"
 :: Target directories
 set "UEVR_DATA=%APPDATA%\UnrealVRMod"
 :: [fork] variant-isolation: must match UEVR_VARIANT_ID in include\uevr\Variant.hpp.
+:: Only the plugin DLL dir is variant-scoped; presets/settings/assets are shared
+:: by every build line.
 set "VARIANT=reshade"
 set "PLUGIN_DST=%UEVR_DATA%\UEVR\plugins\%VARIANT%"
-set "PRESET_DST=%UEVR_DATA%\UEVR\data\plugins\%VARIANT%\shipping_presets"
-set "ASSET_DST=%UEVR_DATA%\UEVR\data\plugins\%VARIANT%\shader_assets"
+set "PRESET_DST=%UEVR_DATA%\UEVR\data\plugins\shipping_presets"
+set "ASSET_DST=%UEVR_DATA%\UEVR\data\plugins\shader_assets"
 
 :: Since the release zip layout uses pre-indexed "NN_*Shader.dll" filenames,
 :: we want local installation to behave exactly the same way to ensure the

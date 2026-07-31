@@ -13,9 +13,14 @@
 
 namespace uevr::shader_infra {
 
-// Migrate legacy `<persistent>/data/plugins/*_settings.txt` into the
-// `shader_settings/` subdirectory. Idempotent; safe to run every launch.
-void migrate_shader_settings_dir();
+// Fold every legacy data layout into the current shared one:
+//   `<persistent>/data/plugins/*_settings.txt` -> `.../shader_settings/`
+//   `<persistent>/data/plugins/<variant>/**`   -> `<persistent>/data/plugins/**`
+//   the same `<variant>` fold under the global `%APPDATA%/.../UEVR/data/plugins`
+// Files are moved, not copied; an existing destination always wins, so the
+// first build line launched after the upgrade adopts the data and later ones
+// leave it alone. Idempotent; safe to run every launch.
+void migrate_legacy_data_dirs();
 
 // D3D11 baseline pipeline state for plugin dispatch. UE5 games can leave
 // scissor test, depth test, or exotic blend modes active on the immediate

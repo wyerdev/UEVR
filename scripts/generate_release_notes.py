@@ -15,7 +15,6 @@ import argparse
 import re
 import subprocess
 import sys
-from pathlib import Path
 
 # Match commits starting with fix or feat (case-insensitive)
 COMMIT_RE = re.compile(r"^(fix|feat)", re.IGNORECASE)
@@ -28,28 +27,41 @@ CHANGELOG_MAX_ENTRIES = 7
 
 # Build lines, keyed by variant ID (must match UEVR_VARIANT_ID in
 # include/uevr/Variant.hpp). Deferred lines are deliberately absent; see
-# docs/active/joeyhodge-support-plan.md.
+# docs/active/build-lines-todo.md.
 #
 # "published" means the line has release CI and has actually shipped at least
 # one release. Unpublished lines are still listed, but never linked, so we
 # never point people at an empty search. Flip it to True in the same change
 # that adds the line's release workflow.
 #
-# "keyword" is the word that identifies this line on the releases page.
+# "marker" is the opaque, single-word ID that identifies this line on the
+# releases page. Every "all builds of this line" link queries it and nothing
+# else -- /releases?q=buildline2afw.
+#
 # GitHub's releases filter is an AND over the words of the query, matched
-# against each release's title and body (measured 2026-07-30). So
-# `?q=<tag_prefix>` returns exactly this line's releases, but only while two
-# rules hold:
+# against each release's title and body, and it highlights every match
+# (measured 2026-07-30). So the query word must be something that occurs
+# exactly once, in exactly one line's bodies:
 #
-#   1. No line's word set may be a subset of another's -- that is what
-#      "mainline" is for. Without it, `uevr-reshade-release` is a subset of
-#      `uevr-reshade-afw-release` and the main line's filter also returns AFW.
-#   2. No release body may contain another line's keyword, or that release
-#      shows up under the other line's filter. check_keywords() enforces this.
+#   - The full tag prefix is wrong: `uevr-reshade-afw-release` lights up
+#     "uevr", "reshade" and "release" all over every card.
+#   - A natural word is wrong too: `afw` matches the AFW line *and* the
+#     AFW + Joeyhodge line, whose name contains it. Any human-readable name
+#     for a combined line contains the names of its parts, so this is not
+#     fixable by choosing better words.
 #
-# A keyword must therefore be a word that appears nowhere else in a release
-# body. "core" and "base" are already used by the install steps; both were
-# rejected for that reason.
+# Hence a made-up token. Rules for adding one:
+#
+#   1. No hyphens, spaces or punctuation -- the filter splits on them.
+#   2. No marker may be a substring of another. The numbering is what
+#      guarantees this: `buildline2afw` cannot occur inside
+#      `buildline3afwjoeyhodge`. Give a new line the next free number.
+#   3. It must appear in its own bodies exactly once, which
+#      build_line_header() does, and never in another line's --
+#      check_keywords() enforces that.
+#
+# The token is invisible to users; they follow a link whose text is the line
+# name. It exists only to be a search term nothing else can collide with.
 BUILD_LINES = {
     "reshade": {
         "name": "UEVR ReShade Mainline",
@@ -57,7 +69,7 @@ BUILD_LINES = {
         "upstream_repo": "praydog/UEVR",
         "upstream_branch": "master",
         "tag_prefix": "uevr-reshade-mainline-release",
-        "keyword": "mainline",
+        "marker": "buildline1mainline",
         "published": True,
         # Where BASE_NIGHTLY's tag lives, and what to call it in the install
         # steps. Each line is patched against a different upstream build.
@@ -71,7 +83,7 @@ BUILD_LINES = {
         "upstream_repo": "PureDark/UEVR",
         "upstream_branch": "AFW",
         "tag_prefix": "uevr-reshade-afw-release",
-        "keyword": "afw",
+        "marker": "buildline2afw",
         "published": True,
         # AFW is not a praydog nightly: the base is PureDark's own release,
         # which is also the only source of the proprietary PDAFWPlugin.dll
@@ -81,76 +93,6 @@ BUILD_LINES = {
     },
 }
 
-# Where the credits come from. The release body copies this file's Credits
-# section instead of repeating it, so there is only one place to edit when
-# contributors or shader ports change.
-CREDITS_DOC = Path(__file__).resolve().parent.parent / "docs" / "reference" / "INSTALL.md"
-CREDITS_HEADING = "## Credits"
-
-
-def credits(repo_slug: str, commit_sha: str, variant: str) -> str:
-    """Return INSTALL.md's Credits section, ready to paste into a release body.
-
-    The text is copied into the release rather than linked, so the credits are
-    visible on the release page itself. It is copied from INSTALL.md every
-    time, so that file stays the only place the credits are written down.
-
-    Bullets crediting a *different* build line are dropped. A release only
-    ships one line's code, so crediting the others is wrong anyway -- and it
-    would put their keyword in this body, breaking the releases filter.
-    """
-    text = CREDITS_DOC.read_text(encoding="utf-8")
-    start = text.find(CREDITS_HEADING)
-    if start == -1:
-        raise SystemExit(
-            f"{CREDITS_DOC} has no '{CREDITS_HEADING}' section to copy."
-        )
-
-    end = text.find("\n## ", start + len(CREDITS_HEADING))
-    section = text[start:] if end == -1 else text[start:end]
-
-    foreign = [
-        other["keyword"] for other_id, other in BUILD_LINES.items()
-        if other_id != variant
-    ]
-    kept = [
-        para for para in section.split("\n")
-        if not (para.startswith("- ") and any(
-            re.search(rf"\b{re.escape(word)}\b", para, re.IGNORECASE)
-            for word in foreign
-        ))
-    ]
-    section = "\n".join(kept)
-
-    # Links inside INSTALL.md point at paths relative to docs/reference/, which
-    # means nothing on a release page. Turn them into full github.com links.
-    blob = f"https://github.com/{repo_slug}/blob/{commit_sha}"
-    section = re.sub(
-        r"\]\(\.\./\.\./([^)]+)\)", rf"]({blob}/\1)", section
-    )
-    return section.rstrip() + "\n"
-
-
-def provenance(variant: str, upstream_commit: str, commit_sha: str,
-               repo_slug: str) -> str:
-    """Table showing exactly which commits this build was made from."""
-    line = BUILD_LINES[variant]
-    repo = line["upstream_repo"]
-    branch = line["upstream_branch"]
-    upstream_cell = (
-        f"[`{upstream_commit[:10]}`](https://github.com/{repo}/commit/{upstream_commit})"
-        if upstream_commit else "_not recorded_"
-    )
-    return f"""## What this build was made from
-
-| | |
-| :--- | :--- |
-| Upstream UEVR | [{repo}](https://github.com/{repo}) `{branch}` |
-| Upstream commit used | {upstream_cell} |
-| Fork commit built | [`{commit_sha[:10]}`](https://github.com/{repo_slug}/commit/{commit_sha}) |
-"""
-
-
 def build_line_header(variant: str, repo_slug: str, commit_sha: str) -> str:
     """Banner saying which build line this release is, and where the others are.
 
@@ -158,54 +100,73 @@ def build_line_header(variant: str, repo_slug: str, commit_sha: str) -> str:
     together by date, so it is easy to land on the wrong one. This block goes
     at the top of every release body so people can find their way back.
 
-    **Never name another build line here.** GitHub's releases filter matches
-    body text, so mentioning another line puts this release under that line's
-    filter. That is why this block links only to its own line and sends
-    everyone else to INSTALL.md, which is not a release body and can name them
-    all. check_keywords() enforces it.
+    **Never put another line's marker here.** GitHub's releases filter matches
+    body text, so one stray marker puts this release under that line's filter.
+    This block links only to its own line, by marker rather than by tag prefix
+    (see BUILD_LINES), and sends everyone else to INSTALL.md, which is not a
+    release body and can name every line freely. check_keywords() enforces it.
+
+    The marker line at the end is the only place the token appears, and is
+    what makes the filter link work at all.
     """
     line = BUILD_LINES[variant]
     install_url = (
         f"https://github.com/{repo_slug}/blob/{commit_sha}"
         "/docs/reference/INSTALL.md"
     )
-    own_filter = f"https://github.com/{repo_slug}/releases?q={line['tag_prefix']}"
+    own_filter = f"https://github.com/{repo_slug}/releases?q={line['marker']}"
+
+    # Named so people recognise the variant they want; "build line" on its own
+    # means nothing to a reader. Derived from BUILD_LINES so a new line shows up
+    # here automatically. The common "UEVR " prefix carries no information.
+    others = ", ".join(
+        other["name"].removeprefix("UEVR ")
+        for other_id, other in BUILD_LINES.items() if other_id != variant
+    )
 
     return f"""# {line['name']}
 
 This release patches **{line['upstream']}**. The core zip, the shaders zip, and
-your installed shader folder must all come from this same build line \u2014 you
-cannot mix them.
+your installed shader folder must all come from this same build line — you
+cannot mix them. [All builds of this version]({own_filter})
 
-**All builds of this line:** [{line['name']}]({own_filter})
+Want a different version ({others})? See
+[How to Install]({install_url}#choose-your-build-line).
 
-On the wrong page, or not sure which line you want?
-See [How to Install \u2192 Choose Your Build Line]({install_url}#choose-your-build-line).
+<sub>build line ID: {line['marker']}</sub>
 """
 
 
 def check_keywords(variant: str, notes: str) -> None:
-    """Fail if the body names a build line other than its own.
+    """Fail if the body carries a build-line marker other than its own.
 
-    The releases filter matches body text, so one stray mention of another
-    line's keyword makes this release appear under that line's filter -- the
-    exact bug this design replaced. Catching it here is the only reason the
-    filter can be trusted, so this is a hard failure, not a warning.
+    The releases filter matches body text, so one stray marker makes this
+    release appear under that line's filter -- the exact bug this design
+    replaced. Catching it here is the only reason the filter can be trusted,
+    so this is a hard failure, not a warning.
 
-    The likeliest trigger is a changelog entry: a commit subject on this branch
-    that happens to mention another line by name.
+    Markers are opaque tokens precisely so this can never fire by accident
+    from ordinary prose or a changelog subject.
     """
     for other_id, other in BUILD_LINES.items():
         if other_id == variant:
             continue
-        keyword = other["keyword"]
-        if re.search(rf"\b{re.escape(keyword)}\b", notes, re.IGNORECASE):
+        marker = other["marker"]
+        if marker.lower() in notes.lower():
             raise SystemExit(
-                f"error: these notes for '{variant}' contain the word"
-                f" '{keyword}', which identifies the '{other_id}' build line."
+                f"error: these notes for '{variant}' contain the marker"
+                f" '{marker}', which identifies the '{other_id}' build line."
                 f" This release would show up under that line's filter."
-                f" Remove the mention (usually a changelog entry) and retry."
+                f" Remove the mention and retry."
             )
+
+    own = BUILD_LINES[variant]["marker"]
+    if own.lower() not in notes.lower():
+        raise SystemExit(
+            f"error: the marker '{own}' is missing from these notes. It is the"
+            f" only thing the releases filter for '{variant}' matches on, so"
+            f" this release would be unreachable from its own filter link."
+        )
 
 
 def git(*args: str) -> str:
@@ -350,18 +311,14 @@ def main() -> None:
    Or install manually -- see [INSTALL.md](https://github.com/{args.repo_slug}/blob/{args.commit_sha}/docs/reference/INSTALL.md).
 6. Run UEVR as normal.
 
-> **Note:** The post-processing shaders require this patched fork, and only the
-> build line they were released for. They will **not** load on stock UEVR
-> nightly or on another build line.
-
 ## Changes
-
-_Recent fix/feat commits, from the last {CHANGELOG_WINDOW}._
 
 {changelog}
 
-{provenance(args.variant, args.upstream_commit, args.commit_sha, args.repo_slug)}
-{credits(args.repo_slug, args.commit_sha, args.variant)}"""
+## Credits
+
+See [INSTALL.md \u2192 Credits](https://github.com/{args.repo_slug}/blob/{args.commit_sha}/docs/reference/INSTALL.md#credits).
+"""
 
     check_keywords(args.variant, notes)
 

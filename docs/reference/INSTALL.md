@@ -1,35 +1,26 @@
 
 
-# How to Install (last confirmed: 2026-07-30)
+# How to Install (last confirmed: 2026-07-31)
 
 ## Choose Your Build Line
 
-This fork is published as more than one build line. Each one patches a
-**different upstream UEVR core**, so pick the one you want *before* downloading
-— the core zip and the shaders zip must come from the same line.
+Each build line patches a **different upstream UEVR core**. Pick one *before*
+downloading — every zip you use must come from the same line.
 
 | Build line | Upstream core it patches | Filename / folder ID | Get it |
 |---|---|---|---|
-| **UEVR ReShade Mainline** (the main one) | [praydog/UEVR](https://github.com/praydog/UEVR) `master` | `reshade` | [All Mainline releases](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-mainline-release) |
-| **UEVR ReShade AFW** | [PureDark/UEVR](https://github.com/PureDark/UEVR) `AFW` — asynchronous frame warp | `reshade-afw` | [All AFW releases](https://github.com/wyerdev/UEVR/releases?q=uevr-reshade-afw-release) |
+| **UEVR ReShade Mainline** (the main one) | [praydog/UEVR](https://github.com/praydog/UEVR) `master` | `reshade` | [All Mainline releases](https://github.com/wyerdev/UEVR/releases?q=buildline1mainline) |
+| **UEVR ReShade AFW** | [PureDark/UEVR](https://github.com/PureDark/UEVR) `AFW` — asynchronous frame warp | `reshade-afw` | [All AFW releases](https://github.com/wyerdev/UEVR/releases?q=buildline2afw) |
 
-Each link shows only that build line's releases, newest first. Use them rather
-than scrolling the [full releases page](https://github.com/wyerdev/UEVR/releases)
-— releases from all build lines are interleaved there by date, so the newest
-release of your line can be buried. The **Latest** badge always goes to the
-main Mainline line; that is on purpose and does not mean the AFW line is
-outdated.
+Use those links, not the [full releases page](https://github.com/wyerdev/UEVR/releases) —
+lines are interleaved by date there, and the **Latest** badge always goes to
+Mainline. Lines can be installed side by side; each loads only its own
+`plugins\<id>\` folder. Below, replace `<id>` with your line's ID.
 
-The build lines **do not conflict**. Each one installs its shaders into its own
-`plugins\<id>\` folder and only loads plugins from that folder, so you can keep
-both installed side by side. Everywhere below, replace `<id>` with your build
-line's ID from the table (e.g. `reshade`).
-
-## Before You Start
-
-- **Antivirus:** UEVR injects into game processes, which antivirus software often flags as suspicious. Your AV will likely quarantine or delete UEVR files. **Add the UEVR folder to your antivirus exclusion list** before extracting.
-- **Frame Generation:** Disable DLSS/FSR Frame Generation in-game — it causes severe issues with VR.
-- **DLSS Upscaling:** Recommended for performance. If your game supports it, enable DLSS Super Resolution. With DLSS 4, you can use [DLSS Swapper](https://github.com/beeradmoore/dlss-swapper) to upgrade the game's DLSS version.
+> **Before you start:** add the UEVR folder to your **antivirus exclusions**
+> (injection gets flagged), disable in-game **DLSS/FSR Frame Generation** (it
+> breaks VR), and enable **DLSS Super Resolution** if available — optionally
+> upgraded with [DLSS Swapper](https://github.com/beeradmoore/dlss-swapper).
 
 ## Steps
 
@@ -70,7 +61,7 @@ Instead of `install-plugins.bat`, you can copy files manually:
 
 **Per-game (one game only):** Copy them to `%APPDATA%\UnrealVRMod\<game_executable>\plugins\<id>\` instead (e.g. `Oregon-Win64-Shipping\plugins\reshade\`)
 
-**Presets:** Copy the shipped `.uevrpreset` files from the zip's `shipping_presets\` (or `presets\`) folder to `%APPDATA%\UnrealVRMod\UEVR\data\plugins\<id>\shipping_presets\`.
+**Presets:** Copy the shipped `.uevrpreset` files from the zip's `shipping_presets\` (or `presets\`) folder to `%APPDATA%\UnrealVRMod\UEVR\data\plugins\shipping_presets\`.
 
 ## LUT Customization
 
@@ -78,24 +69,27 @@ The LUT shader ships with several built-in presets (warm, cool, cinematic, bleac
 
 To add your own LUT, drop a `lut_<name>.png` (1024×32 horizontal-tile RGBA8) into one of:
 
-- **Global (all games):** `%APPDATA%\UnrealVRMod\UEVR\data\plugins\<id>\shader_assets\`
-- **Per-game (overrides global by filename):** `%APPDATA%\UnrealVRMod\<game_executable>\data\plugins\<id>\shader_settings\`
+- **Global (all games):** `%APPDATA%\UnrealVRMod\UEVR\data\plugins\shader_assets\`
+- **Per-game (overrides global by filename):** `%APPDATA%\UnrealVRMod\<game_executable>\data\plugins\shader_settings\`
 
 It will appear in the LUT plugin's preset dropdown after a rescan.
 
 ## File Locations
 
+Only the shader DLLs are scoped by build line ID. Presets, settings and shader
+assets are shared, so switching build lines keeps your configuration.
+
 | What | Where |
 |------|-------|
 | Global shaders | `%APPDATA%\UnrealVRMod\UEVR\plugins\<id>\` — loaded for **all** games |
 | Per-game shaders | `%APPDATA%\UnrealVRMod\<game_executable>\plugins\<id>\` — loaded for that game only |
-| User presets | `%APPDATA%\UnrealVRMod\UEVR\data\plugins\<id>\presets\` — `.uevrpreset` files shared across games |
-| Built-in presets | `%APPDATA%\UnrealVRMod\UEVR\data\plugins\<id>\shipping_presets\` — `.uevrpreset` files overwritten on update |
-| Per-game settings | `%APPDATA%\UnrealVRMod\<game_executable>\data\plugins\<id>\shader_settings\auto.uevrpreset` |
+| User presets | `%APPDATA%\UnrealVRMod\UEVR\data\plugins\presets\` — `.uevrpreset` files shared across games |
+| Built-in presets | `%APPDATA%\UnrealVRMod\UEVR\data\plugins\shipping_presets\` — `.uevrpreset` files overwritten on update |
+| Per-game settings | `%APPDATA%\UnrealVRMod\<game_executable>\data\plugins\shader_settings\auto.uevrpreset` |
 
 ## Uninstalling
 
-Run `uninstall-plugins.bat` from the release folder or from `%APPDATA%\UnrealVRMod\UEVR\plugins\<id>\` (copied there by the installer). It only removes its own build line's files; other build lines are left alone. Removes all shader DLLs, licenses, built-in presets, **user-saved presets, per-game shader settings, and active preset selections**.
+Run `uninstall-plugins.bat` from the release folder or from `%APPDATA%\UnrealVRMod\UEVR\plugins\<id>\` (copied there by the installer). It removes the selected build line's shader DLLs and licenses; other build lines are left alone. Presets, shader settings and shader assets are shared, so they are only deleted once **no** build line is left installed.
 
 ## Updating
 
