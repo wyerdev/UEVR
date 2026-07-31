@@ -11,6 +11,7 @@ downloading — every zip you use must come from the same line.
 |---|---|---|---|
 | **UEVR ReShade Mainline** (the main one) | [praydog/UEVR](https://github.com/praydog/UEVR) `master` | `reshade` | [All Mainline releases](https://github.com/wyerdev/UEVR/releases?q=buildline1mainline) |
 | **UEVR ReShade AFW** | [PureDark/UEVR](https://github.com/PureDark/UEVR) `AFW` — asynchronous frame warp | `reshade-afw` | [All AFW releases](https://github.com/wyerdev/UEVR/releases?q=buildline2afw) |
+| **UEVR ReShade AFW + Joeyhodge** | [PureDark/UEVR](https://github.com/PureDark/UEVR) `Joey-Merged` — asynchronous frame warp on top of [joeyhodge/UEVR](https://github.com/joeyhodge/UEVR)'s UE 5.5-5.8 fixes | `reshade-afw-joeyhodge` | [All AFW + Joeyhodge releases](https://github.com/wyerdev/UEVR/releases?q=buildline3afwjoeyhodge) |
 
 Use those links, not the [full releases page](https://github.com/wyerdev/UEVR/releases) —
 lines are interleaved by date there, and the **Latest** badge always goes to
@@ -31,6 +32,7 @@ Mainline. Lines can be installed side by side; each loads only its own
    |---|---|
    | **UEVR ReShade Mainline** | [praydog UEVR Nightly](https://github.com/praydog/UEVR-nightly/releases) |
    | **UEVR ReShade AFW** | [PureDark UEVR AFW release](https://github.com/PureDark/UEVR/releases) — also the only source of `PDAFWPlugin.dll`, which the AFW line needs |
+   | **UEVR ReShade AFW + Joeyhodge** | the same [PureDark UEVR AFW release](https://github.com/PureDark/UEVR/releases), but the **joeyhodge-based** zip inside it — each AFW release ships both, and that zip is also the only source of `PDAFWPlugin.dll` |
 
    Every release body names the exact base build it was made against, and links
    straight to it. Use that link rather than picking the newest one yourself.

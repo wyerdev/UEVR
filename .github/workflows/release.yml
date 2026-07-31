@@ -2,7 +2,7 @@ name: Build & Release
 
 on:
   push:
-    branches: [wyerdev/afw]
+    branches: [wyerdev/afw-joeyhodge]
   workflow_dispatch:
 
 env:
@@ -16,20 +16,20 @@ env:
   #
   # The line's filter on the releases page is its opaque "marker" token, set
   # in BUILD_LINES in scripts/generate_release_notes.py and printed once at the
-  # bottom of every release body — /releases?q=buildline2afw. Not
+  # bottom of every release body — /releases?q=buildline3afwjoeyhodge. Not
   # TAG_PREFIX, and not a natural word. GitHub ANDs every word of the query
   # against each release's title and body and highlights each match, so the
   # full prefix highlights "uevr", "reshade" and "release" all over every card,
-  # and a word like "afw" also matches any future combined line whose name
-  # contains it. scripts/generate_release_notes.py documents the marker rules
+  # and a word like "afw" also matches the plain AFW line. 
+  # scripts/generate_release_notes.py documents the marker rules
   # and fails the build if a body breaks them.
-  VARIANT_ID: reshade-afw
-  LINE_NAME: UEVR ReShade AFW
+  VARIANT_ID: reshade-afw-joeyhodge
+  LINE_NAME: UEVR ReShade AFW + Joeyhodge
   # LINE_FILE_ID must carry "ReShade" on every line. It is the only part of the
   # asset filename a user sees once the zip is downloaded, and a bare "AFW" zip
   # is indistinguishable from PureDark's own AFW release.
-  LINE_FILE_ID: ReShade-AFW
-  TAG_PREFIX: uevr-reshade-afw-release
+  LINE_FILE_ID: ReShade-AFW-Joeyhodge
+  TAG_PREFIX: uevr-reshade-afw-joeyhodge-release
   IS_LATEST: false
 
 permissions:
@@ -159,8 +159,8 @@ jobs:
       - name: Add upstream remote
         run: |
           git remote add upstream https://github.com/PureDark/UEVR.git
-          git fetch upstream AFW --no-tags
-          echo "UPSTREAM_SHA=$(git rev-parse upstream/AFW)" >> "$GITHUB_ENV"
+          git fetch upstream Joey-Merged --no-tags
+          echo "UPSTREAM_SHA=$(git rev-parse upstream/Joey-Merged)" >> "$GITHUB_ENV"
         shell: bash
 
       - name: Generate release notes

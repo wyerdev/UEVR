@@ -22,6 +22,7 @@ build — that is on purpose, and does not mean the other builds are out of date
 |---|---|
 | **UEVR ReShade Mainline** (the main one) | [all Mainline releases](https://github.com/wyerdev/UEVR/releases?q=buildline1mainline) |
 | **UEVR ReShade AFW** | [all AFW releases](https://github.com/wyerdev/UEVR/releases?q=buildline2afw) |
+| **UEVR ReShade AFW + Joeyhodge** | [all AFW + Joeyhodge releases](https://github.com/wyerdev/UEVR/releases?q=buildline3afwjoeyhodge) |
 
 What each build is based on, how they can be installed at the same time, and
 which one you want: [Choose Your Build Line](docs/reference/INSTALL.md#choose-your-build-line).

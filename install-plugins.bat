@@ -35,7 +35,7 @@ set "ASSET_DST=%UEVR_DATA%\UEVR\data\plugins\shader_assets"
 ::      and copy LICENSE files, and then install from that staged folder.
 :: [fork] must match BUILDDIR in build.bat: each branch builds out-of-source
 :: into its own directory so the variants never share a cache or objects.
-set "BUILDDIR=A:\UEVR-build\afw"
+set "BUILDDIR=A:\UEVR-build\afw-joeyhodge"
 set "STAGE_TMP="
 if exist "%SCRIPT_DIR%plugins\" (
     set "PLUGIN_SRC=%SCRIPT_DIR%plugins"

@@ -91,6 +91,24 @@ BUILD_LINES = {
         "base_repo": "PureDark/UEVR",
         "base_label": "base UEVR AFW release",
     },
+    "reshade-afw-joeyhodge": {
+        "name": "UEVR ReShade AFW + Joeyhodge",
+        "upstream": "[PureDark/UEVR](https://github.com/PureDark/UEVR) `Joey-Merged`"
+                    " \u2014 asynchronous frame warp on top of"
+                    " [joeyhodge/UEVR](https://github.com/joeyhodge/UEVR)'s"
+                    " UE 5.5-5.8 fixes",
+        "upstream_repo": "PureDark/UEVR",
+        "upstream_branch": "Joey-Merged",
+        "tag_prefix": "uevr-reshade-afw-joeyhodge-release",
+        "marker": "buildline3afwjoeyhodge",
+        "published": True,
+        # Same base release as the AFW line: PureDark ships two builds inside
+        # each UEVR_AFW_* release, one nightly-based and one joeyhodge-based.
+        # This line pairs with the joeyhodge-based one, and that zip is also
+        # the only source of the proprietary PDAFWPlugin.dll it delay-loads.
+        "base_repo": "PureDark/UEVR",
+        "base_label": "base UEVR AFW release (joeyhodge-based build)",
+    },
 }
 
 def build_line_header(variant: str, repo_slug: str, commit_sha: str) -> str:

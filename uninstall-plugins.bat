@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 
 echo ============================================
 echo   UEVR VR Post-Processing Shaders Uninstaller
-echo   Built for variant: reshade-afw
+echo   Built for variant: reshade-afw-joeyhodge
 echo ============================================
 echo.
 
