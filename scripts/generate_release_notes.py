@@ -146,10 +146,16 @@ def build_line_header(variant: str, repo_slug: str, commit_sha: str) -> str:
     # Named so people recognise the variant they want; "build line" on its own
     # means nothing to a reader. Derived from BUILD_LINES so a new line shows up
     # here automatically. The common "UEVR " prefix carries no information.
-    others = ", ".join(
+    other_names = [
         other["name"].removeprefix("UEVR ")
         for other_id, other in BUILD_LINES.items() if other_id != variant
-    )
+    ]
+    # "a, b and c" — a bare comma-join reads as a fragment once there is more
+    # than one, and as a stray parenthetical when there is exactly one.
+    if len(other_names) > 1:
+        others = f"lines are {', '.join(other_names[:-1])} and {other_names[-1]}"
+    else:
+        others = f"line is {other_names[0]}"
 
     # Who actually wrote the upstream this line patches. Without it the release
     # reads as though this fork authored AFW or the UE 5.5-5.8 fixes.
@@ -162,7 +168,7 @@ This release patches **{line['upstream']}**. The core zip, the shaders zip, and
 your installed shader folder must all come from this same build line — you
 cannot mix them. [All builds of this version]({own_filter})
 {attribution_block}
-Want a different version ({others})? See
+The other build {others} — see
 [How to Install]({install_url}#choose-your-build-line).
 
 <sub>build line ID: {line['marker']}</sub>
