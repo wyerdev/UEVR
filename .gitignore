@@ -41,3 +41,14 @@ build_*.log
 
 # Shader debug symbols emitted during the shader compile step
 src/mods/vr/shaders/Compiled/*.pdb
+not-shipped/
+
+# Python bytecode from the scripts/ helpers
+__pycache__/
+*.pyc
+
+# Agent instruction files — local only, kept identical across branches
+.github/copilot-instructions.md
+.github/instructions/
+
+.codegraph/

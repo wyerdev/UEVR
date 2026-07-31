@@ -178,9 +178,15 @@ sources = ["side-projects/sdk-test/**.cpp", "side-projects/sdk-test/**.c"]
 headers = ["side-projects/sdk-test/**.hpp", "side-projects/sdk-test/**.h"]
 include-directories = ["shared/", "include/"]
 compile-features = ["cxx_std_23"]
+# [fork] uesdk at this branch's pinned revision (b48f5ab) calls
+# GetFileVersionInfo/VerQueryValue from sdk::check_file_version and
+# fingerprint_module, so anything linking uesdk.lib needs Version.lib. The
+# `uevr` target already lists it; sdk-test did not, and linked only because
+# the older UESDK revision the other build lines pin does not reach that code.
 link-libraries = [
     "kananlib",
-    "uesdk"
+    "uesdk",
+    "Version"
 ]
 
 [target.vr-plugin-nullifier]

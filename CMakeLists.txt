@@ -494,6 +494,7 @@ target_include_directories(sdk-test PUBLIC
 target_link_libraries(sdk-test PUBLIC
 	kananlib
 	uesdk
+	Version
 )
 
 unset(CMKR_TARGET)
