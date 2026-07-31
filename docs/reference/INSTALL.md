@@ -55,6 +55,11 @@ Mainline. Lines can be installed side by side; each loads only its own
 > nightly, or on a different build line — UEVR just ignores them, nothing
 > breaks.
 
+> **Not working on the AFW or AFW + Joeyhodge line?** Get the *original* build
+> working first — install [PureDark](https://github.com/PureDark)'s (or
+> [joeyhodge](https://github.com/joeyhodge)'s) unmodified release on its own and
+> confirm your game runs with it.
+
 ### Manual install (optional)
 
 Instead of `install-plugins.bat`, you can copy files manually:
@@ -99,11 +104,14 @@ Download both the new nightly and the matching fork release **for the same build
 
 ## Credits
 
-This fork exists because of other people's work. What each release ships:
+**Huge thanks to Praydog, PureDark, joeyhodge, crosire, and the ReShade shader
+authors — none of this exists without them.**
 
-- **UEVR itself** — created by [Praydog](https://github.com/praydog). Every build line here is a patched [praydog/UEVR](https://github.com/praydog/UEVR) core; that code is Praydog's work.
-- **Asynchronous frame warp (AFW)** — by [PureDark](https://github.com/PureDark), from [PureDark/UEVR](https://github.com/PureDark/UEVR). Shipped in the **AFW** build line.
-- **Shader effects** — ported from [crosire's ReShade](https://github.com/crosire/reshade) shaders. Original authors: CeeJay.dk, AMD, SLSNe, Marty McFly, 3an, DKT70, Loadus, Martins Upitis, bacondither, Ioxa, kingeric1992, Niklas Haas (haasn), JPulowski, luluco250, brussell1, Alex Tuduran, and Timothy Lottes / NVIDIA. This fork does **not** ship the ReShade runtime, injector, or shader compiler — selected shaders are re-implemented as native UEVR plugins. Each shader's `*-LICENSE.txt` in the shaders zip credits its original author and source; the sources are in [examples/](../../examples/).
+This fork stands on other people's work. It brings that work together and makes
+the shaders usable inside UEVR. What each release ships:
 
-The crash fixes, the plugin loader and preset system, keeping the build lines
-separate from each other, and the shader ports are this fork's own work.
+- **UEVR itself** — by [Praydog](https://github.com/praydog). Every build line here is a patched [praydog/UEVR](https://github.com/praydog/UEVR) core.
+- **Asynchronous frame warp (AFW)** — by [PureDark](https://github.com/PureDark), from [PureDark/UEVR](https://github.com/PureDark/UEVR). Shipped in the **AFW** and **AFW + Joeyhodge** build lines. The proprietary `PDAFWPlugin.dll` it needs is PureDark's and is distributed only by him — this fork never ships it.
+- **UE 5.5-5.8 fixes** — by [joeyhodge](https://github.com/joeyhodge), from [joeyhodge/UEVR](https://github.com/joeyhodge/UEVR), merged into PureDark's `Joey-Merged` branch. Shipped in the **AFW + Joeyhodge** build line.
+- **Shader effects** — by their original authors, written for [ReShade](https://github.com/crosire/reshade) by [crosire](https://github.com/crosire): CeeJay.dk, AMD, SLSNe, Marty McFly, 3an, DKT70, Loadus, Martins Upitis, bacondither, Ioxa, kingeric1992, Niklas Haas (haasn), JPulowski, luluco250, brussell1, Alex Tuduran, and Timothy Lottes / NVIDIA. This fork does **not** ship the ReShade runtime, injector, or shader compiler — selected shaders are re-implemented as native UEVR plugins. Each shader's `*-LICENSE.txt` in the shaders zip credits its original author and source; the sources are in [examples/](../../examples/).
+- **This fork** — the crash fixes, the plugin loader and preset system, and the *port* of the shaders into native UEVR plugins. Nothing else on this list is this fork's work.

@@ -3,12 +3,22 @@
 
 Goal of this fork: Fix some game crashes + Port essential ReShade shaders to fix washed-out colors and grey blacks in VR.
 
-**Credits:** This fork modifies and extends [Praydog's UEVR](https://github.com/praydog/UEVR)
-([original UEVR README below](#original-uevr-readme)), and turns selected
-[ReShade](https://github.com/crosire/reshade) shaders into native UEVR plugins.
-Praydog, PureDark, and the original shader authors are all credited in
-**[INSTALL.md → Credits](docs/reference/INSTALL.md#credits)**, which is the one
-place those credits are kept.
+## Credits
+
+**Huge thanks to Praydog, PureDark, joeyhodge, crosire, and the ReShade shader
+authors — none of this exists without them.**
+
+This fork stands on other people's work. It brings that work together and makes
+the shaders usable inside UEVR:
+
+- **UEVR** — [Praydog](https://github.com/praydog) · [praydog/UEVR](https://github.com/praydog/UEVR) · [original README below](#original-uevr-readme)
+- **Asynchronous frame warp (AFW)** — [PureDark](https://github.com/PureDark) · [PureDark/UEVR](https://github.com/PureDark/UEVR)
+- **UE 5.5-5.8 fixes** — [joeyhodge](https://github.com/joeyhodge) · [joeyhodge/UEVR](https://github.com/joeyhodge/UEVR)
+- **The shaders themselves** — the individual shader authors, written for [ReShade](https://github.com/crosire/reshade) by [crosire](https://github.com/crosire)
+- **This fork** — crash fixes, and porting those shaders to native UEVR plugins
+
+Full credits, including every shader author:
+**[INSTALL.md → Credits](docs/reference/INSTALL.md#credits)**.
 
 # Release Index
 
@@ -18,11 +28,11 @@ use the links below instead of scrolling it — each one shows only that build's
 releases, newest first. The **Latest** badge always goes to the main Mainline
 build — that is on purpose, and does not mean the other builds are out of date.
 
-| Build line | Releases |
-|---|---|
-| **UEVR ReShade Mainline** (the main one) | [all Mainline releases](https://github.com/wyerdev/UEVR/releases?q=buildline1mainline) |
-| **UEVR ReShade AFW** | [all AFW releases](https://github.com/wyerdev/UEVR/releases?q=buildline2afw) |
-| **UEVR ReShade AFW + Joeyhodge** | [all AFW + Joeyhodge releases](https://github.com/wyerdev/UEVR/releases?q=buildline3afwjoeyhodge) |
+| Build line | Built on | Releases |
+|---|---|---|
+| **UEVR ReShade Mainline** (the main one) | Praydog's UEVR | [all Mainline releases](https://github.com/wyerdev/UEVR/releases?q=buildline1mainline) |
+| **UEVR ReShade AFW** | + PureDark's AFW | [all AFW releases](https://github.com/wyerdev/UEVR/releases?q=buildline2afw) |
+| **UEVR ReShade AFW + Joeyhodge** | + PureDark's AFW + joeyhodge's UE 5.5-5.8 fixes | [all AFW + Joeyhodge releases](https://github.com/wyerdev/UEVR/releases?q=buildline3afwjoeyhodge) |
 
 What each build is based on, how they can be installed at the same time, and
 which one you want: [Choose Your Build Line](docs/reference/INSTALL.md#choose-your-build-line).
@@ -222,7 +232,7 @@ LUT is functionally lightweight despite running through the multi-pass runtime; 
 cmd.exe //c "build.bat"
 ```
 
-Plugin DLLs output to `<BUILDDIR>/Release/`, where `BUILDDIR` is the branch-specific out-of-source build directory set at the top of `build.bat` (`A:\UEVR-build\reshade` on `master`), overridable via the `UEVR_BUILD_DIR` environment variable. Deploy with `bash deploy.sh`, which installs to `%APPDATA%/UnrealVRMod/UEVR/plugins/<variant>/` (global) or `%APPDATA%/UnrealVRMod/<game_executable>/data/plugins/<variant>/` (per-game).
+Plugin DLLs output to `<BUILDDIR>/Release/`, where `BUILDDIR` is the branch-specific out-of-source build directory set at the top of `build.bat` (`A:\UEVR-build\reshade` on `master`), overridable via the `UEVR_BUILD_DIR` environment variable. Deploy with `bash deploy.sh`, which installs the DLLs to `%APPDATA%/UnrealVRMod/UEVR/plugins/<variant>/` and the shipping presets and shader assets to `%APPDATA%/UnrealVRMod/UEVR/data/plugins/` — only the DLL directory is variant-scoped, the data is shared by every build line.
 
 ### Licenses
 

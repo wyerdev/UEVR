@@ -90,6 +90,10 @@ BUILD_LINES = {
         # this build line delay-loads.
         "base_repo": "PureDark/UEVR",
         "base_label": "base UEVR AFW release",
+        "attribution": "Asynchronous frame warp is"
+                       " [PureDark](https://github.com/PureDark)'s work \u2014"
+                       " this build only brings the ReShade shader layer to"
+                       " it.",
     },
     "reshade-afw-joeyhodge": {
         "name": "UEVR ReShade AFW + Joeyhodge",
@@ -108,6 +112,11 @@ BUILD_LINES = {
         # the only source of the proprietary PDAFWPlugin.dll it delay-loads.
         "base_repo": "PureDark/UEVR",
         "base_label": "base UEVR AFW release (joeyhodge-based build)",
+        "attribution": "Asynchronous frame warp is"
+                       " [PureDark](https://github.com/PureDark)'s work and the"
+                       " UE 5.5-5.8 fixes are"
+                       " [joeyhodge](https://github.com/joeyhodge)'s \u2014 this"
+                       " build only brings the ReShade shader layer to them.",
     },
 }
 
@@ -137,18 +146,29 @@ def build_line_header(variant: str, repo_slug: str, commit_sha: str) -> str:
     # Named so people recognise the variant they want; "build line" on its own
     # means nothing to a reader. Derived from BUILD_LINES so a new line shows up
     # here automatically. The common "UEVR " prefix carries no information.
-    others = ", ".join(
+    other_names = [
         other["name"].removeprefix("UEVR ")
         for other_id, other in BUILD_LINES.items() if other_id != variant
-    )
+    ]
+    # "a, b and c" — a bare comma-join reads as a fragment once there is more
+    # than one, and as a stray parenthetical when there is exactly one.
+    if len(other_names) > 1:
+        others = f"lines are {', '.join(other_names[:-1])} and {other_names[-1]}"
+    else:
+        others = f"line is {other_names[0]}"
+
+    # Who actually wrote the upstream this line patches. Without it the release
+    # reads as though this fork authored AFW or the UE 5.5-5.8 fixes.
+    attribution = line.get("attribution")
+    attribution_block = f"\n{attribution}\n" if attribution else ""
 
     return f"""# {line['name']}
 
 This release patches **{line['upstream']}**. The core zip, the shaders zip, and
 your installed shader folder must all come from this same build line — you
 cannot mix them. [All builds of this version]({own_filter})
-
-Want a different version ({others})? See
+{attribution_block}
+The other build {others} — see
 [How to Install]({install_url}#choose-your-build-line).
 
 <sub>build line ID: {line['marker']}</sub>
@@ -334,6 +354,9 @@ def main() -> None:
 {changelog}
 
 ## Credits
+
+**Huge thanks to Praydog, PureDark, joeyhodge, crosire, and the ReShade shader
+authors \u2014 none of this exists without them.**
 
 See [INSTALL.md \u2192 Credits](https://github.com/{args.repo_slug}/blob/{args.commit_sha}/docs/reference/INSTALL.md#credits).
 """
