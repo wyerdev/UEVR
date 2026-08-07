@@ -3013,6 +3013,10 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                     if (is_no_dlss()) {
                         ImGui::TextWrapped("No DLSS instance detected, are you sure you have turned on DLSS in-game?");
                     }
+                    if (m_framewarp_mode->value() == CombinedWarping) {
+                        m_framewarp_shading_rate->draw("Framewarp Shading Rate");
+                    }
+                    ImGui::Spacing();
                     //m_use_uint64->draw("Use UINT64");
                     m_clear_before_framewarp->draw("Clear Before Framewarp");
                     m_framewarp_debug->draw("Debug Framewarp");
@@ -3025,8 +3029,6 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                         m_fix_object_motion_range->draw("Fix Object Motion Rnage");
                         if (is_fix_object_motion_vector() && !rawVelocityDesc[0].pTexture) {
                             ImGui::TextWrapped("No UE Velocity Buffer found, can't use the object motion vector fix.");
-                        } else {
-                            m_fix_moving_object_brightness_flickering->draw("Fix Moving Object Brightness Flickering");
                         }
                         ImGui::Spacing();
                     } else {

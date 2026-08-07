@@ -133,30 +133,6 @@ namespace pd
 		ObjectOnly     // only object motion, no camera motion
 	};
 
-	struct FrameWarpEvaluateParams
-	{
-		void*            InCmdList = NULL;          // optional, leave it NULL to use the built-in command list, which will execute immediately so better to submit your own command lists before calling
-		FrameBufferDesc* InEyeFrameBuffer = NULL;   // required, needs to be in pixel shader resource state
-		FrameBufferDesc* OutEyeFrameBuffer = NULL;  // returns reprojected result, which is one of the framebuffer you got from calling InitFrameWarp
-		TextureDesc*     InUIColorAlpha = NULL;     // optional, provide the UI and the plugin will render it according to the camera orientation without the HMD rotaion and position affecting it.
-		float            InUIScale[2] = { 1.0f, 1.0f };
-		float            InUIPos[3] = { 0.0f, 0.0f, -1.0f };
-		float            InMotionScale[2] = { 0.0f, 0.0f };
-		FrameWarpMode    Mode;
-		EyeIndex         EyeIndex;
-		CameraData*      CameraData;  // required, camera matrices for this frame
-		bool             ClearBeforeWarping = false;
-		float            IgnoreMotionThreshold{ 2.5f };  // per-object motion vectors ignore threshold
-		bool             IsHudlessColor = true;          // specify whether InEyeColor is hudless or contaning UI, if the latter, will use UIColorAndAlpha to avoid reprojecting UI.
-		MVType           MotionVectorsType = Normal;
-		bool             Debug = false;
-		bool             IsFoveated = false;
-		RECT             FoveatedArea = {};
-		TextureDesc*     InUEVelocityBuffer = nullptr;
-		bool             UseUINT64 = false;
-		float            Reserved[12] = { 0, 0 };
-	};
-
 	struct TonemapParams
 	{
 		float fGamma;
@@ -302,6 +278,31 @@ namespace pd
 		NoBlend,           // No blend
 		OneMinusSrcAlpha,  // usual
 		PremulAlpha        // UI with premul-alpha
+	};
+
+	struct FrameWarpEvaluateParams
+	{
+		void*            InCmdList = NULL;          // optional, leave it NULL to use the built-in command list, which will execute immediately so better to submit your own command lists before calling
+		FrameBufferDesc* InEyeFrameBuffer = NULL;   // required, needs to be in pixel shader resource state
+		FrameBufferDesc* OutEyeFrameBuffer = NULL;  // returns reprojected result, which is one of the framebuffer you got from calling InitFrameWarp
+		TextureDesc*     InUIColorAlpha = NULL;     // optional, provide the UI and the plugin will render it according to the camera orientation without the HMD rotaion and position affecting it.
+		float            InUIScale[2] = { 1.0f, 1.0f };
+		float            InUIPos[3] = { 0.0f, 0.0f, -1.0f };
+		float            InMotionScale[2] = { 0.0f, 0.0f };
+		FrameWarpMode    Mode;
+		EyeIndex         EyeIndex;
+		CameraData*      CameraData;  // required, camera matrices for this frame
+		bool             ClearBeforeWarping = false;
+		float            IgnoreMotionThreshold{ 2.5f };  // per-object motion vectors ignore threshold
+		bool             IsHudlessColor = true;          // specify whether InEyeColor is hudless or contaning UI, if the latter, will use UIColorAndAlpha to avoid reprojecting UI.
+		MVType           MotionVectorsType = Normal;
+		bool             Debug = false;
+		bool             IsFoveated = false;
+		RECT             FoveatedArea = {};
+		TextureDesc*     InUEVelocityBuffer = nullptr;
+		bool             UseUINT64 = false;
+		ShadingRate      ShadingRate = ShadingRate::ShadingRate_1X1;  // To reduce computation time for older GPU
+		float            Reserved[12] = { 0, 0 };
 	};
 
 	struct __declspec(novtable) D3D12RendererAPI
