@@ -4,9 +4,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UEVR_DATA="$APPDATA/UnrealVRMod"
 
 # [fork] this branch builds out-of-source and installs to its own runtime dir.
-BUILD_DIR="A:/UEVR-build/reshade"
+BUILD_DIR="${UEVR_BUILD_DIR:-A:/UEVR-build/reshade}"
 SRC="$BUILD_DIR/bin"
-DST="A:/UEVR-build/reshade-run"
+DST="${UEVR_DEPLOY_DIR:-A:/UEVR-build/reshade-run}"
 mkdir -p "$DST"
 
 COPIED=0
@@ -28,26 +28,36 @@ for pair in \
   fi
 done
 
-# Deploy shader DLLs and their license files with sequential NN_ prefixes
-# [fork] variant-isolation: must match UEVR_VARIANT_ID in include/uevr/Variant.hpp.
-# Only the plugin DLL dir is variant-scoped; presets/settings/assets are shared
-# by every build line.
-VARIANT="reshade"
-PLUGIN_DST="$UEVR_DATA/UEVR/plugins/$VARIANT"
+# Deploy shader DLLs and their license files with sequential NN_ prefixes.
+# [fork] all build lines load the same shared shader directory.
+PLUGIN_ROOT="$UEVR_DATA/UEVR/plugins"
+PLUGIN_DST="$PLUGIN_ROOT/shaders"
 mkdir -p "$PLUGIN_DST"
 
 # Create a staging directory
 STAGE_TMP=$(mktemp -d 2>/dev/null || (mkdir -p "$BUILD_DIR/deploy_stage" && echo "$BUILD_DIR/deploy_stage"))
 
 # Copy bare-named DLLs to staging
-cp -f "$BUILD_DIR/Release"/*Shader.dll "$STAGE_TMP/"
+shopt -s nullglob
+shader_sources=("$BUILD_DIR/Release"/*Shader.dll)
+if [[ ${#shader_sources[@]} -eq 0 ]]; then
+  echo "ERROR: No shader DLLs found in $BUILD_DIR/Release"
+  rm -rf "$STAGE_TMP"
+  exit 1
+fi
+cp -f "${shader_sources[@]}" "$STAGE_TMP/"
 
 # Assign sequential NN_ prefixes from render_order() and copy LICENSE files
 python "$SCRIPT_DIR/scripts/assign_shader_order.py" "$STAGE_TMP" --exclude Bloom --copy-licenses
 
-# Clean up previously-installed shader DLLs and their license files (both prefixed and unprefixed)
-rm -f "$PLUGIN_DST"/*Shader.dll
-rm -f "$PLUGIN_DST"/*Shader-LICENSE.txt
+# Clean up shared files and legacy shader files from the old global locations.
+rm -f "$PLUGIN_ROOT"/*Shader.dll "$PLUGIN_ROOT"/*Shader-LICENSE.txt
+for legacy_dir in "$PLUGIN_ROOT"/*; do
+  [[ -d "$legacy_dir" ]] || continue
+  [[ "$legacy_dir" == "$PLUGIN_DST" ]] && continue
+  rm -f "$legacy_dir"/*Shader.dll "$legacy_dir"/*Shader-LICENSE.txt
+done
+rm -f "$PLUGIN_DST"/*Shader.dll "$PLUGIN_DST"/*Shader-LICENSE.txt
 
 # Copy all files from staging to target
 for file in "$STAGE_TMP"/*; do
@@ -60,6 +70,7 @@ done
 
 # Clean up staging directory
 rm -rf "$STAGE_TMP"
+shopt -u nullglob
 
 # Deploy shipping presets (always overwrite — these are built-in, not user presets)
 PRESET_SRC="$SCRIPT_DIR/presets"

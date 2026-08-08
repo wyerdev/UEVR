@@ -11,11 +11,9 @@ set "SCRIPT_DIR=%~dp0"
 
 :: Target directories
 set "UEVR_DATA=%APPDATA%\UnrealVRMod"
-:: [fork] variant-isolation: must match UEVR_VARIANT_ID in include\uevr\Variant.hpp.
-:: Only the plugin DLL dir is variant-scoped; presets/settings/assets are shared
-:: by every build line.
-set "VARIANT=reshade"
-set "PLUGIN_DST=%UEVR_DATA%\UEVR\plugins\%VARIANT%"
+:: [fork] all build lines load the same shared shader directory.
+set "PLUGIN_ROOT=%UEVR_DATA%\UEVR\plugins"
+set "PLUGIN_DST=%PLUGIN_ROOT%\shaders"
 set "PRESET_DST=%UEVR_DATA%\UEVR\data\plugins\shipping_presets"
 set "ASSET_DST=%UEVR_DATA%\UEVR\data\plugins\shader_assets"
 
@@ -26,19 +24,23 @@ set "ASSET_DST=%UEVR_DATA%\UEVR\data\plugins\shader_assets"
 :: from render_order(), and then perform the install using those prefixed files.
 ::
 :: Two supported layouts:
-::   1) Release-zip layout: a `plugins/` folder next to this script containing
-::      already-prefixed `NN_*Shader.dll` files. No Python required; we just
-::      install immediately.
+::   1) Release-zip layout: a `plugins\shaders\` folder next to this script
+::      containing already-prefixed `NN_*Shader.dll` files. No Python required;
+::      we just install immediately.
 ::   2) Dev / local-build layout: this script is at the repo root and bare-named
 ::      `*Shader.dll` files live in the branch-specific build dir. We stage them
 ::      into a temp directory, run the Python script to assign the NN_ prefixes
 ::      and copy LICENSE files, and then install from that staged folder.
 :: [fork] must match BUILDDIR in build.bat: each branch builds out-of-source
 :: into its own directory so the variants never share a cache or objects.
-set "BUILDDIR=A:\UEVR-build\reshade"
+if defined UEVR_BUILD_DIR (
+    set "BUILDDIR=%UEVR_BUILD_DIR%"
+) else (
+    set "BUILDDIR=A:\UEVR-build\reshade"
+)
 set "STAGE_TMP="
-if exist "%SCRIPT_DIR%plugins\" (
-    set "PLUGIN_SRC=%SCRIPT_DIR%plugins"
+if exist "%SCRIPT_DIR%plugins\shaders\" (
+    set "PLUGIN_SRC=%SCRIPT_DIR%plugins\shaders"
 ) else if exist "%BUILDDIR%\Release\LevelsPlusShader.dll" (
     rem Dev mode: need Python to stage with correct NN_ prefixes.
     where python >nul 2>&1
@@ -68,7 +70,7 @@ if exist "%SCRIPT_DIR%plugins\" (
 ) else (
     echo ERROR: Cannot find shader DLLs.
     echo Expected one of:
-    echo   - a "plugins" folder next to this script ^(release-zip layout^), or
+    echo   - a "plugins\shaders" folder next to this script ^(release-zip layout^), or
     echo   - %BUILDDIR%\Release\*Shader.dll ^(dev build layout, requires Python^).
     echo.
     goto :fail
@@ -91,9 +93,9 @@ if exist "%SCRIPT_DIR%shader_assets\" (
     set "ASSET_SRC=%SCRIPT_DIR%shader_assets"
 )
 
-:: Count NN_-prefixed shaders (matches what we'll actually install below)
+:: Count shader DLLs (shared shader paths accept both prefixed and bare names).
 set "DLL_COUNT=0"
-for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do set /a DLL_COUNT+=1
+for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader.dll" 2^>nul') do set /a DLL_COUNT+=1
 
 if %DLL_COUNT%==0 (
     echo ERROR: No shader DLLs found in "%PLUGIN_SRC%".
@@ -110,6 +112,18 @@ echo Presets location:
 echo   %PRESET_DST%
 echo.
 
+:: Remove old shader files from the unqualified global path and old variant dirs.
+call :cleanup_shader_dir "%PLUGIN_ROOT%"
+for /d %%v in ("%PLUGIN_ROOT%\*") do (
+    if /i not "%%~nxv"=="shaders" call :cleanup_shader_dir "%%~fv"
+)
+for /d %%g in ("%UEVR_DATA%\*") do (
+    if /i not "%%~nxg"=="UEVR" (
+        call :cleanup_shader_dir "%%~fg\plugins"
+        for /d %%v in ("%%~fg\plugins\*") do call :cleanup_shader_dir "%%~fv"
+    )
+)
+
 :: Create target directories
 if not exist "%PLUGIN_DST%" (
     mkdir "%PLUGIN_DST%"
@@ -123,24 +137,13 @@ if not exist "%PLUGIN_DST%" (
 set "COPIED=0"
 set "ERRORS=0"
 
-:: Cleanup: remove any previously-installed shader DLLs and their LICENSE files
-:: before re-installing. Match pattern: "<digits>_*Shader.dll" (and the matching
-:: LICENSE.txt). All shaders we ship are renamed to NN_<Name>Shader.dll at
-:: package time (the NN_ prefix is auto-assigned by scripts/assign_shader_order.py
-:: from each plugin's render_order()). This pattern is therefore unique to us —
-:: any third-party plugin DLL or any file a user dropped here manually will NOT
-:: have a leading-digit prefix and will not be deleted. This also handles every
-:: past / future shader rename or removal without needing to track a list of
-:: historical names: the glob catches all of them by shape alone.
+:: Cleanup: remove any previously-installed shared shader DLLs and licenses.
 echo Cleaning up any previous shader installation...
-for /f "delims=" %%f in ('dir /b "%PLUGIN_DST%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do del /f "%PLUGIN_DST%\%%f" >nul 2>&1
-for /f "delims=" %%f in ('dir /b "%PLUGIN_DST%\*Shader-LICENSE.txt" 2^>nul ^| findstr /r "^[0-9]"') do del /f "%PLUGIN_DST%\%%f" >nul 2>&1
+for /f "delims=" %%f in ('dir /b "%PLUGIN_DST%\*Shader.dll" 2^>nul') do del /f "%PLUGIN_DST%\%%f" >nul 2>&1
+for /f "delims=" %%f in ('dir /b "%PLUGIN_DST%\*Shader-LICENSE.txt" 2^>nul') do del /f "%PLUGIN_DST%\%%f" >nul 2>&1
 
 echo Installing shaders...
-rem Only copy NN_-prefixed shaders. This skips any bare-named leftovers in dev
-rem mode (e.g. BloomShader.dll, which assign_shader_order.py intentionally
-rem leaves unprefixed because Bloom is excluded from releases).
-for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader.dll" 2^>nul ^| findstr /r "^[0-9]"') do (
+for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader.dll" 2^>nul') do (
     copy /Y "%PLUGIN_SRC%\%%f" "%PLUGIN_DST%\" >nul
     if errorlevel 1 (
         echo   FAILED: %%f
@@ -151,8 +154,8 @@ for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader.dll" 2^>nul ^| findstr /r
     )
 )
 
-:: Copy license files (only NN_-prefixed, same reason as above)
-for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader-LICENSE.txt" 2^>nul ^| findstr /r "^[0-9]"') do (
+:: Copy license files
+for /f "delims=" %%f in ('dir /b "%PLUGIN_SRC%\*Shader-LICENSE.txt" 2^>nul') do (
     copy /Y "%PLUGIN_SRC%\%%f" "%PLUGIN_DST%\" >nul
     if errorlevel 1 (
         echo   FAILED: %%f
@@ -268,3 +271,9 @@ echo.
 if defined STAGE_TMP if exist "%STAGE_TMP%" rmdir /s /q "%STAGE_TMP%" >nul 2>&1
 pause
 exit /b 1
+
+:cleanup_shader_dir
+set "CLEANUP_DIR=%~1"
+for /f "delims=" %%f in ('dir /b "%CLEANUP_DIR%\*Shader.dll" 2^>nul') do del /f "%CLEANUP_DIR%\%%f" >nul 2>&1
+for /f "delims=" %%f in ('dir /b "%CLEANUP_DIR%\*Shader-LICENSE.txt" 2^>nul') do del /f "%CLEANUP_DIR%\%%f" >nul 2>&1
+exit /b 0

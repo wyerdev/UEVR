@@ -1758,9 +1758,9 @@ void PluginLoader::early_init() try {
     module_path.resize(GetModuleFileNameW(nullptr, module_path.data(), module_path.size()));
     spdlog::info("[PluginLoader] Module path {}", utility::narrow(module_path));
 
-    // [fork] variant-isolation glue — see pluginloader/VariantGuard.hpp
-    const auto plugin_path = uevr::variant_guard::plugin_dir(Framework::get_persistent_dir());
-    const auto global_plugins_path = uevr::variant_guard::plugin_dir(Framework::get_persistent_dir() / ".." / "UEVR");
+    // [fork] shared shader discovery glue — see pluginloader/VariantGuard.hpp
+    const auto plugin_directories = uevr::variant_guard::plugin_directories(Framework::get_persistent_dir());
+    const auto& plugin_path = plugin_directories[2].path;
 
     spdlog::info("[PluginLoader] Creating directories {}", plugin_path.string());
 
@@ -1775,7 +1775,8 @@ void PluginLoader::early_init() try {
     // [fork] shader-plugin: shader_settings subdir migration lives in pluginloader/
     uevr::shader_infra::migrate_legacy_data_dirs();
 
-    auto load_plugins_from_dir = [this](std::filesystem::path path) {
+    auto load_plugins_from_dir = [this](std::filesystem::path path,
+        uevr::variant_guard::plugin_directory_kind directory_kind) {
         uevr::variant_guard::log_scan(path, fs::is_directory(path)); // [fork]
 
         if (!fs::exists(path) || !fs::is_directory(path)) {
@@ -1785,7 +1786,26 @@ void PluginLoader::early_init() try {
         for (auto&& entry : fs::directory_iterator{path}) {
             auto&& path = entry.path();
 
-            if (path.has_extension() && path.extension() == ".dll") {
+            if (!path.has_extension() || path.extension() != ".dll") {
+                continue;
+            }
+
+            const auto is_shader_directory = directory_kind == uevr::variant_guard::plugin_directory_kind::shared_shaders;
+            const auto is_shader_plugin = uevr::variant_guard::is_shader_plugin(path);
+
+            if (is_shader_directory != is_shader_plugin) {
+                spdlog::info("[PluginLoader] Skipping {} ({})", path.string(),
+                    is_shader_directory ? "not a shader plugin" : "legacy shader location");
+                continue;
+            }
+
+            const auto name = path.stem().string();
+            if (m_plugins.contains(name)) {
+                spdlog::info("[PluginLoader] Skipping duplicate plugin {} from {}", name, path.string());
+                continue;
+            }
+
+            {
                 auto module = LoadLibrary(path.string().c_str());
 
                 if (module == nullptr) {
@@ -1794,19 +1814,15 @@ void PluginLoader::early_init() try {
                     continue;
                 }
 
-                // [fork] variant-isolation glue — see pluginloader/VariantGuard.hpp
-                if (!uevr::variant_guard::accept_plugin(module, path, m_plugin_load_errors)) {
-                    continue;
-                }
-
                 spdlog::info("[PluginLoader] Loaded {}", path.string());
-                m_plugins.emplace(path.stem().string(), module);
+                m_plugins.emplace(name, module);
             }
         }
     };
 
-    load_plugins_from_dir(global_plugins_path);
-    load_plugins_from_dir(plugin_path);
+    for (const auto& directory : plugin_directories) {
+        load_plugins_from_dir(directory.path, directory.kind);
+    }
 } catch(const std::exception& e) {
     spdlog::error("[PluginLoader] Exception during early init {}", e.what());
 } catch(...) {
