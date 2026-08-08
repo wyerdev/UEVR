@@ -12,20 +12,27 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <vector>
 
 #include <Windows.h>
 
 namespace uevr::variant_guard {
-// Variant-scoped plugin directory beneath `base` (which is a UEVR persistent
-// dir, or the shared UEVR dir for global plugins).
-std::filesystem::path plugin_dir(const std::filesystem::path& base);
+enum class plugin_directory_kind {
+    ordinary,
+    shared_shaders,
+};
+
+struct plugin_directory {
+    std::filesystem::path path;
+    plugin_directory_kind kind;
+};
+
+// Global directories are returned before per-game directories so the loader
+// can keep the global copy when the same plugin exists in both locations.
+std::vector<plugin_directory> plugin_directories(const std::filesystem::path& persistent_dir);
+
+bool is_shader_plugin(const std::filesystem::path& path);
 
 // Diagnostic: records which directories discovery actually looked at.
 void log_scan(const std::filesystem::path& dir, bool is_directory);
-
-// Identity handshake for an already-loaded plugin module. On rejection this
-// logs the reason, records it in `load_errors` under the plugin's stem, frees
-// the module and returns false. The caller simply skips the plugin.
-bool accept_plugin(HMODULE module, const std::filesystem::path& path,
-    std::map<std::string, std::string>& load_errors);
 } // namespace uevr::variant_guard
