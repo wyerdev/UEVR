@@ -103,7 +103,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Could not list releases to resolve the latest master shader package."
           }
-          $releases = @($releaseJson | ConvertFrom-Json)
+          $parsedReleases = ConvertFrom-Json -InputObject $releaseJson
+          $releases = @(foreach ($release in $parsedReleases) { $release })
           $masterReleases = @($releases | Where-Object {
             $_.isLatest -eq $true -and
             $_.tagName -like "uevr-reshade-mainline-release-*"
