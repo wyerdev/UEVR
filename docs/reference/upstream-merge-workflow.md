@@ -58,14 +58,15 @@ It feeds three things in `.github/workflows/release.yml` and
 
 - the **base-download link** at the top of the release body's install steps,
   built as `https://github.com/<base_repo>/releases/tag/<BASE_NIGHTLY>`
-- the **build number** in the release tag, the release title, and both zip
-  names — parsed out of the tag by the "Read base nightly tag" step
+- the **build number** in the release tag, the release title, and the release
+  zip name — parsed out of the tag by the "Read base nightly tag" step
 - the release's claim about which upstream build it is compatible with
 
 **Nothing fails if you forget.** The workflow still goes green and the release
 still publishes; it just tells users to download the *previous* upstream build
-and overwrite it with a core zip built against a newer one. That is a silent,
-user-visible mismatch, which is why this step is called out separately.
+and overwrite it with a shader plugins zip built against a newer one.
+That is a silent, user-visible mismatch, which is why this step is called out
+separately.
 
 Rules:
 
@@ -75,8 +76,8 @@ Rules:
   not merely the newest release on that page.
 - The build-number parser in `release.yml` understands `nightly-(\d+)-` and
   `beta\.(\d+)`. A tag matching neither silently yields `00000-<run>` for the
-  tag, title, and both zip names. If a branch's upstream adopts a new tag form,
-  extend that step in the same change.
+  tag, title, and shader plugins zip name. If a branch's upstream adopts a new
+  tag form, extend that step in the same change.
 
 ## Notes
 
