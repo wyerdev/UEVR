@@ -4,8 +4,7 @@
 Usage:
     python scripts/generate_release_notes.py \
         --nightly-tag "nightly-00397-..." \
-        --zip-name "uevr-patched-00397-42" \
-        --plugins-zip-name "uevr-plugins-00397-42" \
+        --shader-plugins-name "UEVR-ReShade-00397-42-ShaderPlugins" \
         --repo-slug "wyerdev/UnrealVRMod" \
         --commit-sha "abc1234" \
         --out-file "./RELEASE_NOTES.md"
@@ -74,7 +73,7 @@ BUILD_LINES = {
         # Where BASE_NIGHTLY's tag lives, and what to call it in the install
         # steps. Each line is patched against a different upstream build.
         "base_repo": "praydog/UEVR-nightly",
-        "base_label": "base UEVR nightly",
+        "base_label": "Praydog UEVR Nightly",
     },
     "reshade-afw": {
         "name": "UEVR ReShade AFW",
@@ -89,7 +88,7 @@ BUILD_LINES = {
         # which is also the only source of the proprietary PDAFWPlugin.dll
         # this build line delay-loads.
         "base_repo": "PureDark/UEVR",
-        "base_label": "base UEVR AFW release",
+        "base_label": "PureDark UEVR AFW release",
         "attribution": "Asynchronous frame warp is"
                        " [PureDark](https://github.com/PureDark)'s work \u2014"
                        " this build only brings the ReShade shader layer to"
@@ -111,7 +110,7 @@ BUILD_LINES = {
         # This line pairs with the joeyhodge-based one, and that zip is also
         # the only source of the proprietary PDAFWPlugin.dll it delay-loads.
         "base_repo": "PureDark/UEVR",
-        "base_label": "base UEVR AFW release (joeyhodge-based build)",
+        "base_label": "the Joeyhodge-based zip in the PureDark UEVR AFW release",
         "attribution": "Asynchronous frame warp is"
                        " [PureDark](https://github.com/PureDark)'s work and the"
                        " UE 5.5-5.8 fixes are"
@@ -164,9 +163,10 @@ def build_line_header(variant: str, repo_slug: str, commit_sha: str) -> str:
 
     return f"""# {line['name']}
 
-This release patches **{line['upstream']}**. The core zip, the shaders zip, and
-your installed shader folder must all come from this same build line — you
-cannot mix them. [All builds of this version]({own_filter})
+This release patches **{line['upstream']}**. Download the shader plugins zip for
+this build line and do not mix its backend files with another line. Its shader
+DLLs are the shared set used by all three build lines.
+[All builds of this version]({own_filter})
 {attribution_block}
 The other build {others} — see
 [How to Install]({install_url}#choose-your-build-line).
@@ -229,8 +229,8 @@ def _resolve_upstream_ref(explicit: str = "") -> str:
     only reliable source: the name-based candidates below all assume the
     upstream is praydog `master`, which is false on every integration branch.
     On `wyerdev/afw` the workflow adds an `upstream` remote pointing at
-    PureDark and fetches only `AFW`, so none of the candidate *names* exist in
-    CI at all.
+    PureDark and fetches only `AFW`; on `wyerdev/afw-joeyhodge` it fetches only
+    `Joey-Merged`, so none of the candidate *names* exist in CI at all.
 
     The candidates remain as a local-dev fallback, where a contributor on
     `master` may not pass `--upstream-commit`.
@@ -314,11 +314,38 @@ def get_changelog(repo_slug: str, commit_sha: str, upstream_commit: str = "") ->
     return "\n".join(shown)
 
 
+def build_install_section(
+    variant: str,
+    repo_slug: str,
+    commit_sha: str,
+    nightly_tag: str,
+    shader_plugins_name: str,
+) -> str:
+    """Build the install instructions shared by the release page and package."""
+    base = BUILD_LINES[variant]
+    nightly_url = f"https://github.com/{base['base_repo']}/releases/tag/{nightly_tag}"
+
+    return "\n".join((
+        "## How to install",
+        "",
+        f"1. Download the original **{base['base_label']}** used by this release:",
+        f"   **[{nightly_tag}]({nightly_url})**",
+        "2. Extract the original zip to a folder.",
+        f"3. Download **{shader_plugins_name}.zip** from this release.",
+        "4. Extract it over the original files and choose **overwrite/replace**.",
+        "5. Install shaders using one of these options:",
+        "   - **All games (recommended):** Run ``install-plugins.bat``, the",
+        "     shader-installer, from the extracted folder.",
+        f"   - **Single game only:** See [Manual install](https://github.com/{repo_slug}/blob/{commit_sha}/docs/reference/INSTALL.md#manual-install-optional).",
+        "6. Run UEVR as normal.",
+        "",
+    ))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate release notes")
     parser.add_argument("--nightly-tag", required=True)
-    parser.add_argument("--zip-name", required=True)
-    parser.add_argument("--plugins-zip-name", required=True)
+    parser.add_argument("--shader-plugins-name", required=True)
     parser.add_argument("--repo-slug", required=True)
     parser.add_argument("--commit-sha", required=True)
     parser.add_argument(
@@ -329,26 +356,39 @@ def main() -> None:
         "--upstream-commit", default="",
         help="Upstream commit this build was made from, shown in the notes.",
     )
-    parser.add_argument("--out-file", required=True)
+    parser.add_argument("--out-file")
+    parser.add_argument(
+        "--install-readme-out-file",
+        help="Also write the shared install instructions to a package README.",
+    )
     args = parser.parse_args()
 
-    base = BUILD_LINES[args.variant]
-    nightly_url = f"https://github.com/{base['base_repo']}/releases/tag/{args.nightly_tag}"
-    changelog = get_changelog(args.repo_slug, args.commit_sha, args.upstream_commit)
+    if not args.out_file and not args.install_readme_out_file:
+        parser.error("one of --out-file or --install-readme-out-file is required")
+
     header = build_line_header(args.variant, args.repo_slug, args.commit_sha)
+    install_section = build_install_section(
+        args.variant,
+        args.repo_slug,
+        args.commit_sha,
+        args.nightly_tag,
+        args.shader_plugins_name,
+    )
+
+    if args.install_readme_out_file:
+        readme = f"{header}{install_section}"
+        check_keywords(args.variant, readme)
+        with open(args.install_readme_out_file, "w", encoding="utf-8") as f:
+            f.write(readme)
+        print(f"Install readme written to {args.install_readme_out_file}")
+
+    if not args.out_file:
+        return
+
+    changelog = get_changelog(args.repo_slug, args.commit_sha, args.upstream_commit)
 
     notes = f"""{header}
-## How to install
-
-1. Download the **{base['base_label']}** this build is patched against:
-   **[{args.nightly_tag}]({nightly_url})**
-2. Extract the base zip to a folder.
-3. Download **{args.zip_name}.zip** from this release.
-4. Extract and **overwrite/replace** the files from step 2 with the files from this release.
-5. Download **{args.plugins_zip_name}.zip** and run ``install-plugins.bat`` to install shaders and presets.
-   Or install manually -- see [INSTALL.md](https://github.com/{args.repo_slug}/blob/{args.commit_sha}/docs/reference/INSTALL.md).
-6. Run UEVR as normal.
-
+{install_section}
 ## Changes
 
 {changelog}

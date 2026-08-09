@@ -73,8 +73,7 @@ jobs:
           $build = "$num-${{github.run_number}}"
           echo "BUILD_ID=$build" >> $env:GITHUB_ENV
           echo "RELEASE_TAG=${{env.TAG_PREFIX}}-$build" >> $env:GITHUB_ENV
-          echo "ZIP_NAME=UEVR-${{env.LINE_FILE_ID}}-$build-Core" >> $env:GITHUB_ENV
-          echo "PLUGINS_ZIP_NAME=UEVR-${{env.LINE_FILE_ID}}-$build-ShaderPlugins" >> $env:GITHUB_ENV
+          echo "SHADER_PLUGINS_ZIP_NAME=UEVR-${{env.LINE_FILE_ID}}-$build-ShaderPlugins" >> $env:GITHUB_ENV
         shell: powershell
 
       - name: Create annotated tag locally
@@ -93,67 +92,125 @@ jobs:
           # dir that the artifact steps below glob.
           UEVR_BUILD_DIR: ${{github.workspace}}\build
 
-      - name: Compress artifacts
+      - name: Resolve latest master shader release
         run: |
-          echo ${{github.sha}} > ${{github.workspace}}/revision.txt
-          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/uevr/*
-          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/vr-plugin-nullifier/UEVRPluginNullifier.dll
-          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/build/bin/LuaVR/LuaVR.dll
-          7z a ${{github.workspace}}/${{env.ZIP_NAME}}.zip ${{github.workspace}}/revision.txt
+          $releaseJson = gh release list `
+            --repo "${{github.repository}}" `
+            --limit 100 `
+            --exclude-drafts `
+            --exclude-pre-releases `
+            --json tagName,isLatest,publishedAt
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not list releases to resolve the latest master shader package."
+          }
+          $parsedReleases = ConvertFrom-Json -InputObject $releaseJson
+          $releases = @(foreach ($release in $parsedReleases) { $release })
+          $masterReleases = @($releases | Where-Object {
+            $_.isLatest -eq $true -and
+            $_.tagName -like "uevr-reshade-mainline-release-*"
+          })
+          if ($masterReleases.Count -ne 1) {
+            throw "Expected exactly one latest mainline release, found $($masterReleases.Count)."
+          }
+          echo "MASTER_SHADER_RELEASE_TAG=$($masterReleases[0].tagName)" >> $env:GITHUB_ENV
+          Write-Host "Using latest master shader release $($masterReleases[0].tagName)"
+        shell: powershell
+        env:
+          GH_TOKEN: ${{secrets.GITHUB_TOKEN}}
 
-      - name: Package plugins zip
+      - name: Download latest master shader package
         run: |
-          $staging = "${{github.workspace}}/plugins-staging"
-          New-Item -ItemType Directory -Path "$staging/plugins" -Force | Out-Null
+          $downloadDir = "${{github.workspace}}\master-shader-source"
+          New-Item -ItemType Directory -Path "$downloadDir" -Force | Out-Null
+          gh release download "$env:MASTER_SHADER_RELEASE_TAG" `
+            --repo "${{github.repository}}" `
+            --pattern "*-ShaderPlugins.zip" `
+            --dir "$downloadDir" `
+            --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not download the canonical master shader package."
+          }
+          $packages = @(Get-ChildItem "$downloadDir\*-ShaderPlugins.zip" -File)
+          if ($packages.Count -ne 1) {
+            throw "Expected exactly one master ShaderPlugins zip, found $($packages.Count)."
+          }
+          echo "MASTER_SHADER_PACKAGE=$($packages[0].FullName)" >> $env:GITHUB_ENV
+        shell: powershell
+        env:
+          GH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+      - name: Generate shader package readme
+        run: |
+          python "${{github.workspace}}/scripts/generate_release_notes.py" `
+            --nightly-tag "${{env.NIGHTLY_TAG}}" `
+            --shader-plugins-name "${{env.SHADER_PLUGINS_ZIP_NAME}}" `
+            --repo-slug "${{github.repository}}" `
+            --commit-sha "${{github.sha}}" `
+            --variant "${{env.VARIANT_ID}}" `
+            --install-readme-out-file "${{github.workspace}}/README-Install.txt"
+        shell: powershell
+
+      - name: Package shader plugins zip
+        run: |
+          $staging = "${{github.workspace}}/shader-plugins-staging"
+          New-Item -ItemType Directory -Path "$staging" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$staging/plugins/shaders" -Force | Out-Null
           New-Item -ItemType Directory -Path "$staging/shipping_presets" -Force | Out-Null
           New-Item -ItemType Directory -Path "$staging/shader_assets" -Force | Out-Null
 
-          # Copy bare-named shader DLLs into staging, then run the ordering script
-          # to assign sequential NN_ prefixes based on render_order() in each .cpp.
-          # Bloom is excluded: kept in-tree for future fix attempts but broken in VR-LDR.
-          Get-ChildItem "${{github.workspace}}/build/${{env.BUILD_TYPE}}/*Shader.dll" |
-            Where-Object { $_.Name -notmatch "Bloom" } |
-            Copy-Item -Destination "$staging/plugins/"
+          $masterExtract = "${{github.workspace}}\master-shader-extracted"
+          Remove-Item "$masterExtract" -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path "$masterExtract" -Force | Out-Null
+          7z x "$env:MASTER_SHADER_PACKAGE" "-o$masterExtract" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not extract the canonical master shader package."
+          }
 
-          # Assign sequential prefixes, copy LICENSE files, write shaders.manifest
-          # (all driven by render_order()).
-          python "${{github.workspace}}/scripts/assign_shader_order.py" "$staging/plugins" --exclude Bloom --copy-licenses
-
-          # Copy shipping presets (flat *.uevrpreset files only — subfolders like
-          # presets/experimental/ are intentionally excluded from releases).
-          Get-ChildItem "${{github.workspace}}/presets/*.uevrpreset" -File |
-            Copy-Item -Destination "$staging/shipping_presets/"
-
-          # Copy shipped shader assets (LUT pngs, etc.) flat into shader_assets/.
-          # install-plugins.bat detects this layout (vs dev examples/<plugin>/assets/)
-          # and copies into <UEVR_root>/data/plugins/shader_assets/, which is the
-          # fallback path resolve_shader_asset_path() consults at runtime.
-          # Excludes assets belonging to plugins not shipped (e.g. Bloom — see DLL filter above).
-          $excludedAssetPlugins = @('bloom_plugin')
-          Get-ChildItem "${{github.workspace}}/examples" -Directory |
-            Where-Object { $excludedAssetPlugins -notcontains $_.Name } |
-            ForEach-Object {
-              $assetsDir = Join-Path $_.FullName 'assets'
-              if (Test-Path $assetsDir) {
-                Get-ChildItem $assetsDir -File | Copy-Item -Destination "$staging/shader_assets/"
-              }
+          # Copy only the shared payload from the canonical master package.
+          foreach ($sharedPath in @('plugins/shaders', 'shipping_presets', 'shader_assets')) {
+            $sourcePath = Join-Path $masterExtract $sharedPath
+            if (!(Test-Path $sourcePath)) {
+              throw "Master shader package is missing $sharedPath."
             }
+            $destinationPath = Join-Path $staging $sharedPath
+            Copy-Item "$sourcePath\*" "$destinationPath\" -Recurse -Force
+          }
+
+          # Add the branch-specific backend files to the shader package.
+          Copy-Item "${{github.workspace}}/build/bin/uevr/*" "$staging/" -Recurse -Force
+          Copy-Item "${{github.workspace}}/build/bin/vr-plugin-nullifier/UEVRPluginNullifier.dll" "$staging/"
+          Copy-Item "${{github.workspace}}/build/bin/LuaVR/LuaVR.dll" "$staging/"
+          # The build's PDAFWPlugin.dll is only a dummy used to satisfy the
+          # delay-load link. Never package it: the real proprietary DLL must
+          # remain from PureDark's original AFW release.
+          if (Test-Path "$staging/PDAFWPlugin.dll") {
+            throw "The proprietary PDAFWPlugin.dll must remain from PureDark's base release."
+          }
+          echo ${{github.sha}} > ${{github.workspace}}/revision.txt
+          Copy-Item "${{github.workspace}}/revision.txt" "$staging/"
+
+          # Hash the shared shader files before creating this branch package.
+          $shaderFiles = @(Get-ChildItem "$staging/plugins/shaders/*Shader.dll" -File)
+          if ($shaderFiles.Count -eq 0) {
+            throw "The master shader package contains no shader DLLs."
+          }
+          $shaderFiles | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash)  $($_.Path)" }
 
           # Copy install/uninstall scripts
           Copy-Item "${{github.workspace}}/install-plugins.bat" "$staging/"
           Copy-Item "${{github.workspace}}/uninstall-plugins.bat" "$staging/"
+          Copy-Item "${{github.workspace}}/README-Install.txt" "$staging/"
 
           # Create zip
-          7z a "${{github.workspace}}/${{env.PLUGINS_ZIP_NAME}}.zip" "$staging/*"
+          7z a "${{github.workspace}}/${{env.SHADER_PLUGINS_ZIP_NAME}}.zip" "$staging/*"
         shell: powershell
 
-      - name: Hash zips
+      - name: Hash shader plugins zip
         run: |
-          $mainHash = Get-FileHash -Algorithm SHA256 ${{github.workspace}}/${{env.ZIP_NAME}}.zip
-          $mainHash.Hash | Out-File -FilePath ${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256
-          $pluginZip = "${{github.workspace}}/${{env.PLUGINS_ZIP_NAME}}.zip"
-          $pluginHash = Get-FileHash -Algorithm SHA256 $pluginZip
-          $pluginHash.Hash | Out-File -FilePath "$pluginZip.sha256"
+          $package = "${{github.workspace}}/${{env.SHADER_PLUGINS_ZIP_NAME}}.zip"
+          $hash = Get-FileHash -Algorithm SHA256 $package
+          $hash.Hash | Out-File -FilePath "$package.sha256"
         shell: powershell
 
       - name: Add upstream remote
@@ -167,8 +224,7 @@ jobs:
         run: |
           python "${{github.workspace}}/scripts/generate_release_notes.py" `
             --nightly-tag "${{env.NIGHTLY_TAG}}" `
-            --zip-name "${{env.ZIP_NAME}}" `
-            --plugins-zip-name "${{env.PLUGINS_ZIP_NAME}}" `
+            --shader-plugins-name "${{env.SHADER_PLUGINS_ZIP_NAME}}" `
             --repo-slug "${{github.repository}}" `
             --commit-sha "${{github.sha}}" `
             --variant "${{env.VARIANT_ID}}" `
@@ -186,7 +242,7 @@ jobs:
         with:
           tag: ${{env.RELEASE_TAG}}
           name: "${{env.LINE_NAME}} | ${{env.BUILD_ID}}"
-          artifacts: "${{github.workspace}}/${{env.ZIP_NAME}}.zip,${{github.workspace}}/${{env.ZIP_NAME}}.zip.sha256,${{github.workspace}}/${{env.PLUGINS_ZIP_NAME}}.zip,${{github.workspace}}/${{env.PLUGINS_ZIP_NAME}}.zip.sha256"
+          artifacts: "${{github.workspace}}/${{env.SHADER_PLUGINS_ZIP_NAME}}.zip,${{github.workspace}}/${{env.SHADER_PLUGINS_ZIP_NAME}}.zip.sha256"
           bodyFile: ${{github.workspace}}/RELEASE_NOTES.md
           # Only the main build gets GitHub's "Latest" badge. The other builds
           # publish as normal releases so they never take it over.
