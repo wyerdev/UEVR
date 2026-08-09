@@ -34,6 +34,9 @@ build — that is on purpose, and does not mean the other builds are out of date
 | **UEVR ReShade AFW** | + PureDark's AFW | [all AFW releases](https://github.com/wyerdev/UEVR/releases?q=buildline2afw) |
 | **UEVR ReShade AFW + Joeyhodge** | + PureDark's AFW + joeyhodge's UE 5.5-5.8 fixes | [all AFW + Joeyhodge releases](https://github.com/wyerdev/UEVR/releases?q=buildline3afwjoeyhodge) |
 
+Each release provides one shader plugins zip containing that line's backend
+files plus the shared shader DLLs, presets, assets, and shader-installer.
+
 What each build is based on, how they can be installed at the same time, and
 which one you want: [Choose Your Build Line](docs/reference/INSTALL.md#choose-your-build-line).
 
