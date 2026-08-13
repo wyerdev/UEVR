@@ -529,6 +529,31 @@ bool is_dune_awakening_executable_cached() {
     return is_dune;
 }
 
+bool is_dead_island_2_ue425_executable_cached() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        if (!exe_path) {
+            return false;
+        }
+
+        const auto lowered = uevr::games::lowercase_path(*exe_path);
+        const bool matching_executable =
+            lowered.ends_with(L"\\deadisland-win64-shipping.exe") ||
+            lowered.ends_with(L"/deadisland-win64-shipping.exe") ||
+            lowered == L"deadisland-win64-shipping.exe";
+
+        if (!matching_executable) {
+            return false;
+        }
+
+        const auto version = sdk::get_file_version_info();
+        return HIWORD(version.dwFileVersionMS) == 4 &&
+            LOWORD(version.dwFileVersionMS) == 25;
+    }();
+
+    return result;
+}
+
 bool is_everspace2_executable_cached() {
     static const bool is_everspace2 = []() {
         const auto exe_path = utility::get_module_pathw(utility::get_executable());
@@ -7482,7 +7507,17 @@ void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
             const auto last_frame = (frame_count - 1) % runtimes::OpenXR::QUEUE_SIZE;
             const auto now_frame = frame_count % runtimes::OpenXR::QUEUE_SIZE;
             m_openxr->pipeline_states[now_frame] = m_openxr->pipeline_states[last_frame];
-            m_openxr->pipeline_states[now_frame].frame_count = now_frame;
+            if (is_dead_island_2_ue425_executable_cached() && is_using_synchronized_afr()) {
+                // Synced Sequential consumes the full frame token, not the
+                // circular queue index. Advance it even when this eye reuses
+                // the previous pose or every later eye decision stays stale.
+                m_openxr->pipeline_states[now_frame].frame_count = frame_count;
+                m_openxr->internal_frame_count = frame_count;
+                SPDLOG_INFO_ONCE(
+                    "[DeadIsland2][UE4.25][Synced] Advancing the cloned OpenXR pose with its full frame token");
+            } else {
+                m_openxr->pipeline_states[now_frame].frame_count = now_frame;
+            }
         } else {
             const auto last_frame = (frame_count - 1) % m_openvr->pose_queue.size();
             const auto now_frame = frame_count % m_openvr->pose_queue.size();
@@ -8992,10 +9027,18 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
             m_native_stereo_fix->draw("Enabled");
             if (!m_native_stereo_fix->value()) {
                 draw_status_badge("Native Fix status:", "skipped: disabled", skipped_color);
-            } else if (is_using_afr()) {
-                draw_status_badge("Native Fix status:", "skipped: Synced/AFR path", skipped_color);
+            } else if (m_rendering_method->value() != RenderingMethod::NATIVE_STEREO) {
+                draw_status_badge("Native Fix status:", "skipped: Native Stereo rendering required", skipped_color);
+            } else if (m_fake_stereo_hook == nullptr) {
+                draw_status_badge("Native Fix status:", "unavailable: stereo hook not installed", blocked_color);
             } else if (is_native_stereo_fix_enabled()) {
-                draw_status_badge("Native Fix status:", "active", active_color);
+                const auto* status = m_fake_stereo_hook->get_native_stereo_fix_status_text();
+                const auto color = m_fake_stereo_hook->is_native_stereo_fix_operational()
+                    ? active_color
+                    : std::string_view{status}.find("failed closed") != std::string_view::npos
+                        ? blocked_color
+                        : skipped_color;
+                draw_status_badge("Native Fix status:", status, color);
             } else {
                 draw_status_badge("Native Fix status:", "skipped: title/runtime guard", blocked_color);
             }
@@ -9675,7 +9718,14 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);
         if (ImGui::TreeNode("Splitscreen Compatibility")) {
             m_splitscreen_compatibility_mode->draw("Enabled");
-            m_splitscreen_view_index->draw("Index");
+            m_splitscreen_view_index->draw("Player / Camera Pair");
+            if (m_fake_stereo_hook != nullptr) {
+                ImGui::TextWrapped(
+                    "Status: %s",
+                    m_fake_stereo_hook->get_splitscreen_compatibility_status_text());
+            }
+            ImGui::TextWrapped(
+                "Opt-in only; validated for UE4.25+ and UE5. Selects one local player's verified left/right eye pair and leaves the original view list unchanged if ownership cannot be proven.");
             ImGui::TreePop();
         }
     }
