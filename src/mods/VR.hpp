@@ -64,6 +64,7 @@ public:
 
     int afw_since_inject_frame_count = 0;
     int last_dlss_frame_count = 0;
+    int dlss_continue_frame_count = 0;
 
     bool is_afw_last_frame = false;
     int afw_switching_skip_frames = 0;
@@ -101,9 +102,35 @@ public:
     bool is_fix_object_motion_vector() { return m_fix_object_motion_vector->value(); };
     float get_fix_object_motion_range() { return m_fix_object_motion_range->value(); };
 
+    ShadingRate get_framewarp_shading_rate() { 
+        auto value = m_framewarp_shading_rate->value();
+        auto shading_rate = ShadingRate::ShadingRate_1X1;
+        if (value == 0) {
+            shading_rate = ShadingRate::ShadingRate_1X1;
+        } else if (value == 1) {
+            shading_rate = ShadingRate::ShadingRate_1X2;
+        } else if (value == 2) {
+            shading_rate = ShadingRate::ShadingRate_1X4;
+        } else if (value == 3) {
+            shading_rate = ShadingRate::ShadingRate_2X1;
+        } else if (value == 4) {
+            shading_rate = ShadingRate::ShadingRate_2X2;
+        } else if (value == 5) {
+            shading_rate = ShadingRate::ShadingRate_2X4;
+        } else if (value == 6) {
+            shading_rate = ShadingRate::ShadingRate_4X1;
+        } else if (value == 7) {
+            shading_rate = ShadingRate::ShadingRate_4X2;
+        } else if (value == 8) {
+            shading_rate = ShadingRate::ShadingRate_4X4;
+        } 
+        return shading_rate;
+    }
+
     bool is_using_ultra_responsive() { return m_ultra_responsive->value(); };
     bool is_fix_moving_object_brightness_flickering() { return m_fix_moving_object_brightness_flickering->value(); };
 
+    bool is_dlss_for_n_frame(int count) { return dlss_continue_frame_count > count; };
     bool is_no_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10; };
     bool is_never_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10 && last_dlss_frame_count == 0; };
 
@@ -1447,8 +1474,8 @@ private:
     const ModToggle::Ptr m_clear_before_framewarp{ModToggle::create(generate_name("AFW_ClearBeforeFramewarp"), false)};
     const ModToggle::Ptr m_fix_object_motion_vector{ModToggle::create(generate_name("AFW_FixObjectMotionVector"), true)};
     const ModSlider::Ptr m_fix_object_motion_range{ModSlider::create(generate_name("AFW_FixObjectMotionRange"), 0.0f, 10.0f, 3.0f)};
-    const ModToggle::Ptr m_ultra_responsive{ModToggle::create(generate_name("AFW_UltraResponsive"), true)};
-    const ModToggle::Ptr m_fix_moving_object_brightness_flickering{ModToggle::create(generate_name("AFW_FixMovingObjectBrightnessFlickering"), true)};
+    const ModToggle::Ptr m_ultra_responsive{ModToggle::create(generate_name("AFW_UltraResponsive"), false)};
+    const ModToggle::Ptr m_fix_moving_object_brightness_flickering{ModToggle::create(generate_name("AFW_FixMovingObjectBrightnessFlickering"), false)};
     const ModToggle::Ptr m_enable_sharpening{ModToggle::create(generate_name("AFW_EnableSharpening"), false)};
     const ModSlider::Ptr m_sharpness{ModSlider::create(generate_name("AFW_Sharpness"), 0.0f, 1.0f, 0.6f)};
     const ModToggle::Ptr m_framewarp_debug{ModToggle::create(generate_name("AFW_FramewarpDebug"), false)};
@@ -1461,6 +1488,20 @@ private:
             "CombinedWarping"
         },
         (int)FrameWarpMode::CombinedWarping)
+    };
+    const ModCombo::Ptr m_framewarp_shading_rate{ModCombo::create(generate_name("AFW_ShadingRate"),
+        {
+            "1 X 1 (Full Resolution)",
+            "1 X 2 (Full Width x Half Height)",
+            "1 X 4 (Full Width x Quarter Height)",
+            "2 X 1 (Half Width x Full Height)",
+            "2 X 2 (Half Width x Half Height)",
+            "2 X 4 (Half Width x Quarter Height)",
+            "4 X 1 (Quarter Width x Full Height)",
+            "4 X 2 (Quarter Width x Half Height)",
+            "4 X 4 (Quarter Width x Quarter Height)"
+        },
+        (int)0)
     };
 
     // Snap turn settings and globals
@@ -1965,7 +2006,8 @@ public:
             *m_ultra_responsive,
             *m_fix_moving_object_brightness_flickering,
             *m_enable_sharpening,
-            *m_sharpness
+            *m_sharpness,
+            *m_framewarp_shading_rate
         };
 
         add_components_vr();
