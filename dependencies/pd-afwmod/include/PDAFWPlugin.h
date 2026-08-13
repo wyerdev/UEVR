@@ -322,10 +322,10 @@ namespace pd
 		virtual D3D12_GPU_DESCRIPTOR_HANDLE GetGPUDescriptorHandle(int pos) = 0;
 		virtual D3D12_GPU_DESCRIPTOR_HANDLE GetSamplerHandle(int pos) = 0;
 		virtual void                        SetupTextureDesc(TextureDesc& srcDesc) = 0;
-		virtual bool                        CreateVertexBuffer(ID3D12GraphicsCommandList* cmdList, VextexBufferDesc& vextexDesc, uint32_t vertexCount, uint32_t vertexSize, float* pVertexData);
+		virtual bool                        CreateVertexBuffer(ID3D12GraphicsCommandList* cmdList, VextexBufferDesc& vextexDesc, uint32_t vertexCount, uint32_t vertexSize, float* pVertexData) = 0;
 		virtual bool                        CreateTexture(int nWidth, int nHeight, DXGI_FORMAT format, D3D12_RESOURCE_STATES initialState, TextureDesc& textureDesc, bool createUAV) = 0;
 		virtual bool                        CreateFrameBuffer(int nWidth, int nHeight, FrameBufferDesc& framebufferDesc, D3D12_RESOURCE_STATES initialState, bool createUAV) = 0;
-		virtual void                        Clear(ID3D12GraphicsCommandList* cmdList, TextureDesc& texDesc, const FLOAT ColorRGBA[4]) =0;
+		virtual void                        Clear(ID3D12GraphicsCommandList* cmdList, TextureDesc& texDesc, const FLOAT ColorRGBA[4]) = 0;
 		virtual void                        Blit(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc, D3D12_VIEWPORT viewPort = {}, BlendType enableBlend = NoBlend, bool isCS = false) = 0;
 		virtual void                        Copy(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc, D3D12_BOX srcBox = {}, UINT dstX = 0, UINT dstY = 0) = 0;
 		virtual void                        Sharpen(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc, float sharpness) = 0;

@@ -115,6 +115,7 @@ public:
     }
 
     bool is_using_ultra_responsive() { return m_ultra_responsive->value(); };
+    bool is_fix_moving_object_brightness_flickering() { return m_fix_moving_object_brightness_flickering->value(); };
 
     bool is_dlss_for_n_frame(int count) { return dlss_continue_frame_count > count; };
     bool is_no_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10; };
@@ -1022,6 +1023,7 @@ private:
     const ModToggle::Ptr m_fix_object_motion_vector{ModToggle::create(generate_name("AFW_FixObjectMotionVector"), true)};
     const ModSlider::Ptr m_fix_object_motion_range{ModSlider::create(generate_name("AFW_FixObjectMotionRange"), 0.0f, 10.0f, 3.0f)};
     const ModToggle::Ptr m_ultra_responsive{ModToggle::create(generate_name("AFW_UltraResponsive"), false)};
+    const ModToggle::Ptr m_fix_moving_object_brightness_flickering{ModToggle::create(generate_name("AFW_FixMovingObjectBrightnessFlickering"), false)};
     const ModToggle::Ptr m_enable_sharpening{ModToggle::create(generate_name("AFW_EnableSharpening"), false)};
     const ModSlider::Ptr m_sharpness{ModSlider::create(generate_name("AFW_Sharpness"), 0.0f, 1.0f, 0.6f)};
     const ModToggle::Ptr m_framewarp_debug{ModToggle::create(generate_name("AFW_FramewarpDebug"), false)};
@@ -1247,6 +1249,7 @@ public:
             *m_fix_object_motion_vector,
             *m_fix_object_motion_range,
             *m_ultra_responsive,
+            *m_fix_moving_object_brightness_flickering,
             *m_enable_sharpening,
             *m_sharpness,
             *m_framewarp_shading_rate

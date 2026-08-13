@@ -2551,9 +2551,11 @@ void VR::on_present() {
     }
     if (GetAsyncKeyState(VK_NUMPAD3) == 0 && btn3 == true) {
         btn3 = false;
+#ifdef _DEBUG
         mDebug3 = !mDebug3;
         mDebug2 = false;
         mDebug1 = false;
+#endif
     }
     static bool btn4 = false;
     if (GetAsyncKeyState(VK_NUMPAD4) < 0 && btn4 == false) {
@@ -2636,6 +2638,7 @@ void VR::on_present() {
     }
     if (GetAsyncKeyState(VK_NUMPAD5) == 0 && btn5 == true) {
         btn5 = false;
+#ifdef _DEBUG
         auto& value = m_framewarp_mode->value();
         if (value == FrameWarpMode::AlternateEyeWarping)
             value = FrameWarpMode::PreviousFrameWarping;
@@ -2643,6 +2646,7 @@ void VR::on_present() {
             value = FrameWarpMode::CombinedWarping;
         else if (value == FrameWarpMode::CombinedWarping)
             value = FrameWarpMode::AlternateEyeWarping;
+#endif
     }
     static bool btn6 = false;
     if (GetAsyncKeyState(VK_NUMPAD6) < 0 && btn6 == false) {
@@ -3029,6 +3033,8 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                         m_fix_object_motion_range->draw("Fix Object Motion Rnage");
                         if (is_fix_object_motion_vector() && !rawVelocityDesc[0].pTexture) {
                             ImGui::TextWrapped("No UE Velocity Buffer found, can't use the object motion vector fix.");
+                        } else {
+                            m_fix_moving_object_brightness_flickering->draw("Fix Moving Object Brightness Flickering");
                         }
                         ImGui::Spacing();
                     } else {
