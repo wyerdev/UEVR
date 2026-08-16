@@ -23,14 +23,14 @@ git fetch puredark
 # 3. (Optional) Preview incoming commits
 git log --oneline HEAD..puredark/Joey-Merged
 
-# 4. Merge — use --no-edit to skip the editor prompt
+# 4. Merge — commit after updating nightly and resolving conflicts
 git merge puredark/Joey-Merged --no-ff --no-commit
 
 # 5. Update submodules (merge only updates the pointer, not the checkout)
 git submodule update
 
 # 6. Resolve conflicts, update nightly, and commit
-Manually Update nightly version in file: BASE_NIGHTLY
+Manually update nightly version in file: BASE_NIGHTLY
 git rm .github/workflows/dev-build-pr.yml .github/workflows/dev-release.yml # if changed, delete them
 git add BASE_NIGHTLY
 git commit --no-edit
@@ -82,7 +82,7 @@ Rules:
 - The merge creates a merge commit (not fast-forward) because the fork has
   its own commits. Git opens an editor for the commit message — `--no-edit`
   accepts the default.
-- After merge, VS Code "Changes" panel will be empty because the merge is
+- After commit, VS Code "Changes" panel will be empty because the merge is
   already committed. This is normal.
 - If `git stash pop` has conflicts (stashed changes overlap upstream), git
   will tell you and the stash is preserved — resolve manually.
