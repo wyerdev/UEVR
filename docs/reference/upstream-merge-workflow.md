@@ -10,10 +10,8 @@ See [branch-workflow.instructions.md](../../.github/instructions/branch-workflow
 
 ## Prerequisites
 
-- Remote `upstream` points to `https://github.com/praydog/UEVR.git`
-- If not added: `git remote add upstream https://github.com/praydog/UEVR.git`
-- On an integration branch, use that branch's own remote instead
-  (e.g. `puredark`), not `upstream`.
+- Remote `puredark` points to `https://github.com/PureDark/UEVR.git`
+- If not added: `git remote add puredark https://github.com/PureDark/UEVR.git`
 
 ## Workflow
 
@@ -21,24 +19,27 @@ See [branch-workflow.instructions.md](../../.github/instructions/branch-workflow
 # 1. Stash uncommitted changes (if any)
 git stash push -m "WIP before upstream merge"
 
-# 2. Fetch upstream
-git fetch upstream
+# 2. Fetch PureDark's upstream
+git fetch puredark
 
 # 3. (Optional) Preview incoming commits
-git log --oneline HEAD..upstream/master
+git log --oneline HEAD..puredark/AFW
 
-# 4. Merge — use --no-edit to skip the editor prompt
-git merge upstream/master --no-edit
+# 4. Merge — commit after updating nightly and resolving conflicts
+git merge puredark/AFW --no-ff --no-commit
 
 # 5. Update submodules (merge only updates the pointer, not the checkout)
 git submodule update
 
-# 6. Update BASE_NIGHTLY — see below. Easy to forget, and nothing fails if
-#    you do.
+# 6. Resolve conflicts, update nightly, and commit
+Manually update nightly version in file: BASE_NIGHTLY
+git rm .github/workflows/dev-build-pr.yml .github/workflows/dev-release.yml # if changed, delete them
+git add BASE_NIGHTLY
+git commit --no-edit
 
 # 7. Verify before push
 git status                  # should be "working tree clean"
-git log --oneline origin/master..HEAD   # review what will be pushed
+git log --oneline origin/wyerdev/afw..HEAD   # review what will be pushed
 git submodule status        # no + or - prefix = all good
 
 # 8. Push
@@ -48,7 +49,7 @@ git push
 git stash pop
 ```
 
-## Step 6: BASE_NIGHTLY — [2026-07-30]
+## BASE_NIGHTLY — [2026-08-16]
 
 **Every upstream merge must update `BASE_NIGHTLY` in the repo root.** It holds
 one line: the tag of the upstream build this branch is now patched against.
@@ -84,7 +85,7 @@ Rules:
 - The merge creates a merge commit (not fast-forward) because the fork has
   its own commits. Git opens an editor for the commit message — `--no-edit`
   accepts the default.
-- After merge, VS Code "Changes" panel will be empty because the merge is
+- After commit, VS Code "Changes" panel will be empty because the merge is
   already committed. This is normal.
 - If `git stash pop` has conflicts (stashed changes overlap upstream), git
   will tell you and the stash is preserved — resolve manually.
