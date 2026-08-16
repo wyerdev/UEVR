@@ -1063,6 +1063,48 @@ set_target_properties(cas_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target adaptive_sharpen_plugin
+set(CMKR_TARGET adaptive_sharpen_plugin)
+set(adaptive_sharpen_plugin_SOURCES "")
+
+list(APPEND adaptive_sharpen_plugin_SOURCES
+	"examples/adaptive_sharpen_plugin/AdaptiveSharpenPlugin.cpp"
+)
+
+list(APPEND adaptive_sharpen_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${adaptive_sharpen_plugin_SOURCES})
+add_library(adaptive_sharpen_plugin SHARED)
+
+if(adaptive_sharpen_plugin_SOURCES)
+	target_sources(adaptive_sharpen_plugin PRIVATE ${adaptive_sharpen_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${adaptive_sharpen_plugin_SOURCES})
+
+target_compile_features(adaptive_sharpen_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(adaptive_sharpen_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(adaptive_sharpen_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(adaptive_sharpen_plugin PROPERTIES
+	OUTPUT_NAME
+		AdaptiveSharpenShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target lumasharpen_plugin
 set(CMKR_TARGET lumasharpen_plugin)
 set(lumasharpen_plugin_SOURCES "")

@@ -92,6 +92,7 @@ These change the overall look and feel of the image. Detail-safe — they enhanc
 | **Filmic Pass** | Full cinematic color processing: sigmoid curves per RGB channel, bleach bypass, fade, saturation, and per-channel gamma. Can clip at extreme settings. More control than Tonemap — use when you want a specific film look. |
 | **Cartoon** | Stylized toon outlining. Detects diagonal luminance edges and darkens them for a cel-shaded/inked look. Best for animated, high-contrast, or deliberately stylized games; keep subtle so textures do not turn busy. |
 | **LUT** | Apply a custom 1024×32 horizontal-tile LUT PNG to the scene. The final stamp on color before detail/sharpening. See [INSTALL.md](docs/reference/INSTALL.md#lut-customization) for swapping in your own LUT. |
+| **SMAA** | Not currently portable: the exact SweetFX technique has a mandatory depth-linearization pass, and the UEVR pre-render runtime has no depth input. |
 | **FXAA** | NVIDIA FXAA 3.11 quality path. Smooths remaining jagged high-contrast edges after color grading, before grain and sharpening. Best when a game's built-in TAA leaves visible stair-stepping or when sharpening makes edges too crisp. |
 
 **Detail, Sharpening & Film Effects (finishing touches)**
@@ -101,6 +102,7 @@ These change the overall look and feel of the image. Detail-safe — they enhanc
 | **FilmGrain2** | Adds subtle photographic film grain. Hides color banding in dark areas (common on display panels). Keep it subtle — high values look noisy. |
 | **Clarity** | Local contrast enhancement — makes textures and details pop without changing colors or clipping. Works like sharpening but on mid-frequency detail. Multiple blend modes (Soft Light, Overlay, Hard Light, etc). **Very effective** where things often look flat. |
 | **CAS** | AMD FidelityFX Contrast Adaptive Sharpening. Adapts sharpening per-pixel based on local contrast — sharpens flat areas more, high-contrast edges less. No halos. Good general-purpose sharpener. |
+| **AdaptiveSharpen** | Two-pass edge-aware sharpening with adaptive compression and anti-ringing. Preserves color while recovering fine detail; use it as an alternative to CAS or LumaSharpen. |
 | **LumaSharpen** | Sharpens in luminance only (unsharp mask on luma), avoiding color fringing. 4 sampling patterns, adjustable strength and halo clamp. Best for fine detail recovery on top of CAS. |
 
 **Cleanup & Correction (final pass)**
