@@ -127,7 +127,10 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         auto render_frame_count = vr->get_render_frame_count();
         EyeIndex nEye = (render_frame_count % 2 == 0) ? EyeLeft : EyeRight;
         EyeIndex nEyeOther = (render_frame_count % 2 == 0) ? EyeRight : EyeLeft;
+        if (render_frame_count - vr->last_dlss_frame_count > 2)
+            vr->dlss_continue_frame_count = 0;
         vr->last_dlss_frame_count = render_frame_count;
+        vr->dlss_continue_frame_count++;
         static int lastPausedFrame = render_frame_count;
         bool bufferValid = vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture;
         if (!bufferValid)
@@ -195,9 +198,11 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
     return result;
 }
 
-decltype(&ID3D12GraphicsCommandList::ResourceBarrier) ptrResourceBarrier; // 26
+//decltype(&ID3D12GraphicsCommandList::ResourceBarrier) ptrResourceBarrier; // 26
+static SafetyHookInline ResourceBarrier_Hook{};
 void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandList* This, UINT NumBarriers, const D3D12_RESOURCE_BARRIER* pBarriers) {
-    (This->*ptrResourceBarrier)(NumBarriers, pBarriers);
+    //(This->*ptrResourceBarrier)(NumBarriers, pBarriers);
+    ResourceBarrier_Hook.call(This, NumBarriers, pBarriers);
     const auto& vr = VR::get();
 
     // Only track barriers submitted in RHISubmissionThread
@@ -224,7 +229,7 @@ void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandLi
         auto desc = barrier.Transition.pResource->GetDesc();
         if (desc.Format == DXGI_FORMAT_R16G16B16A16_UNORM) {
             if ((barrier.Transition.StateAfter & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE &&
-                barrier.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET) {
+                (barrier.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET || barrier.Transition.StateBefore == D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE)) {
                 if ((desc.Width == vr->renderSize[0] || vr->renderSize[0] == 0) &&
                     (desc.Height == vr->renderSize[1] || vr->renderSize[1] == 0)) {
                     velocityCandidate = barrier.Transition.pResource;
@@ -300,11 +305,13 @@ void WINAPI hk_ID3D12Device_CreateDepthStencilView(
     DSVMap[DestDescriptor.ptr] = pResource;
 }
 
-decltype(&ID3D12GraphicsCommandList::ClearDepthStencilView) ptrClearDepthStencilView; // 47
+//decltype(&ID3D12GraphicsCommandList::ClearDepthStencilView) ptrClearDepthStencilView; // 47
+static SafetyHookInline ClearDepthStencilView_Hook{};
 void WINAPI hk_ID3D12GraphicsCommandList_ClearDepthStencilView(ID3D12GraphicsCommandList* This, 
     D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView, D3D12_CLEAR_FLAGS ClearFlags, FLOAT Depth, UINT8 Stencil, UINT NumRects, const D3D12_RECT* pRects) {
 
-    (This->*ptrClearDepthStencilView)(DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
+    //(This->*ptrClearDepthStencilView)(DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
+    ClearDepthStencilView_Hook.call(This, DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
 
     const auto& vr = VR::get();
 
@@ -529,6 +536,31 @@ bool is_dune_awakening_executable_cached() {
     }();
 
     return is_dune;
+}
+
+bool is_dead_island_2_ue425_executable_cached() {
+    static const bool result = []() {
+        const auto exe_path = utility::get_module_pathw(utility::get_executable());
+        if (!exe_path) {
+            return false;
+        }
+
+        const auto lowered = uevr::games::lowercase_path(*exe_path);
+        const bool matching_executable =
+            lowered.ends_with(L"\\deadisland-win64-shipping.exe") ||
+            lowered.ends_with(L"/deadisland-win64-shipping.exe") ||
+            lowered == L"deadisland-win64-shipping.exe";
+
+        if (!matching_executable) {
+            return false;
+        }
+
+        const auto version = sdk::get_file_version_info();
+        return HIWORD(version.dwFileVersionMS) == 4 &&
+            LOWORD(version.dwFileVersionMS) == 25;
+    }();
+
+    return result;
 }
 
 bool is_everspace2_executable_cached() {
@@ -2886,8 +2918,29 @@ std::optional<std::string> VR::clean_initialize() try {
     *(uintptr_t*)&ptrCreateDepthStencilView = hookVtable(params.d3d12Device, 21, hk_ID3D12Device_CreateDepthStencilView);
 
     auto cmdList = d3d12Renderer->BeginCommandList(0);
-    *(uintptr_t*)&ptrResourceBarrier = hookVtable(cmdList, 26, hk_ID3D12GraphicsCommandList_ResourceBarrier);
-    *(uintptr_t*)&ptrClearDepthStencilView = hookVtable(cmdList, 47, hk_ID3D12GraphicsCommandList_ClearDepthStencilView);
+    {
+        uintptr_t* pVTable = *(uintptr_t**)cmdList;
+        DWORD dwOldProct = 0;
+        BOOL bRet = ::VirtualProtect(pVTable, 4, PAGE_READWRITE, &dwOldProct);
+        auto origResourceBarrier = pVTable[26];
+        auto origClearDepthStencilView = pVTable[47];
+
+        auto result = safetyhook::InlineHook::create((LPVOID)origResourceBarrier, reinterpret_cast<void*>(hk_ID3D12GraphicsCommandList_ResourceBarrier));
+        if (!result) {
+            spdlog::error("Hook ID3D12GraphicsCommandList ResourceBarrier Failed! {}", (INT)result.error().type);
+            return Mod::on_initialize();
+        }
+        ResourceBarrier_Hook = std::move(result.value());
+
+        result = safetyhook::InlineHook::create((LPVOID)origClearDepthStencilView, reinterpret_cast<void*>(hk_ID3D12GraphicsCommandList_ClearDepthStencilView));
+        if (!result) {
+            spdlog::error("Hook ID3D12GraphicsCommandList ClearDepthStencilView Failed! {}", (INT)result.error().type);
+            return Mod::on_initialize();
+        }
+        ClearDepthStencilView_Hook = std::move(result.value());
+    }
+    //*(uintptr_t*)&ptrResourceBarrier = hookVtable(cmdList, 26, hk_ID3D12GraphicsCommandList_ResourceBarrier);
+    //*(uintptr_t*)&ptrClearDepthStencilView = hookVtable(cmdList, 47, hk_ID3D12GraphicsCommandList_ClearDepthStencilView);
     d3d12Renderer->EndCommandList(0);
 
     auto dllNGX = LoadLibrary("_nvngx.dll");
@@ -7484,7 +7537,17 @@ void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
             const auto last_frame = (frame_count - 1) % runtimes::OpenXR::QUEUE_SIZE;
             const auto now_frame = frame_count % runtimes::OpenXR::QUEUE_SIZE;
             m_openxr->pipeline_states[now_frame] = m_openxr->pipeline_states[last_frame];
-            m_openxr->pipeline_states[now_frame].frame_count = now_frame;
+            if (is_dead_island_2_ue425_executable_cached() && is_using_synchronized_afr()) {
+                // Synced Sequential consumes the full frame token, not the
+                // circular queue index. Advance it even when this eye reuses
+                // the previous pose or every later eye decision stays stale.
+                m_openxr->pipeline_states[now_frame].frame_count = frame_count;
+                m_openxr->internal_frame_count = frame_count;
+                SPDLOG_INFO_ONCE(
+                    "[DeadIsland2][UE4.25][Synced] Advancing the cloned OpenXR pose with its full frame token");
+            } else {
+                m_openxr->pipeline_states[now_frame].frame_count = now_frame;
+            }
         } else {
             const auto last_frame = (frame_count - 1) % m_openvr->pose_queue.size();
             const auto now_frame = frame_count % m_openvr->pose_queue.size();
@@ -8419,9 +8482,11 @@ void VR::on_present() {
     }
     if (GetAsyncKeyState(VK_NUMPAD3) == 0 && btn3 == true) {
         btn3 = false;
+#ifdef _DEBUG
         mDebug3 = !mDebug3;
         mDebug2 = false;
         mDebug1 = false;
+#endif
     }
     static bool btn4 = false;
     if (GetAsyncKeyState(VK_NUMPAD4) < 0 && btn4 == false) {
@@ -8504,6 +8569,7 @@ void VR::on_present() {
     }
     if (GetAsyncKeyState(VK_NUMPAD5) == 0 && btn5 == true) {
         btn5 = false;
+#ifdef _DEBUG
         auto& value = m_framewarp_mode->value();
         if (value == FrameWarpMode::AlternateEyeWarping)
             value = FrameWarpMode::PreviousFrameWarping;
@@ -8511,6 +8577,7 @@ void VR::on_present() {
             value = FrameWarpMode::CombinedWarping;
         else if (value == FrameWarpMode::CombinedWarping)
             value = FrameWarpMode::AlternateEyeWarping;
+#endif
     }
     static bool btn6 = false;
     if (GetAsyncKeyState(VK_NUMPAD6) < 0 && btn6 == false) {
@@ -8912,6 +8979,10 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                     if (is_no_dlss()) {
                         ImGui::TextWrapped("No DLSS instance detected, are you sure you have turned on DLSS in-game?");
                     }
+                    if (m_framewarp_mode->value() == CombinedWarping) {
+                        m_framewarp_shading_rate->draw("Framewarp Shading Rate");
+                    }
+                    ImGui::Spacing();
                     //m_use_uint64->draw("Use UINT64");
                     m_clear_before_framewarp->draw("Clear Before Framewarp");
                     m_framewarp_debug->draw("Debug Framewarp");
@@ -8998,10 +9069,18 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
             m_native_stereo_fix->draw("Enabled");
             if (!m_native_stereo_fix->value()) {
                 draw_status_badge("Native Fix status:", "skipped: disabled", skipped_color);
-            } else if (is_using_afr()) {
-                draw_status_badge("Native Fix status:", "skipped: Synced/AFR path", skipped_color);
+            } else if (m_rendering_method->value() != RenderingMethod::NATIVE_STEREO) {
+                draw_status_badge("Native Fix status:", "skipped: Native Stereo rendering required", skipped_color);
+            } else if (m_fake_stereo_hook == nullptr) {
+                draw_status_badge("Native Fix status:", "unavailable: stereo hook not installed", blocked_color);
             } else if (is_native_stereo_fix_enabled()) {
-                draw_status_badge("Native Fix status:", "active", active_color);
+                const auto* status = m_fake_stereo_hook->get_native_stereo_fix_status_text();
+                const auto color = m_fake_stereo_hook->is_native_stereo_fix_operational()
+                    ? active_color
+                    : std::string_view{status}.find("failed closed") != std::string_view::npos
+                        ? blocked_color
+                        : skipped_color;
+                draw_status_badge("Native Fix status:", status, color);
             } else {
                 draw_status_badge("Native Fix status:", "skipped: title/runtime guard", blocked_color);
             }
@@ -9681,7 +9760,14 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);
         if (ImGui::TreeNode("Splitscreen Compatibility")) {
             m_splitscreen_compatibility_mode->draw("Enabled");
-            m_splitscreen_view_index->draw("Index");
+            m_splitscreen_view_index->draw("Player / Camera Pair");
+            if (m_fake_stereo_hook != nullptr) {
+                ImGui::TextWrapped(
+                    "Status: %s",
+                    m_fake_stereo_hook->get_splitscreen_compatibility_status_text());
+            }
+            ImGui::TextWrapped(
+                "Opt-in only; validated for UE4.25+ and UE5. Selects one local player's verified left/right eye pair and leaves the original view list unchanged if ownership cannot be proven.");
             ImGui::TreePop();
         }
     }

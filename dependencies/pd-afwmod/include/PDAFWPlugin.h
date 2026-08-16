@@ -133,30 +133,6 @@ namespace pd
 		ObjectOnly     // only object motion, no camera motion
 	};
 
-	struct FrameWarpEvaluateParams
-	{
-		void*            InCmdList = NULL;          // optional, leave it NULL to use the built-in command list, which will execute immediately so better to submit your own command lists before calling
-		FrameBufferDesc* InEyeFrameBuffer = NULL;   // required, needs to be in pixel shader resource state
-		FrameBufferDesc* OutEyeFrameBuffer = NULL;  // returns reprojected result, which is one of the framebuffer you got from calling InitFrameWarp
-		TextureDesc*     InUIColorAlpha = NULL;     // optional, provide the UI and the plugin will render it according to the camera orientation without the HMD rotaion and position affecting it.
-		float            InUIScale[2] = { 1.0f, 1.0f };
-		float            InUIPos[3] = { 0.0f, 0.0f, -1.0f };
-		float            InMotionScale[2] = { 0.0f, 0.0f };
-		FrameWarpMode    Mode;
-		EyeIndex         EyeIndex;
-		CameraData*      CameraData;  // required, camera matrices for this frame
-		bool             ClearBeforeWarping = false;
-		float            IgnoreMotionThreshold{ 2.5f };  // per-object motion vectors ignore threshold
-		bool             IsHudlessColor = true;          // specify whether InEyeColor is hudless or contaning UI, if the latter, will use UIColorAndAlpha to avoid reprojecting UI.
-		MVType           MotionVectorsType = Normal;
-		bool             Debug = false;
-		bool             IsFoveated = false;
-		RECT             FoveatedArea = {};
-		TextureDesc*     InUEVelocityBuffer = nullptr;
-		bool             UseUINT64 = false;
-		float            Reserved[12] = { 0, 0 };
-	};
-
 	struct TonemapParams
 	{
 		float fGamma;
@@ -304,6 +280,31 @@ namespace pd
 		PremulAlpha        // UI with premul-alpha
 	};
 
+	struct FrameWarpEvaluateParams
+	{
+		void*            InCmdList = NULL;          // optional, leave it NULL to use the built-in command list, which will execute immediately so better to submit your own command lists before calling
+		FrameBufferDesc* InEyeFrameBuffer = NULL;   // required, needs to be in pixel shader resource state
+		FrameBufferDesc* OutEyeFrameBuffer = NULL;  // returns reprojected result, which is one of the framebuffer you got from calling InitFrameWarp
+		TextureDesc*     InUIColorAlpha = NULL;     // optional, provide the UI and the plugin will render it according to the camera orientation without the HMD rotaion and position affecting it.
+		float            InUIScale[2] = { 1.0f, 1.0f };
+		float            InUIPos[3] = { 0.0f, 0.0f, -1.0f };
+		float            InMotionScale[2] = { 0.0f, 0.0f };
+		FrameWarpMode    Mode;
+		EyeIndex         EyeIndex;
+		CameraData*      CameraData;  // required, camera matrices for this frame
+		bool             ClearBeforeWarping = false;
+		float            IgnoreMotionThreshold{ 2.5f };  // per-object motion vectors ignore threshold
+		bool             IsHudlessColor = true;          // specify whether InEyeColor is hudless or contaning UI, if the latter, will use UIColorAndAlpha to avoid reprojecting UI.
+		MVType           MotionVectorsType = Normal;
+		bool             Debug = false;
+		bool             IsFoveated = false;
+		RECT             FoveatedArea = {};
+		TextureDesc*     InUEVelocityBuffer = nullptr;
+		bool             UseUINT64 = false;
+		ShadingRate      ShadingRate = ShadingRate::ShadingRate_1X1;  // To reduce computation time for older GPU
+		float            Reserved[12] = { 0, 0 };
+	};
+
 	struct __declspec(novtable) D3D12RendererAPI
 	{
 		virtual ID3D12GraphicsCommandList*  BeginCommandList(int index) = 0;
@@ -321,10 +322,10 @@ namespace pd
 		virtual D3D12_GPU_DESCRIPTOR_HANDLE GetGPUDescriptorHandle(int pos) = 0;
 		virtual D3D12_GPU_DESCRIPTOR_HANDLE GetSamplerHandle(int pos) = 0;
 		virtual void                        SetupTextureDesc(TextureDesc& srcDesc) = 0;
-		virtual bool                        CreateVertexBuffer(ID3D12GraphicsCommandList* cmdList, VextexBufferDesc& vextexDesc, uint32_t vertexCount, uint32_t vertexSize, float* pVertexData);
+		virtual bool                        CreateVertexBuffer(ID3D12GraphicsCommandList* cmdList, VextexBufferDesc& vextexDesc, uint32_t vertexCount, uint32_t vertexSize, float* pVertexData) = 0;
 		virtual bool                        CreateTexture(int nWidth, int nHeight, DXGI_FORMAT format, D3D12_RESOURCE_STATES initialState, TextureDesc& textureDesc, bool createUAV) = 0;
 		virtual bool                        CreateFrameBuffer(int nWidth, int nHeight, FrameBufferDesc& framebufferDesc, D3D12_RESOURCE_STATES initialState, bool createUAV) = 0;
-		virtual void                        Clear(ID3D12GraphicsCommandList* cmdList, TextureDesc& texDesc, const FLOAT ColorRGBA[4]) =0;
+		virtual void                        Clear(ID3D12GraphicsCommandList* cmdList, TextureDesc& texDesc, const FLOAT ColorRGBA[4]) = 0;
 		virtual void                        Blit(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc, D3D12_VIEWPORT viewPort = {}, BlendType enableBlend = NoBlend, bool isCS = false) = 0;
 		virtual void                        Copy(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc, D3D12_BOX srcBox = {}, UINT dstX = 0, UINT dstY = 0) = 0;
 		virtual void                        Sharpen(ID3D12GraphicsCommandList* cmdList, TextureDesc& dstDesc, TextureDesc& srcDesc, float sharpness) = 0;

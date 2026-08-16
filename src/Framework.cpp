@@ -1007,6 +1007,7 @@ void Framework::on_frame_d3d12() {
         cmd_ctx->cmd_list->ResourceBarrier(1, &barrier);
 
         cmd_ctx->execute();
+        m_d3d12_ui_generation.fetch_add(1, std::memory_order_release);
     }
 
     if (is_init_ok) {

@@ -121,6 +121,7 @@ private:
         bool prefer_left_eye = false,
         bool source_is_single_eye = false,
         d3d12::TextureContext* ui_tex_override = nullptr);
+    bool carry_forward_spectator_backbuffer();
     bool ensure_ue58_spectator_texture(ID3D12Device* device, ID3D12Resource* source);
     void reset_ue58_converted_ui_textures(bool reset_sources = true);
     bool ensure_ue58_slate_ui_consumer_fence(ID3D12Device* device);
@@ -225,7 +226,11 @@ private:
     uint64_t m_ue58_converted_ui_consumer_fence_value{};
     d3d12::TextureContext m_game_tex{};
     d3d12::TextureContext m_ue58_spectator_tex{};
+    bool m_ue58_dedicated_ui_spectator_valid{};
     d3d12::TextureContext m_scene_capture_tex{};
+    uint64_t m_scene_capture_generation{};
+    uint32_t m_scene_capture_width{};
+    uint32_t m_scene_capture_height{};
     d3d12::TextureContext m_shf_mono_scene_tex{};
     d3d12::TextureContext m_dune_hmd_mono_scene_tex{};
     d3d12::TextureContext m_halo_electra_quad_source_tex{};
@@ -352,7 +357,10 @@ private:
             this->copy(swapchain_idx, src, std::nullopt, std::nullopt, src_state, src_box);
         }
         void retire_framework_ui_delayed_release(bool force_wait = false);
-        void copy_framework_ui_ue58(ID3D12Resource* src, D3D12_RESOURCE_STATES src_state = D3D12_RESOURCE_STATE_PRESENT);
+        void copy_framework_ui_ue58(
+            ID3D12Resource* src,
+            uint64_t source_generation,
+            D3D12_RESOURCE_STATES src_state = D3D12_RESOURCE_STATE_PRESENT);
         void wait_for_all_copies() {
             std::scoped_lock _{this->mtx};
 
@@ -408,6 +416,7 @@ private:
             uint32_t framework_ui_last_released_texture{0};
             uint32_t framework_ui_last_release_frame{0};
             uint64_t framework_ui_front_buffer_skip_count{0};
+            uint64_t framework_ui_last_submitted_generation{0};
         };
 
         std::unordered_map<uint32_t, SwapchainContext> contexts{};
@@ -423,6 +432,7 @@ private:
     uint32_t m_last_rendered_frame{0};
     bool m_force_reset{true};
     bool m_last_afr_state{false};
+    bool m_dead_island_2_synced_eye_rebase_pending{};
     bool m_submitted_left_eye{false};
     uint64_t m_swapchain_recreate_count{};
     uint32_t m_last_swapchain_recreate_reasons{};

@@ -7,6 +7,8 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <d3d12.h>
@@ -48,6 +50,8 @@ class AActor;
 class UObject;
 class USceneCaptureComponent2D;
 class UTexture;
+class FRenderTarget;
+class FSceneInterface;
 class FSceneViewFamily;
 class FSceneView;
 }
@@ -57,6 +61,15 @@ class FSceneView;
 // so we need a unified way of storing data that can be used for all versions
 struct VRRenderTargetManager_Base {
 public:
+    struct SceneCaptureTargetSnapshot {
+        Microsoft::WRL::ComPtr<IUnknown> native_resource{};
+        FRHITexture2D* rhi_texture{};
+        uintptr_t owner_texture{};
+        uint64_t generation{};
+        uint32_t width{};
+        uint32_t height{};
+    };
+
     struct Everspace2D3D12SceneTargetSnapshot {
         Microsoft::WRL::ComPtr<ID3D12Resource> resource{};
         D3D12_RESOURCE_DESC desc{};
@@ -135,6 +148,12 @@ public:
         retire_everspace2_scene_target_snapshot(const char* reason);
 
     FRHITexture2D* get_scene_capture_render_target();
+    std::shared_ptr<const SceneCaptureTargetSnapshot> get_scene_capture_target_snapshot() const {
+        return scene_capture_target_snapshot.load(std::memory_order_acquire);
+    }
+    uint64_t get_scene_capture_generation() const {
+        return scene_capture_generation.load(std::memory_order_acquire);
+    }
     void set_render_target(FRHITexture2D* rt) { render_target = rt; }
     void reset_ue58_scene_target_observation() {
         ue58_pending_scene_target = nullptr;
@@ -195,6 +214,15 @@ public:
     }
 
 protected:
+    uint64_t invalidate_scene_capture_generation(const char* reason);
+    bool publish_scene_capture_target_snapshot(
+        sdk::UTexture* owner_texture,
+        FRHITexture2D* rhi_texture,
+        uint64_t generation);
+    std::shared_ptr<const SceneCaptureTargetSnapshot> get_preservable_scene_capture_for_same_size_reallocation(
+        uint32_t width,
+        uint32_t height) const;
+
     void retain_everspace2_dedicated_ui_target(FRHITexture2D* rt);
 
     struct VerifiedFTexture2D {
@@ -288,6 +316,12 @@ protected:
     sdk::UObjectReference<sdk::UTexture> scene_capture_target{nullptr}; // For custom compatibility rendering
     sdk::UObjectReference<sdk::UTexture> scene_capture_target_rhi_thread{nullptr}; // For custom compatibility rendering
     sdk::UTexture* in_flight_target{nullptr}; // Not a reference because this is basically a barrier against creating a new scene capture target
+    uint64_t in_flight_scene_capture_generation{};
+    std::atomic_bool scene_capture_lifetime_active{};
+    std::atomic_bool scene_capture_creation_requested{};
+    std::atomic_bool scene_capture_destruction_requested{};
+    std::atomic<uint64_t> scene_capture_request_serial{};
+    std::atomic<uint64_t> scene_capture_retry_after_ms{};
     sdk::UObjectReference<sdk::UTexture> dedicated_ui_texture{nullptr};
     sdk::UTexture* in_flight_dedicated_ui_texture{nullptr};
     std::unique_ptr<FTexture2DRHIRef> owned_dedicated_ui_target{};
@@ -308,6 +342,8 @@ protected:
     uint32_t ue58_pending_scene_target_observations{0};
     std::atomic<std::shared_ptr<const Everspace2D3D12SceneTargetSnapshot>> everspace2_scene_target_snapshot{};
     std::atomic<uint64_t> everspace2_scene_target_generation{};
+    std::atomic<std::shared_ptr<const SceneCaptureTargetSnapshot>> scene_capture_target_snapshot{};
+    std::atomic<uint64_t> scene_capture_generation{};
 };
 
 struct VRRenderTargetManager : IStereoRenderTargetManager, VRRenderTargetManager_Base {
@@ -392,6 +428,10 @@ struct VRRenderTargetManager_58 : IStereoRenderTargetManager_58, VRRenderTargetM
         TArray<FTexture2DRHIRef>& OutTargetableTextures,
         TArray<FTexture2DRHIRef>& OutShaderResourceTextures,
         uint32_t NumSamples = 1) override;
+
+    uint8_t GetActualColorSwapchainFormat() const override { return 0; }
+    int32_t AcquireColorTexture() override { return -1; }
+    int32_t AcquireDepthTexture() override { return -1; }
 };
 
 struct VRRenderTargetManager_58_Transitional : IStereoRenderTargetManager_58_Transitional, VRRenderTargetManager_Base {
@@ -431,16 +471,9 @@ struct VRRenderTargetManager_58_Transitional : IStereoRenderTargetManager_58_Tra
         TArray<FTexture2DRHIRef>& OutShaderResourceTextures,
         uint32_t NumSamples = 1) override;
 
-    bool AllocateRenderTargetTextures(
-        uint32_t SizeX,
-        uint32_t SizeY,
-        uint8_t Format,
-        uint32_t NumLayers,
-        ETextureCreateFlags Flags,
-        ETextureCreateFlags TargetableTextureFlags,
-        TArray<FTexture2DRHIRef>& OutTargetableTextures,
-        TArray<FTexture2DRHIRef>& OutShaderResourceTextures,
-        uint32_t NumSamples = 1) override;
+    uint8_t GetActualColorSwapchainFormat() const override { return 0; }
+    int32_t AcquireColorTexture() override { return -1; }
+    int32_t AcquireDepthTexture() override { return -1; }
 };
 
 enum class UE58RenderTargetManagerABI : uint8_t {
@@ -603,6 +636,28 @@ public:
         uint32_t render_frame{};
         uint8_t eye{};
     };
+
+    struct NativeStereoFramePacket {
+        std::shared_ptr<const VRRenderTargetManager_Base::SceneCaptureTargetSnapshot> capture{};
+        sdk::FSceneViewFamily* family{};
+        sdk::FSceneView* left_view{};
+        sdk::FSceneView* right_view{};
+        sdk::FSceneViewStateInterface* left_state{};
+        sdk::FSceneViewStateInterface* right_state{};
+        sdk::FRenderTarget* main_target{};
+        sdk::FSceneInterface* scene{};
+        uint64_t serial{};
+        uint64_t capture_generation{};
+        uint32_t engine_frame{};
+        int32_t render_frame{};
+        int32_t player_index{-1};
+        uint32_t left_pass{};
+        uint32_t right_pass{};
+    };
+
+    std::shared_ptr<const NativeStereoFramePacket> get_native_stereo_frame_packet_for_submit(int32_t render_frame) const;
+    void note_native_stereo_frame_packet_consumed(uint64_t serial);
+    void reject_native_stereo_frame_packet(uint64_t serial, const char* detail);
 
     std::optional<DuneTrueStereoFrameSnapshot> get_dune_true_stereo_frame_snapshot() const {
         const auto packed = m_dune_true_stereo_frame.load(std::memory_order_acquire);
@@ -808,6 +863,9 @@ public:
     static void pre_render_viewfamily_renderthread(ISceneViewExtension* extension, sdk::FRHICommandListBase* cmd_list, sdk::FSceneViewFamily& view_family);
 
     const char* get_ghosting_fix_status_text();
+    const char* get_native_stereo_fix_status_text() const;
+    bool is_native_stereo_fix_operational() const;
+    const char* get_splitscreen_compatibility_status_text();
 
 private:
     std::atomic_bool m_dune_character_creation_active{false};
@@ -847,6 +905,9 @@ private:
     bool hook_ue418_oculus_pixel_density_sink();
     bool attempt_hook_dune_dlss_output();
     bool attempt_hook_dune_ffx_frame_resources();
+    bool attempt_hook_dead_island_ue425_compute_light_grid();
+    bool attempt_hook_dead_island_ue425_hair_light_indices();
+    void attempt_hook_split_fiction_haze_view_builder(sdk::UGameViewportClient* viewport_client);
     void attempt_hook_naruto_ue416_init_dynamic_rhi(sdk::FViewport* viewport);
     void attempt_hook_naruto_ue416_projection_rect();
     void attempt_hook_naruto_ue416_draw_stereo_predicate();
@@ -897,6 +958,15 @@ private:
         void* backend,
         void* resource,
         uint64_t frame_id);
+    static void dead_island_ue425_compute_light_grid_hook(safetyhook::Context& ctx);
+    static void dead_island_ue425_hair_light_indices_hook(safetyhook::Context& ctx);
+    static void split_fiction_haze_view_builder_hook(
+        void* viewport_client,
+        void* viewport,
+        void* family_output,
+        void* build_flags,
+        void* collected_views,
+        void* auxiliary_output);
 
     static IStereoRenderTargetManager* get_render_target_manager_hook(FFakeStereoRendering* stereo);
     void observe_ue58_render_target_manager_abi(uintptr_t return_address);
@@ -947,6 +1017,84 @@ private:
         FailedClosed,
     };
 
+    enum class NativeStereoFixState : uint8_t {
+        Off,
+        WaitingForHooks,
+        WaitingForTarget,
+        LearningMainFamily,
+        LearningEyePair,
+        TransitionHold,
+        PairReady,
+        Active,
+        FailedClosed,
+    };
+
+    struct NativeStereoViewMetadata {
+        sdk::FSceneViewFamily* family{};
+        sdk::FSceneViewStateInterface* state{};
+        sdk::FSceneInterface* scene{};
+        int32_t player_index{-1};
+        bool player_index_valid{};
+        uint32_t original_stereo_pass{};
+        uint32_t frame{};
+        FIntRect view_rect{};
+        FIntRect constrained_view_rect{};
+        uint64_t projection_hash{};
+        bool projection_valid{};
+    };
+
+    void set_native_stereo_fix_state(NativeStereoFixState state, const char* detail = nullptr);
+    void invalidate_native_stereo_frame_packet(NativeStereoFixState state, const char* detail);
+    void publish_native_stereo_frame_packet(std::shared_ptr<const NativeStereoFramePacket> packet);
+
+    struct GhostingFixOwner {
+        sdk::UObject* engine{};
+        uintptr_t engine_vtable{};
+        uintptr_t engine_class{};
+        int32_t engine_index{-1};
+        int32_t engine_serial{};
+        uintptr_t game_instance_slot{};
+        sdk::UObject* game_instance{};
+        uintptr_t game_instance_vtable{};
+        uintptr_t game_instance_class{};
+        int32_t game_instance_index{-1};
+        int32_t game_instance_serial{};
+        uintptr_t local_players_header{};
+        uintptr_t local_players_data{};
+        int32_t local_players_count{};
+        int32_t local_players_capacity{};
+        uintptr_t local_player_slot{};
+        sdk::UObject* local_player{};
+        uintptr_t local_player_vtable{};
+        uintptr_t local_player_class{};
+        int32_t local_player_index{-1};
+        int32_t local_player_serial{};
+        uintptr_t view_states_header{};
+        uintptr_t view_states_data{};
+        int32_t view_states_count{};
+        int32_t view_states_capacity{};
+        uint32_t view_state_stride{};
+        uintptr_t view_state_reference_vtable{};
+        uintptr_t eye_state_slot[2]{};
+        uintptr_t viewport_client_slot{};
+        sdk::UObject* viewport_client{};
+        uintptr_t viewport_client_vtable{};
+        uintptr_t viewport_client_class{};
+        int32_t viewport_client_index{-1};
+        int32_t viewport_client_serial{};
+        uintptr_t world_slot{};
+        sdk::UObject* world{};
+        uintptr_t world_vtable{};
+        uintptr_t world_class{};
+        int32_t world_index{-1};
+        int32_t world_serial{};
+        uint32_t last_validated_frame{};
+        uint32_t stable_frames{};
+        bool view_states_are_array{};
+        bool uses_uobject_hook_validation{};
+        bool verified{};
+    };
+
     struct GhostingFixPair {
         sdk::FSceneViewStateInterface* eye_state[2]{};
         sdk::FSceneViewStateInterface* pending_eye_state[2]{};
@@ -964,6 +1112,31 @@ private:
         uint32_t generation{};
         bool orientation_confirmed{};
         bool logged_naturally_separated{};
+        bool logged_owner_unavailable{};
+        bool logged_owner_stabilizing{};
+        bool logged_owner_validation_failed{};
+        GhostingFixOwner owner{};
+    };
+
+    static bool bind_ghosting_fix_owner(GhostingFixPair& pair, const char* log_label = "GhostingFix");
+    static bool validate_ghosting_fix_owner(const GhostingFixPair& pair, const char** failure_stage = nullptr);
+    static bool refresh_ghosting_fix_owner(GhostingFixPair& pair, const char* log_label = "GhostingFix");
+
+    enum class SplitScreenCompatibilityState : uint8_t {
+        Off,
+        WaitingForViews,
+        PairReady,
+        FailedClosed,
+    };
+
+    struct SplitScreenViewMetadata {
+        sdk::FSceneViewFamily* family{};
+        sdk::FSceneViewStateInterface* state{};
+        int32_t player_index{};
+        uint32_t original_stereo_pass{};
+        uint8_t effective_eye{};
+        uint32_t frame{};
+        bool synthetic_split_fiction_haze{};
     };
 
     struct {
@@ -992,6 +1165,22 @@ private:
         uint8_t ghosting_bootstrap_attempts{};
         bool ghosting_bootstrap_ready{};
         bool ghosting_logged_bootstrap_deferred{};
+        bool ghosting_bootstrap_was_enabled{};
+
+        // Source-backed pair used only to separate Native Fix histories when
+        // legacy LocalPlayer code feeds both constructors the left-eye state.
+        GhostingFixPair native_stereo_state_pair{};
+        std::unordered_map<sdk::FSceneView*, NativeStereoViewMetadata> native_stereo_views{};
+        uint32_t native_stereo_metadata_frame{};
+        uintptr_t native_stereo_target{};
+        uintptr_t native_stereo_scene{};
+        uint64_t native_stereo_capture_generation{};
+        uint32_t native_stereo_stable_frames{};
+
+        std::unordered_map<sdk::FSceneView*, SplitScreenViewMetadata> splitscreen_views{};
+        uint32_t splitscreen_metadata_frame{};
+        uint32_t splitscreen_last_success_frame{};
+        SplitScreenCompatibilityState splitscreen_state{SplitScreenCompatibilityState::Off};
 
         // For keeping track of what the states were before our modifications.
         std::unordered_map<sdk::FSceneViewStateInterface*, sdk::FSceneViewInitOptionsUE4> view_init_options_ue4{};
@@ -999,6 +1188,14 @@ private:
         std::unordered_map<sdk::FSceneViewStateInterface*, sdk::FSceneViewInitOptionsUE5> view_init_options_ue5{};
         std::unordered_set<uintptr_t> seen_retaddrs{};
     } m_sceneview_data;
+
+    std::atomic<NativeStereoFixState> m_native_stereo_fix_state{NativeStereoFixState::Off};
+    std::atomic<std::shared_ptr<const NativeStereoFramePacket>> m_native_stereo_frame_packet{};
+    std::atomic<uint64_t> m_native_stereo_packet_serial{};
+    std::atomic<uint64_t> m_native_stereo_consumed_serial{};
+    std::atomic<uint64_t> m_native_stereo_rejected_capture_generation{};
+    std::atomic<uint64_t> m_native_stereo_ue57_capability_failure_generation{};
+    std::atomic_bool m_native_stereo_localplayer_bootstrap_failed{};
 
     safetyhook::InlineHook m_localplayer_get_viewpoint_hook{};
     safetyhook::InlineHook m_tick_hook{};
@@ -1010,6 +1207,9 @@ private:
     safetyhook::InlineHook m_ue418_oculus_pixel_density_hook{};
     safetyhook::InlineHook m_dune_dlss_add_passes_hook{};
     safetyhook::InlineHook m_dune_ffx_register_frame_resources_hook{};
+    safetyhook::MidHook m_dead_island_ue425_compute_light_grid_hook{};
+    safetyhook::MidHook m_dead_island_ue425_hair_light_indices_hook{};
+    safetyhook::InlineHook m_split_fiction_haze_view_builder_hook{};
     safetyhook::InlineHook m_slate_thread_hook{};
     std::vector<safetyhook::MidHook> m_ue57_slate_elements_hooks{};
     safetyhook::MidHook m_ue55_slate_output_texture_register_hook{};
@@ -1028,6 +1228,7 @@ private:
     safetyhook::InlineHook m_gameviewportclient_draw_hook{};
     safetyhook::InlineHook m_viewport_draw_hook{}; // for AFR
     safetyhook::InlineHook m_render_module_begin_render_viewfamily_hook{};
+    std::atomic<bool> m_render_module_begin_render_viewfamily_observed{};
 
     // both of these are used to figure out where the localplayer is, they aren't actively
     // used for anything else, the second one is an alternative hook if the first one
@@ -1182,6 +1383,9 @@ private:
     std::atomic<uint64_t> m_daysgone_bend_ui_restore_count{0};
     bool m_attempted_hook_update_viewport_rhi{false};
     bool m_attempted_hook_fsceneview_constructor{false};
+    bool m_attempted_hook_dead_island_ue425_compute_light_grid{false};
+    bool m_attempted_hook_dead_island_ue425_hair_light_indices{false};
+    bool m_attempted_hook_split_fiction_haze_view_builder{false};
     bool m_attempted_hook_naruto_ue416_init_dynamic_rhi{false};
     bool m_attempted_hook_naruto_ue416_projection_rect{false};
     bool m_attempted_hook_naruto_ue416_draw_stereo_predicate{false};
@@ -1204,6 +1408,7 @@ private:
     bool m_wants_texture_recreation{false};
     bool m_has_view_extension_hook{false};
     bool m_has_game_viewport_client_draw_hook{false};
+    std::atomic_bool m_dead_island_2_viewport_allocation_requested{false};
     bool m_skip_next_adjust_view_rect{true};
     bool m_inside_slate_draw_window{false};
     int32_t m_skip_next_adjust_view_rect_count{1};
@@ -1218,6 +1423,9 @@ private:
     bool m_ignore_next_engine_tick{false};
     void* m_last_destroyed_viewport{nullptr}; // used to check if the viewport is destroyed when we call FViewport::Draw again
     void** m_last_viewport_vtable{nullptr};
+    std::atomic_uint64_t m_synced_draw_lifecycle_generation{1};
+    std::atomic<void*> m_synced_draw_viewport{nullptr};
+    std::atomic<void*> m_synced_draw_viewport_client{nullptr};
 
 
     bool m_analyzing_view_extensions{false};
