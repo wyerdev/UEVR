@@ -24,24 +24,30 @@ git fetch puredark
 git log --oneline HEAD..puredark/Joey-Merged
 
 # 4. Merge — use --no-edit to skip the editor prompt
-git merge puredark/Joey-Merged --no-edit
+git merge puredark/Joey-Merged --no-ff --no-commit
 
 # 5. Update submodules (merge only updates the pointer, not the checkout)
 git submodule update
 
-# 6. Verify before push
+# 6. Resolve conflicts, update nightly, and commit
+Manually Update nightly version in file: BASE_NIGHTLY
+git rm .github/workflows/dev-build-pr.yml .github/workflows/dev-release.yml # if changed, delete them
+git add BASE_NIGHTLY
+git commit --no-edit
+
+# 7. Verify before push
 git status                  # should be "working tree clean"
 git log --oneline origin/wyerdev/afw-joeyhodge..HEAD   # review what will be pushed
 git submodule status        # no + or - prefix = all good
 
-# 7. Push
+# 8. Push
 git push
 
-# 8. Restore stashed work
+# 9. Restore stashed work
 git stash pop
 ```
 
-## Step 6: BASE_NIGHTLY — [2026-07-30]
+## BASE_NIGHTLY — [2026-08-16]
 
 **Every upstream merge must update `BASE_NIGHTLY` in the repo root.** It holds
 one line: the tag of the upstream build this branch is now patched against.
