@@ -98,7 +98,10 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         auto render_frame_count = vr->get_render_frame_count();
         EyeIndex nEye = (render_frame_count % 2 == 0) ? EyeLeft : EyeRight;
         EyeIndex nEyeOther = (render_frame_count % 2 == 0) ? EyeRight : EyeLeft;
+        if (render_frame_count - vr->last_dlss_frame_count > 2)
+            vr->dlss_continue_frame_count = 0;
         vr->last_dlss_frame_count = render_frame_count;
+        vr->dlss_continue_frame_count++;
         static int lastPausedFrame = render_frame_count;
         bool bufferValid = vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture;
         if (!bufferValid)
@@ -166,9 +169,11 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
     return result;
 }
 
-decltype(&ID3D12GraphicsCommandList::ResourceBarrier) ptrResourceBarrier; // 26
+//decltype(&ID3D12GraphicsCommandList::ResourceBarrier) ptrResourceBarrier; // 26
+static SafetyHookInline ResourceBarrier_Hook{};
 void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandList* This, UINT NumBarriers, const D3D12_RESOURCE_BARRIER* pBarriers) {
-    (This->*ptrResourceBarrier)(NumBarriers, pBarriers);
+    //(This->*ptrResourceBarrier)(NumBarriers, pBarriers);
+    ResourceBarrier_Hook.call(This, NumBarriers, pBarriers);
     const auto& vr = VR::get();
 
     // Only track barriers submitted in RHISubmissionThread
@@ -195,7 +200,7 @@ void WINAPI hk_ID3D12GraphicsCommandList_ResourceBarrier(ID3D12GraphicsCommandLi
         auto desc = barrier.Transition.pResource->GetDesc();
         if (desc.Format == DXGI_FORMAT_R16G16B16A16_UNORM) {
             if ((barrier.Transition.StateAfter & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE &&
-                barrier.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET) {
+                (barrier.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET || barrier.Transition.StateBefore == D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE)) {
                 if ((desc.Width == vr->renderSize[0] || vr->renderSize[0] == 0) &&
                     (desc.Height == vr->renderSize[1] || vr->renderSize[1] == 0)) {
                     velocityCandidate = barrier.Transition.pResource;
@@ -271,11 +276,13 @@ void WINAPI hk_ID3D12Device_CreateDepthStencilView(
     DSVMap[DestDescriptor.ptr] = pResource;
 }
 
-decltype(&ID3D12GraphicsCommandList::ClearDepthStencilView) ptrClearDepthStencilView; // 47
+//decltype(&ID3D12GraphicsCommandList::ClearDepthStencilView) ptrClearDepthStencilView; // 47
+static SafetyHookInline ClearDepthStencilView_Hook{};
 void WINAPI hk_ID3D12GraphicsCommandList_ClearDepthStencilView(ID3D12GraphicsCommandList* This, 
     D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView, D3D12_CLEAR_FLAGS ClearFlags, FLOAT Depth, UINT8 Stencil, UINT NumRects, const D3D12_RECT* pRects) {
 
-    (This->*ptrClearDepthStencilView)(DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
+    //(This->*ptrClearDepthStencilView)(DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
+    ClearDepthStencilView_Hook.call(This, DepthStencilView, ClearFlags, Depth, Stencil, NumRects, pRects);
 
     const auto& vr = VR::get();
 
@@ -401,8 +408,29 @@ std::optional<std::string> VR::clean_initialize() try {
     *(uintptr_t*)&ptrCreateDepthStencilView = hookVtable(params.d3d12Device, 21, hk_ID3D12Device_CreateDepthStencilView);
 
     auto cmdList = d3d12Renderer->BeginCommandList(0);
-    *(uintptr_t*)&ptrResourceBarrier = hookVtable(cmdList, 26, hk_ID3D12GraphicsCommandList_ResourceBarrier);
-    *(uintptr_t*)&ptrClearDepthStencilView = hookVtable(cmdList, 47, hk_ID3D12GraphicsCommandList_ClearDepthStencilView);
+    {
+        uintptr_t* pVTable = *(uintptr_t**)cmdList;
+        DWORD dwOldProct = 0;
+        BOOL bRet = ::VirtualProtect(pVTable, 4, PAGE_READWRITE, &dwOldProct);
+        auto origResourceBarrier = pVTable[26];
+        auto origClearDepthStencilView = pVTable[47];
+
+        auto result = safetyhook::InlineHook::create((LPVOID)origResourceBarrier, reinterpret_cast<void*>(hk_ID3D12GraphicsCommandList_ResourceBarrier));
+        if (!result) {
+            spdlog::error("Hook ID3D12GraphicsCommandList ResourceBarrier Failed! {}", (INT)result.error().type);
+            return Mod::on_initialize();
+        }
+        ResourceBarrier_Hook = std::move(result.value());
+
+        result = safetyhook::InlineHook::create((LPVOID)origClearDepthStencilView, reinterpret_cast<void*>(hk_ID3D12GraphicsCommandList_ClearDepthStencilView));
+        if (!result) {
+            spdlog::error("Hook ID3D12GraphicsCommandList ClearDepthStencilView Failed! {}", (INT)result.error().type);
+            return Mod::on_initialize();
+        }
+        ClearDepthStencilView_Hook = std::move(result.value());
+    }
+    //*(uintptr_t*)&ptrResourceBarrier = hookVtable(cmdList, 26, hk_ID3D12GraphicsCommandList_ResourceBarrier);
+    //*(uintptr_t*)&ptrClearDepthStencilView = hookVtable(cmdList, 47, hk_ID3D12GraphicsCommandList_ClearDepthStencilView);
     d3d12Renderer->EndCommandList(0);
 
     auto dllNGX = LoadLibrary("_nvngx.dll");

@@ -51,6 +51,7 @@ public:
 
     int afw_since_inject_frame_count = 0;
     int last_dlss_frame_count = 0;
+    int dlss_continue_frame_count = 0;
 
     bool is_afw_last_frame = false;
     int afw_switching_skip_frames = 0;
@@ -91,6 +92,7 @@ public:
     bool is_using_ultra_responsive() { return m_ultra_responsive->value(); };
     bool is_fix_moving_object_brightness_flickering() { return m_fix_moving_object_brightness_flickering->value(); };
 
+    bool is_dlss_for_n_frame(int count) { return dlss_continue_frame_count > count; };
     bool is_no_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10; };
     bool is_never_dlss() { return (m_render_frame_count - last_dlss_frame_count) > 10 && last_dlss_frame_count == 0; };
 
