@@ -24,9 +24,10 @@ class EffectBackend {
 public:
     virtual ~EffectBackend() = default;
     virtual void execute(const std::vector<RTDesc>&                rt_descs,
-                         const std::vector<std::filesystem::path>& ext_tex_paths,
+                         const std::vector<ExternalTextureDesc>&   ext_tex_descs,
                          const std::vector<PassDesc>&              passes,
                          int                                       snapshot_mips,
+                         SceneSnapshotMode                         snapshot_mode,
                          uint64_t                                  pass_mask = ~uint64_t(0)) = 0;
 };
 
@@ -117,6 +118,6 @@ struct DecodedImage {
 
 // Loads a PNG/JPG/etc. from disk into RGBA8. Returns empty image (width==0)
 // on failure. Implemented in texture_loader.cpp via stb_image.
-DecodedImage load_image_rgba8(const wchar_t* path_utf16);
+DecodedImage load_image_rgba8(const wchar_t* path_utf16, int target_width = 0, int target_height = 0);
 
 } // namespace uevr::fx::detail

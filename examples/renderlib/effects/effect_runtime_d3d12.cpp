@@ -23,7 +23,9 @@
 #include <Windows.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
+#include <d3d12sdklayers.h>
 #include <wrl/client.h>
+    uint64_t m_trace_execute_count = 0;
 
 #include <algorithm>
 #include <cstring>
@@ -39,7 +41,7 @@ namespace {
 
 template <typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
-constexpr UINT k_max_srvs_per_pass = 8;
+constexpr UINT k_max_srvs_per_pass = 16;
 // Per-pass resources are ring-buffered so multiple execute() invocations on a
 // single UEVR command list (e.g. native stereo fix dispatches the plugin twice
 // per frame, once per eye) don't stomp each other's not-yet-executed draws.
@@ -65,9 +67,10 @@ float4 main(PSI i) : SV_Target { return Src.SampleLevel(LinearSampler, i.UV, 0);
 class DX12Backend : public EffectBackend {
 public:
     void execute(const std::vector<RTDesc>&                rt_descs,
-                 const std::vector<std::filesystem::path>& ext_tex_paths,
+                 const std::vector<ExternalTextureDesc>&   ext_tex_descs,
                  const std::vector<PassDesc>&              passes,
                  int                                       snapshot_mips,
+                 SceneSnapshotMode                         snapshot_mode,
                  uint64_t                                  pass_mask) override;
 
 private:
@@ -92,7 +95,9 @@ private:
         size_t                       cb_chunk  = 0;     // 256-byte aligned chunk size
         // SRV ring: shader-visible, k_invocation_ring * k_max_srvs_per_pass descriptors.
         ComPtr<ID3D12DescriptorHeap> srv_heap;
-        ComPtr<ID3D12DescriptorHeap> rtv_heap; // non-shader-visible, 1 slot (RTV consumed at record time)
+        // Non-shader-visible RTV ring. Native-stereo-fix records multiple
+        // scene targets into one command list before submission.
+        ComPtr<ID3D12DescriptorHeap> rtv_heap;
     };
     std::vector<PassResources> m_pass_res;
     UINT64 m_invocation_count = 0;
@@ -102,6 +107,7 @@ private:
         DXGI_FORMAT                  fmt = DXGI_FORMAT_UNKNOWN;
         UINT                         mip_levels = 1;
         bool                         auto_gen_mips = false;
+        bool                         clear_pending = false;
         ComPtr<ID3D12Resource>       tex;
         ComPtr<ID3D12DescriptorHeap> srv_heap;          // non-shader-visible, full-mip-chain SRV
         ComPtr<ID3D12DescriptorHeap> rtv_heap;          // non-shader-visible (mip 0 RTV)
@@ -134,6 +140,7 @@ private:
     struct ExtTex {
         bool                         tried = false;
         std::filesystem::path        loaded_path;       // for hot-swap detection
+        UINT                         loaded_width = 0, loaded_height = 0;
         ComPtr<ID3D12Resource>       tex;
         ComPtr<ID3D12Resource>       upload;            // kept alive for backend lifetime (small)
         ComPtr<ID3D12DescriptorHeap> srv_heap;          // non-shader-visible source
@@ -160,8 +167,15 @@ private:
         if (store.size() <= idx) store.resize(idx + 1);
         return store[idx];
     }
-    bool ensure_ext_tex(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, size_t idx,
-                        const std::filesystem::path& path);
+    ExtTex& ext_tex_slot(SceneSlot* scene, size_t idx, ExternalTextureSizeMode size_mode) {
+        const size_t variant = size_mode == ExternalTextureSizeMode::Scene
+            ? static_cast<size_t>(scene - m_scene_slots) : 0;
+        const size_t cache_idx = idx * std::size(m_scene_slots) + variant;
+        if (m_ext_textures.size() <= cache_idx) m_ext_textures.resize(cache_idx + 1);
+        return m_ext_textures[cache_idx];
+    }
+    bool ensure_ext_tex(ID3D12Device* device, ID3D12GraphicsCommandList* cmd,
+                        size_t idx, SceneSlot* scene, const ExternalTextureDesc& desc);
     // Renders mips 1..mip_levels-1 from mip 0 of `tex`. Mip 0 must enter in
     // PIXEL_SHADER_RESOURCE; subres 1..N-1 must enter in RENDER_TARGET. On exit,
     // ALL subresources are PIXEL_SHADER_RESOURCE.
@@ -209,19 +223,23 @@ bool DX12Backend::ensure_static_state(ID3D12Device* device) {
         rp[1].DescriptorTable.pDescriptorRanges   = &srv_range;
         rp[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
-        D3D12_STATIC_SAMPLER_DESC ss{};
-        ss.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        ss.AddressU = ss.AddressV = ss.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        ss.ComparisonFunc   = D3D12_COMPARISON_FUNC_NEVER;
-        ss.MaxLOD           = D3D12_FLOAT32_MAX;
-        ss.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_STATIC_SAMPLER_DESC samplers[2]{};
+        samplers[0].Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplers[0].AddressU = samplers[0].AddressV = samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samplers[0].ComparisonFunc   = D3D12_COMPARISON_FUNC_NEVER;
+        samplers[0].MaxLOD           = D3D12_FLOAT32_MAX;
+        samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        samplers[1]                  = samplers[0];
+        samplers[1].Filter           = D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR;
+        samplers[1].ShaderRegister   = 1;
 
         D3D12_VERSIONED_ROOT_SIGNATURE_DESC rsd{};
         rsd.Version                       = D3D_ROOT_SIGNATURE_VERSION_1_1;
         rsd.Desc_1_1.NumParameters        = 2;
         rsd.Desc_1_1.pParameters          = rp;
-        rsd.Desc_1_1.NumStaticSamplers    = 1;
-        rsd.Desc_1_1.pStaticSamplers      = &ss;
+        rsd.Desc_1_1.NumStaticSamplers    = static_cast<UINT>(std::size(samplers));
+        rsd.Desc_1_1.pStaticSamplers      = samplers;
         ComPtr<ID3DBlob> sb, se;
         if (FAILED(D3D12SerializeVersionedRootSignature(&rsd, &sb, &se))) {
             if (se) uevr::API::get()->log_error("[fx/dx12] root sig: %s", (const char*)se->GetBufferPointer());
@@ -326,7 +344,7 @@ bool DX12Backend::ensure_pass_resources(ID3D12Device* device, size_t pi, size_t 
     if (!r.rtv_heap) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
         hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        hd.NumDescriptors = 1;
+        hd.NumDescriptors = k_invocation_ring;
         if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&r.rtv_heap)))) return false;
     }
 
@@ -371,8 +389,8 @@ DX12Backend::SceneSlot* DX12Backend::ensure_scene_slot(ID3D12Device* device, ID3
         // for native stereo, mipped RTs, etc.). Strip RT/UAV flags unless we
         // need to render-to-mip for snapshot mip-gen.
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-        D3D12_RESOURCE_DESC td = native->GetDesc();
-        td.Format    = rf;
+        const auto native_desc = native->GetDesc();
+        D3D12_RESOURCE_DESC td = native_desc;
         td.MipLevels = static_cast<UINT16>(mip_levels);
         td.Flags     = (mip_levels > 1)
                          ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET
@@ -413,6 +431,28 @@ DX12Backend::SceneSlot* DX12Backend::ensure_scene_slot(ID3D12Device* device, ID3
             }
         }
         slot->identity = native; slot->w = w; slot->h = h; slot->fmt = rf; slot->mip_levels = mip_levels;
+        const auto copy_desc = slot->copy_tex->GetDesc();
+        uevr::API::get()->log_info(
+            "[fx/dx12] scene desc native=%p dim=%u size=%llux%u array=%u mips=%u fmt=%u samples=%u quality=%u flags=0x%x layout=%u copy=%p copy_dim=%u copy_size=%llux%u copy_array=%u copy_mips=%u copy_fmt=%u copy_flags=0x%x",
+            native,
+            static_cast<unsigned>(native_desc.Dimension),
+            static_cast<unsigned long long>(native_desc.Width),
+            static_cast<unsigned>(native_desc.Height),
+            static_cast<unsigned>(native_desc.DepthOrArraySize),
+            static_cast<unsigned>(native_desc.MipLevels),
+            static_cast<unsigned>(native_desc.Format),
+            static_cast<unsigned>(native_desc.SampleDesc.Count),
+            static_cast<unsigned>(native_desc.SampleDesc.Quality),
+            static_cast<unsigned>(native_desc.Flags),
+            static_cast<unsigned>(native_desc.Layout),
+            slot->copy_tex.Get(),
+            static_cast<unsigned>(copy_desc.Dimension),
+            static_cast<unsigned long long>(copy_desc.Width),
+            static_cast<unsigned>(copy_desc.Height),
+            static_cast<unsigned>(copy_desc.DepthOrArraySize),
+            static_cast<unsigned>(copy_desc.MipLevels),
+            static_cast<unsigned>(copy_desc.Format),
+            static_cast<unsigned>(copy_desc.Flags));
     }
     return slot;
 }
@@ -485,6 +525,11 @@ bool DX12Backend::ensure_int_rt(ID3D12Device* device, SceneSlot* scene, size_t i
     }
     rt.w = w; rt.h = h; rt.fmt = desc.format; rt.mip_levels = mips; rt.auto_gen_mips = gen_mips;
     rt.state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    rt.clear_pending = true;
+    uevr::API::get()->log_info(
+        "[fx/dx12] intermediate idx=%zu scene=%p size=%ux%u fmt=%u mips=%u shared=%d persistent=%d",
+        idx, scene->identity, rt.w, rt.h, static_cast<unsigned>(rt.fmt), rt.mip_levels,
+        desc.shared_across_scene_slots ? 1 : 0, desc.persistent ? 1 : 0);
     return true;
 }
 
@@ -553,20 +598,24 @@ void DX12Backend::generate_mips(ID3D12GraphicsCommandList* cmd, ID3D12Resource* 
 }
 
 bool DX12Backend::ensure_ext_tex(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, size_t idx,
-                                  const std::filesystem::path& path) {
-    if (m_ext_textures.size() <= idx) m_ext_textures.resize(idx + 1);
-    auto& e = m_ext_textures[idx];
+                                  SceneSlot* scene, const ExternalTextureDesc& desc) {
+    auto& e = ext_tex_slot(scene, idx, desc.size_mode);
+    const UINT target_width = desc.size_mode == ExternalTextureSizeMode::Scene ? scene->w : 0;
+    const UINT target_height = desc.size_mode == ExternalTextureSizeMode::Scene ? scene->h : 0;
     // Hot-swap: if the requested path differs from what was loaded, reset the slot.
     // ComPtr release drops our CPU ref; D3D12 keeps the resource alive until any
     // in-flight command list referencing it has completed (deferred destruction).
-    if (e.tried && e.loaded_path != path) { e = {}; }
+    if (e.tried && (e.loaded_path != desc.path || e.loaded_width != target_width ||
+                    e.loaded_height != target_height)) { e = {}; }
     if (e.tried) return e.tex != nullptr;
     e.tried = true;
-    e.loaded_path = path;
+    e.loaded_path = desc.path;
+    e.loaded_width = target_width;
+    e.loaded_height = target_height;
 
-    auto img = detail::load_image_rgba8(path.c_str());
+    auto img = detail::load_image_rgba8(desc.path.c_str(), target_width, target_height);
     if (img.width == 0) {
-        uevr::API::get()->log_warn("[fx/dx12] failed to load texture: %ls", path.c_str());
+        uevr::API::get()->log_warn("[fx/dx12] failed to load texture: %ls", desc.path.c_str());
         return false;
     }
 
@@ -637,13 +686,16 @@ bool DX12Backend::ensure_ext_tex(ID3D12Device* device, ID3D12GraphicsCommandList
     svd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     svd.Texture2D.MipLevels     = 1;
     device->CreateShaderResourceView(e.tex.Get(), &svd, e.srv_heap->GetCPUDescriptorHandleForHeapStart());
+    uevr::API::get()->log_info("[fx/dx12] loaded texture: %ls -> %dx%d",
+                               desc.path.c_str(), img.width, img.height);
     return true;
 }
 
 void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
-                          const std::vector<std::filesystem::path>& ext_tex_paths,
+                          const std::vector<ExternalTextureDesc>&   ext_tex_descs,
                           const std::vector<PassDesc>&              passes,
                           int                                       snapshot_mips,
+                          SceneSnapshotMode                         snapshot_mode,
                           uint64_t                                  pass_mask) {
     static int s_last_exit = -2;
     auto exit_log = [&](int reason, const char* msg) {
@@ -671,10 +723,61 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
     auto cmd = static_cast<ID3D12GraphicsCommandList*>(uevr::API::StereoHook::get_pre_render_command_list());
     if (!cmd) { exit_log(5, "pre_render_command_list null"); return; }
 
+    const uint64_t trace_execute = ++m_trace_execute_count;
+    const bool trace = passes.size() == 12 && trace_execute <= 4;
+    Microsoft::WRL::ComPtr<ID3D12InfoQueue> info_queue;
+    UINT64 info_queue_cursor = 0;
+    if (trace) {
+        const HRESULT hr = device->QueryInterface(IID_PPV_ARGS(&info_queue));
+        if (info_queue) info_queue_cursor = info_queue->GetNumStoredMessages();
+        api->log_info("[fx/dx12-trace] setup exec=%llu scene_obj=%p native=%p cmd=%p mode=%d mask=0x%llx info_queue=%d hr=0x%08lx",
+                      static_cast<unsigned long long>(trace_execute), scene_rt_obj, scene_native, cmd,
+                      static_cast<int>(snapshot_mode), static_cast<unsigned long long>(pass_mask),
+                      info_queue ? 1 : 0, static_cast<unsigned long>(hr));
+    }
+
     if (!ensure_static_state(device)) { exit_log(6, "ensure_static_state failed"); return; }
     UINT snap_mips = static_cast<UINT>(std::max(1, snapshot_mips));
     auto* scene = ensure_scene_slot(device, scene_native, static_cast<UINT>(sd.Width), sd.Height, sd.Format, snap_mips);
     if (!scene) { exit_log(7, "ensure_scene_slot failed"); return; }
+
+    if (trace) {
+        api->log_info("[fx/dx12-trace] begin exec=%llu scene=%p copy=%p scene_desc_fmt=%u copy_desc_fmt=%u",
+                      static_cast<unsigned long long>(trace_execute), scene_native, scene->copy_tex.Get(),
+                      static_cast<unsigned>(sd.Format), static_cast<unsigned>(scene->copy_tex->GetDesc().Format));
+    }
+
+    auto trace_resource = [&](const char* phase, size_t pass_index, int logical_id,
+                              ID3D12Resource* resource, D3D12_RESOURCE_STATES state) {
+        if (!trace || resource == nullptr) return;
+        const auto d = resource->GetDesc();
+        api->log_info(
+            "[fx/dx12-trace] resource phase=%s pass=%zu id=%d ptr=%p dim=%u size=%llux%u array=%u mips=%u fmt=%u samples=%u flags=0x%x state=0x%x",
+            phase, pass_index, logical_id, resource, static_cast<unsigned>(d.Dimension),
+            static_cast<unsigned long long>(d.Width), static_cast<unsigned>(d.Height),
+            static_cast<unsigned>(d.DepthOrArraySize), static_cast<unsigned>(d.MipLevels),
+            static_cast<unsigned>(d.Format), static_cast<unsigned>(d.SampleDesc.Count),
+            static_cast<unsigned>(d.Flags), static_cast<unsigned>(state));
+    };
+
+    auto trace_info_messages = [&]() {
+        if (!trace || !info_queue) return;
+        const UINT64 message_count = info_queue->GetNumStoredMessages();
+        while (info_queue_cursor < message_count) {
+            SIZE_T message_size = 0;
+            if (FAILED(info_queue->GetMessage(info_queue_cursor, nullptr, &message_size)) || message_size == 0) break;
+            std::vector<uint8_t> storage(message_size);
+            auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+            if (SUCCEEDED(info_queue->GetMessage(info_queue_cursor, message, &message_size))) {
+                api->log_info("[fx/dx12-trace] info_queue index=%llu category=%u severity=%u id=%d %s",
+                              static_cast<unsigned long long>(info_queue_cursor),
+                              static_cast<unsigned>(message->Category),
+                              static_cast<unsigned>(message->Severity), message->ID,
+                              message->pDescription != nullptr ? message->pDescription : "<empty>");
+            }
+            ++info_queue_cursor;
+        }
+    };
 
     exit_log(99, "running passes");
 
@@ -683,14 +786,25 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
     // executes them all later — so per-pass shader-visible descriptors and CB
     // writes for *this* invocation must not alias the previous one's.
     const UINT invocation_slot = static_cast<UINT>(m_invocation_count++ % k_invocation_ring);
+    if (trace) {
+        api->log_info("[fx/dx12-trace] invocation exec=%llu slot=%u scene=%p copy=%p scene_size=%ux%u",
+                      static_cast<unsigned long long>(trace_execute), invocation_slot,
+                      scene_native, scene->copy_tex.Get(), scene->w, scene->h);
+    }
 
     detail::set_scene_size(scene->w, scene->h);
     detail::set_scene_rt_format(scene->fmt);
     detail::log_scene_rt_identity_change(scene_native, scene->fmt, scene->w, scene->h);
 
-    // Snapshot scene -> copy_tex (mip 0). For multi-mip snapshots, regenerate the
-    // chain on copy_tex via PS-based 2x box-downsample.
-    {
+    auto snapshot_scene = [&]() {
+        static uint64_t snapshot_count = 0;
+        const uint64_t snapshot_index = ++snapshot_count;
+        if (trace) {
+            api->log_info("[fx/dx12-trace] snapshot begin index=%llu scene=%p state=RT copy=%p state=PSR",
+                          static_cast<unsigned long long>(snapshot_index), scene_native, scene->copy_tex.Get());
+            trace_resource("snapshot_scene", 0, INPUT_SCENE, scene_native, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            trace_resource("snapshot_copy", 0, INPUT_SCENE, scene->copy_tex.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
         // Scene RT (full subres) PSR/RT -> COPY_SOURCE; copy_tex mip 0 PSR -> COPY_DEST.
         D3D12_RESOURCE_BARRIER b[2]{};
         b[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -715,6 +829,12 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
             cmd->CopyResource(scene->copy_tex.Get(), scene_native);
         }
 
+        if (trace) {
+            api->log_info("[fx/dx12-trace] snapshot copy index=%llu operation=%s",
+                          static_cast<unsigned long long>(snapshot_index),
+                          snap_mips > 1 ? "CopyTextureRegion" : "CopyResource");
+        }
+
         b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
         b[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
         b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
@@ -727,7 +847,21 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
                           scene->per_mip_srv_heap->GetCPUDescriptorHandleForHeapStart(),
                           scene->per_mip_rtv_heap->GetCPUDescriptorHandleForHeapStart());
         }
-    }
+        if (trace) {
+            api->log_info("[fx/dx12-trace] snapshot end index=%llu scene_state=RT copy_state=PSR",
+                          static_cast<unsigned long long>(snapshot_index));
+            trace_info_messages();
+        }
+    };
+    if (snapshot_mode == SceneSnapshotMode::OncePerExecute) snapshot_scene();
+
+    auto clear_pending_rt = [&](IntRT& rt) {
+        if (!rt.clear_pending) return;
+        const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        const D3D12_CPU_DESCRIPTOR_HANDLE rtv = rt.rtv_heap->GetCPUDescriptorHandleForHeapStart();
+        cmd->ClearRenderTargetView(rtv, clear_color, 0, nullptr);
+        rt.clear_pending = false;
+    };
 
     cmd->SetGraphicsRootSignature(m_root_sig.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -737,6 +871,15 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
         // on the second native-stereo-fix dispatch — see EffectRuntime::execute(mask)).
         if (pi < 64 && (pass_mask & (uint64_t(1) << pi)) == 0) continue;
         const auto& p = passes[pi];
+        if (trace) {
+            api->log_info("[fx/dx12-trace] pass begin index=%zu input_count=%zu output=%d output_mip=%d",
+                          pi, p.inputs.size(), p.output, p.output_mip);
+            for (size_t input_index = 0; input_index < p.inputs.size(); ++input_index) {
+                api->log_info("[fx/dx12-trace] pass input index=%zu slot=%zu id=%d",
+                              pi, input_index, p.inputs[input_index]);
+            }
+        }
+        if (snapshot_mode == SceneSnapshotMode::BeforeEveryPass) snapshot_scene();
 
         // Resolve output.
         ID3D12Resource* out_res = nullptr;
@@ -760,11 +903,14 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
             out_res = out_int->tex.Get();
             out_w = out_int->w; out_h = out_int->h;
             out_fmt = (p.output_format_override != DXGI_FORMAT_UNKNOWN) ? p.output_format_override : out_int->fmt;
+            clear_pending_rt(*out_int);
         } else {
             static int s_skip = -1; if (s_skip != (int)pi) { s_skip = (int)pi;
                 api->log_warn("[fx/dx12] pass %zu skipped: invalid output id %d", pi, p.output); }
             continue;
         }
+        trace_resource("output_resolved", pi, p.output, out_res,
+                   out_is_scene ? D3D12_RESOURCE_STATE_RENDER_TARGET : out_int->state);
 
         ID3D12PipelineState* pso = nullptr;
         const auto pass_cs = detail::classify_scene_rt_colorspace(scene->fmt);
@@ -782,6 +928,12 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
         }
         auto& res = m_pass_res[pi];
 
+        if (trace) {
+            api->log_info("[fx/dx12-trace] pass resources index=%zu pso=%p cb=%p cb_chunk=%zu srv_heap=%p rtv_heap=%p out_fmt=%u viewport=%ux%u",
+                          pi, pso, res.cb.Get(), res.cb_chunk, res.srv_heap.Get(), res.rtv_heap.Get(),
+                          static_cast<unsigned>(out_fmt), out_w, out_h);
+        }
+
         // Upload cbuffer into this invocation's ring slot.
         if (p.cb_size > 0 && p.cb_data != nullptr && res.cb_mapped && res.cb_chunk > 0) {
             std::memcpy(res.cb_mapped + invocation_slot * res.cb_chunk, p.cb_data, p.cb_size);
@@ -797,21 +949,34 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
         for (size_t i = 0; i < n_in; ++i) {
             const int id = p.inputs[i];
             D3D12_CPU_DESCRIPTOR_HANDLE src{};
+            ID3D12Resource* input_resource = nullptr;
+            D3D12_RESOURCE_STATES input_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
             if (id == INPUT_SCENE) {
                 src = scene->copy_srv_heap->GetCPUDescriptorHandleForHeapStart();
+                input_resource = scene->copy_tex.Get();
             } else if (id >= EXTERNAL_TEX_BASE) {
                 const size_t ext_idx = static_cast<size_t>(id - EXTERNAL_TEX_BASE);
-                if (ext_idx >= ext_tex_paths.size() ||
-                    !ensure_ext_tex(device, cmd, ext_idx, ext_tex_paths[ext_idx])) {
+                if (ext_idx >= ext_tex_descs.size() ||
+                    !ensure_ext_tex(device, cmd, ext_idx, scene, ext_tex_descs[ext_idx])) {
                     inputs_ok = false; break;
                 }
-                src = m_ext_textures[ext_idx].srv_heap->GetCPUDescriptorHandleForHeapStart();
+                src = ext_tex_slot(scene, ext_idx, ext_tex_descs[ext_idx].size_mode)
+                          .srv_heap->GetCPUDescriptorHandleForHeapStart();
+                input_resource = ext_tex_slot(scene, ext_idx, ext_tex_descs[ext_idx].size_mode).tex.Get();
             } else if (id >= 0 && static_cast<size_t>(id) < rt_descs.size()) {
-                auto& store = rt_descs[id].shared_across_scene_slots ? m_shared_rts : scene->int_rts;
-                if (static_cast<size_t>(id) >= store.size()) { inputs_ok = false; break; }
-                auto& rt = store[id];
+                if (!ensure_int_rt(device, scene, static_cast<size_t>(id), rt_descs[id])) {
+                    inputs_ok = false;
+                    break;
+                }
+                auto& rt = int_rt_slot(scene, static_cast<size_t>(id), rt_descs[id]);
                 if (!rt.tex) { inputs_ok = false; break; }
+                clear_pending_rt(rt);
                 if (rt.state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
+                    if (trace) {
+                        api->log_info("[fx/dx12-trace] input transition pass=%zu slot=%zu id=%d resource=%p before=0x%x after=0x%x",
+                                      pi, i, id, rt.tex.Get(), static_cast<unsigned>(rt.state),
+                                      static_cast<unsigned>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+                    }
                     D3D12_RESOURCE_BARRIER b{};
                     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
                     b.Transition.pResource   = rt.tex.Get();
@@ -822,13 +987,26 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
                     rt.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
                 }
                 src = rt.srv_heap->GetCPUDescriptorHandleForHeapStart();
+                input_resource = rt.tex.Get();
             } else {
                 inputs_ok = false; break;
+            }
+            trace_resource("input_resolved", pi, id, input_resource, input_state);
+            if (trace) {
+                api->log_info("[fx/dx12-trace] input descriptor pass=%zu slot=%zu id=%d resource=%p cpu=0x%llx",
+                              pi, i, id, input_resource, static_cast<unsigned long long>(src.ptr));
             }
             device->CopyDescriptorsSimple(1, offset(dst_base, static_cast<UINT>(i), m_srv_descriptor_size),
                                           src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         }
-        if (!inputs_ok) continue;
+        if (!inputs_ok) {
+            static int s_input_skip = -1;
+            if (s_input_skip != static_cast<int>(pi)) {
+                s_input_skip = static_cast<int>(pi);
+                api->log_warn("[fx/dx12] pass %zu skipped: input resolution failed", pi);
+            }
+            continue;
+        }
         // Pad remaining slots with the first SRV to keep the descriptor table fully populated
         // (range was declared with k_max_srvs_per_pass descriptors).
         if (n_in == 0) continue;
@@ -843,10 +1021,21 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
             D3D12_RENDER_TARGET_VIEW_DESC rtvd{};
             rtvd.Format        = out_fmt;
             rtvd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-            out_rtv = res.rtv_heap->GetCPUDescriptorHandleForHeapStart();
+            out_rtv = offset(res.rtv_heap->GetCPUDescriptorHandleForHeapStart(),
+                             invocation_slot, m_rtv_descriptor_size);
             device->CreateRenderTargetView(out_res, &rtvd, out_rtv);
+            if (trace) {
+                api->log_info("[fx/dx12-trace] output scene view pass=%zu resource=%p fmt=%u rtv_cpu=0x%llx",
+                              pi, out_res, static_cast<unsigned>(out_fmt),
+                              static_cast<unsigned long long>(out_rtv.ptr));
+            }
         } else {
             if (out_int->state != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+                if (trace) {
+                    api->log_info("[fx/dx12-trace] output transition pass=%zu id=%d resource=%p before=0x%x after=0x%x",
+                                  pi, p.output, out_int->tex.Get(), static_cast<unsigned>(out_int->state),
+                                  static_cast<unsigned>(D3D12_RESOURCE_STATE_RENDER_TARGET));
+                }
                 D3D12_RESOURCE_BARRIER b{};
                 b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
                 b.Transition.pResource   = out_int->tex.Get();
@@ -876,7 +1065,17 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
         cmd->RSSetViewports(1, &vp);
         D3D12_RECT scissor{}; scissor.right = out_w; scissor.bottom = out_h;
         cmd->RSSetScissorRects(1, &scissor);
+        if (trace) {
+            api->log_info("[fx/dx12-trace] draw pass=%zu pso=%p cb_gpu=0x%llx srv_gpu=0x%llx rtv_cpu=0x%llx viewport=%ux%u scissor=%ldx%ld inputs=%zu",
+                          pi, pso,
+                          static_cast<unsigned long long>(p.cb_size > 0 && res.cb && res.cb_chunk > 0
+                              ? res.cb->GetGPUVirtualAddress() + invocation_slot * res.cb_chunk : 0),
+                          static_cast<unsigned long long>(table_base.ptr),
+                          static_cast<unsigned long long>(out_rtv.ptr), out_w, out_h,
+                          static_cast<long>(scissor.right), static_cast<long>(scissor.bottom), n_in);
+        }
         cmd->DrawInstanced(3, 1, 0, 0);
+        trace_info_messages();
 
         // If the output RT was declared with auto_generate_mips, transition all
         // subresources to PSR and rebuild the chain. Final state: all subres PSR.
@@ -898,10 +1097,22 @@ void DX12Backend::execute(const std::vector<RTDesc>&                rt_descs,
             // Restore pass-loop state (descriptor heaps, root sig, primitive topology
             // are all the same; PSO will be re-set for the next pass anyway).
         }
+        if (trace) {
+            const D3D12_RESOURCE_STATES output_state = out_is_scene
+                ? D3D12_RESOURCE_STATE_RENDER_TARGET : out_int->state;
+            trace_resource("output_complete", pi, p.output, out_res, output_state);
+            api->log_info("[fx/dx12-trace] pass end index=%zu output_state=0x%x",
+                          pi, static_cast<unsigned>(output_state));
+        }
     }
 
     // UEVR's restore_plugin_rt expects the scene RT in RENDER_TARGET state — we never
     // transitioned it away after the snapshot, so nothing to do.
+    if (trace) {
+        trace_info_messages();
+        api->log_info("[fx/dx12-trace] end exec=%llu scene=%p expected_state=RT",
+                      static_cast<unsigned long long>(trace_execute), scene_native);
+    }
 }
 
 } // namespace

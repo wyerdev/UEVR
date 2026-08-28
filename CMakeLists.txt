@@ -1315,6 +1315,48 @@ set_target_properties(bloom_plugin PROPERTIES
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target magic_bloom_plugin
+set(CMKR_TARGET magic_bloom_plugin)
+set(magic_bloom_plugin_SOURCES "")
+
+list(APPEND magic_bloom_plugin_SOURCES
+	"examples/magic_bloom_plugin/MagicBloomPlugin.cpp"
+)
+
+list(APPEND magic_bloom_plugin_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${magic_bloom_plugin_SOURCES})
+add_library(magic_bloom_plugin SHARED)
+
+if(magic_bloom_plugin_SOURCES)
+	target_sources(magic_bloom_plugin PRIVATE ${magic_bloom_plugin_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${magic_bloom_plugin_SOURCES})
+
+target_compile_features(magic_bloom_plugin PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(magic_bloom_plugin PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(magic_bloom_plugin PUBLIC
+	plugin_renderlib
+)
+
+set_target_properties(magic_bloom_plugin PROPERTIES
+	OUTPUT_NAME
+		MagicBloomShader
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target adaptive_tonemapper_plugin
 set(CMKR_TARGET adaptive_tonemapper_plugin)
 set(adaptive_tonemapper_plugin_SOURCES "")

@@ -327,6 +327,14 @@ headers = ["examples/bloom_plugin/**.hpp", "examples/bloom_plugin/**.h"]
 [target.bloom_plugin.properties]
 OUTPUT_NAME = "BloomShader"
 
+[target.magic_bloom_plugin]
+type = "plugin"
+sources = ["examples/magic_bloom_plugin/MagicBloomPlugin.cpp"]
+headers = ["examples/magic_bloom_plugin/**.hpp", "examples/magic_bloom_plugin/**.h"]
+
+[target.magic_bloom_plugin.properties]
+OUTPUT_NAME = "MagicBloomShader"
+
 [target.adaptive_tonemapper_plugin]
 type = "plugin"
 sources = ["examples/adaptive_tonemapper_plugin/AdaptiveTonemapperPlugin.cpp"]

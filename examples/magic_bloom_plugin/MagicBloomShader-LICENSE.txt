@@ -1,0 +1,29 @@
+Magic Bloom by luluco250
+
+Source shader:
+https://github.com/Otakumouse/stormshade/blob/6dad6589fe505e998b01295dc6c647b031386e74/v4.X/reshade-shaders/Shader%20Library/Recommended/MagicBloom.fx
+
+Required texture:
+https://github.com/Otakumouse/stormshade/blob/6dad6589fe505e998b01295dc6c647b031386e74/v4.X/reshade-shaders/Textures/MagicBloom_Dirt.png
+
+MIT License
+
+Copyright (c) 2017 luluco250
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

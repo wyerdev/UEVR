@@ -40,9 +40,10 @@ template <typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 class DX11Backend : public EffectBackend {
 public:
     void execute(const std::vector<RTDesc>&                rt_descs,
-                 const std::vector<std::filesystem::path>& ext_tex_paths,
+                 const std::vector<ExternalTextureDesc>&   ext_tex_descs,
                  const std::vector<PassDesc>&              passes,
                  int                                       snapshot_mips,
+                 SceneSnapshotMode                         snapshot_mode,
                  uint64_t                                  pass_mask) override;
 
 private:
@@ -50,6 +51,7 @@ private:
     ComPtr<ID3D11DeviceContext>  m_ctx;
     ComPtr<ID3D11VertexShader>   m_vs;
     ComPtr<ID3D11SamplerState>   m_sampler_linear;
+    ComPtr<ID3D11SamplerState>   m_sampler_min_mag_point_mip_linear;
 
     struct PassPS {
         const char*               key      = nullptr;   // ps_hlsl pointer used as identity
@@ -90,6 +92,7 @@ private:
     struct ExtTex {
         bool                              tried = false;
         std::filesystem::path             loaded_path;     // for hot-swap detection
+        UINT                              loaded_width = 0, loaded_height = 0;
         ComPtr<ID3D11ShaderResourceView>  srv;
     };
     std::vector<ExtTex> m_ext_textures;
@@ -109,7 +112,15 @@ private:
         if (store.size() <= idx) store.resize(idx + 1);
         return store[idx];
     }
-    bool ensure_ext_tex(ID3D11Device* device, size_t idx, const std::filesystem::path& path);
+    ExtTex& ext_tex_slot(SceneSlot* scene, size_t idx, ExternalTextureSizeMode size_mode) {
+        const size_t variant = size_mode == ExternalTextureSizeMode::Scene
+            ? static_cast<size_t>(scene - m_scene_slots) : 0;
+        const size_t cache_idx = idx * std::size(m_scene_slots) + variant;
+        if (m_ext_textures.size() <= cache_idx) m_ext_textures.resize(cache_idx + 1);
+        return m_ext_textures[cache_idx];
+    }
+    bool ensure_ext_tex(ID3D11Device* device, SceneSlot* scene, size_t idx,
+                        const ExternalTextureDesc& desc);
     bool ensure_pass_cb(ID3D11Device* device, size_t idx, size_t cb_size);
 };
 
@@ -119,6 +130,7 @@ bool DX11Backend::ensure_static_state(ID3D11Device* device) {
         m_ctx.Reset();
         m_vs.Reset();
         m_sampler_linear.Reset();
+        m_sampler_min_mag_point_mip_linear.Reset();
         m_ps_cache.clear();
         for (auto& s : m_scene_slots) s = {};
         m_shared_rts.clear();
@@ -140,6 +152,14 @@ bool DX11Backend::ensure_static_state(ID3D11Device* device) {
         sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
         sd.MaxLOD = D3D11_FLOAT32_MAX;
         if (FAILED(device->CreateSamplerState(&sd, &m_sampler_linear))) return false;
+    }
+    if (!m_sampler_min_mag_point_mip_linear) {
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter = D3D11_FILTER_MIN_MAG_POINT_MIP_LINEAR;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        sd.MaxLOD = D3D11_FLOAT32_MAX;
+        if (FAILED(device->CreateSamplerState(&sd, &m_sampler_min_mag_point_mip_linear))) return false;
     }
     return true;
 }
@@ -250,21 +270,28 @@ bool DX11Backend::ensure_int_rt(ID3D11Device* device, SceneSlot* scene, size_t i
     D3D11_RENDER_TARGET_VIEW_DESC rd{};
     rd.Format = fmt; rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
     if (FAILED(device->CreateRenderTargetView(rt.tex.Get(), &rd, &rt.rtv))) return false;
+    const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    m_ctx->ClearRenderTargetView(rt.rtv.Get(), clear_color);
     rt.w = w; rt.h = h; rt.fmt = fmt;
     return true;
 }
 
-bool DX11Backend::ensure_ext_tex(ID3D11Device* device, size_t idx, const std::filesystem::path& path) {
-    if (m_ext_textures.size() <= idx) m_ext_textures.resize(idx + 1);
-    auto& e = m_ext_textures[idx];
+bool DX11Backend::ensure_ext_tex(ID3D11Device* device, SceneSlot* scene, size_t idx,
+                                  const ExternalTextureDesc& desc) {
+    auto& e = ext_tex_slot(scene, idx, desc.size_mode);
+    const UINT target_width = desc.size_mode == ExternalTextureSizeMode::Scene ? scene->w : 0;
+    const UINT target_height = desc.size_mode == ExternalTextureSizeMode::Scene ? scene->h : 0;
     // Hot-swap: if the requested path differs from what was loaded, reset the slot.
-    if (e.tried && e.loaded_path != path) { e = {}; }
+    if (e.tried && (e.loaded_path != desc.path || e.loaded_width != target_width ||
+                    e.loaded_height != target_height)) { e = {}; }
     if (e.tried) return e.srv != nullptr;
     e.tried = true;
-    e.loaded_path = path;
-    auto img = detail::load_image_rgba8(path.c_str());
+    e.loaded_path = desc.path;
+    e.loaded_width = target_width;
+    e.loaded_height = target_height;
+    auto img = detail::load_image_rgba8(desc.path.c_str(), target_width, target_height);
     if (img.width == 0) {
-        uevr::API::get()->log_warn("[fx/dx11] failed to load texture: %ls", path.c_str());
+        uevr::API::get()->log_warn("[fx/dx11] failed to load texture: %ls", desc.path.c_str());
         return false;
     }
     D3D11_TEXTURE2D_DESC td{};
@@ -279,6 +306,8 @@ bool DX11Backend::ensure_ext_tex(ID3D11Device* device, size_t idx, const std::fi
     D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
     svd.Format = td.Format; svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; svd.Texture2D.MipLevels = 1;
     if (FAILED(device->CreateShaderResourceView(tex.Get(), &svd, &e.srv))) return false;
+    uevr::API::get()->log_info("[fx/dx11] loaded texture: %ls -> %dx%d",
+                               desc.path.c_str(), img.width, img.height);
     return true;
 }
 
@@ -299,9 +328,10 @@ bool DX11Backend::ensure_pass_cb(ID3D11Device* device, size_t idx, size_t cb_siz
 }
 
 void DX11Backend::execute(const std::vector<RTDesc>&                rt_descs,
-                          const std::vector<std::filesystem::path>& ext_tex_paths,
+                          const std::vector<ExternalTextureDesc>&   ext_tex_descs,
                           const std::vector<PassDesc>&              passes,
                           int                                       snapshot_mips,
+                          SceneSnapshotMode                         snapshot_mode,
                           uint64_t                                  pass_mask) {
     static int s_last_exit = -2;
     auto exit_log = [&](int reason, const char* msg) {
@@ -336,16 +366,16 @@ void DX11Backend::execute(const std::vector<RTDesc>&                rt_descs,
     detail::set_scene_rt_format(scene->fmt);
     detail::log_scene_rt_identity_change(scene_native, scene->fmt, scene->w, scene->h);
 
-    // Snapshot the scene into the copy texture once. All passes that read INPUT_SCENE
-    // sample from this snapshot; the live scene RT is reserved for final write-back.
-    if (snap_mips > 1) {
-        // Multi-mip snapshot: source has 1 mip, dest has N — use CopySubresourceRegion
-        // for mip 0, then auto-generate mips 1..N-1 via GenerateMips().
-        m_ctx->CopySubresourceRegion(scene->copy_tex.Get(), 0, 0, 0, 0, scene_native, 0, nullptr);
-        m_ctx->GenerateMips(scene->copy_srv.Get());
-    } else {
-        m_ctx->CopyResource(scene->copy_tex.Get(), scene_native);
-    }
+    auto snapshot_scene = [&]() {
+        m_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        if (snap_mips > 1) {
+            m_ctx->CopySubresourceRegion(scene->copy_tex.Get(), 0, 0, 0, 0, scene_native, 0, nullptr);
+            m_ctx->GenerateMips(scene->copy_srv.Get());
+        } else {
+            m_ctx->CopyResource(scene->copy_tex.Get(), scene_native);
+        }
+    };
+    if (snapshot_mode == SceneSnapshotMode::OncePerExecute) snapshot_scene();
 
     auto ctx = m_ctx.Get();
     ctx->IASetInputLayout(nullptr);
@@ -357,6 +387,7 @@ void DX11Backend::execute(const std::vector<RTDesc>&                rt_descs,
         // on the second native-stereo-fix dispatch — see EffectRuntime::execute(mask)).
         if (pi < 64 && (pass_mask & (uint64_t(1) << pi)) == 0) continue;
         const auto& p = passes[pi];
+        if (snapshot_mode == SceneSnapshotMode::BeforeEveryPass) snapshot_scene();
 
         // Resolve output RTV + dimensions + format.
         ID3D11RenderTargetView* out_rtv = nullptr;
@@ -389,23 +420,39 @@ void DX11Backend::execute(const std::vector<RTDesc>&                rt_descs,
             continue;
         }
 
-        // Resolve up to 8 input SRVs.
-        constexpr UINT k_max_srvs = 8;
+        // Shader model 5 supports far more, but 16 covers the largest shipped graph.
+        constexpr UINT k_max_srvs = 16;
         ID3D11ShaderResourceView* srvs[k_max_srvs] = {};
         const size_t n_in = std::min<size_t>(p.inputs.size(), k_max_srvs);
+        bool inputs_ok = true;
         for (size_t i = 0; i < n_in; ++i) {
             const int id = p.inputs[i];
             if (id == INPUT_SCENE) {
                 srvs[i] = scene->copy_srv.Get();
             } else if (id >= EXTERNAL_TEX_BASE) {
                 const size_t ext_idx = static_cast<size_t>(id - EXTERNAL_TEX_BASE);
-                if (ext_idx < ext_tex_paths.size() && ensure_ext_tex(device, ext_idx, ext_tex_paths[ext_idx])) {
-                    srvs[i] = m_ext_textures[ext_idx].srv.Get();
-                }
+                if (ext_idx < ext_tex_descs.size() &&
+                    ensure_ext_tex(device, scene, ext_idx, ext_tex_descs[ext_idx])) {
+                    srvs[i] = ext_tex_slot(scene, ext_idx, ext_tex_descs[ext_idx].size_mode).srv.Get();
+                } else inputs_ok = false;
             } else if (id >= 0 && static_cast<size_t>(id) < rt_descs.size()) {
-                auto& store = rt_descs[id].shared_across_scene_slots ? m_shared_rts : scene->int_rts;
-                if (static_cast<size_t>(id) < store.size()) srvs[i] = store[id].srv.Get();
+                if (!ensure_int_rt(device, scene, static_cast<size_t>(id), rt_descs[id])) {
+                    inputs_ok = false;
+                    break;
+                }
+                srvs[i] = int_rt_slot(scene, static_cast<size_t>(id), rt_descs[id]).srv.Get();
+            } else {
+                inputs_ok = false;
+                break;
             }
+        }
+        if (!inputs_ok) {
+            static int s_input_skip = -1;
+            if (s_input_skip != static_cast<int>(pi)) {
+                s_input_skip = static_cast<int>(pi);
+                api->log_warn("[fx/dx11] pass %zu skipped: input resolution failed", pi);
+            }
+            continue;
         }
 
         // Upload cbuffer.
@@ -426,7 +473,11 @@ void DX11Backend::execute(const std::vector<RTDesc>&                rt_descs,
         ctx->PSSetShader(ps, nullptr, 0);
         if (cb_to_bind) ctx->PSSetConstantBuffers(0, 1, &cb_to_bind);
         ctx->PSSetShaderResources(0, static_cast<UINT>(n_in), srvs);
-        ctx->PSSetSamplers(0, 1, m_sampler_linear.GetAddressOf());
+        ID3D11SamplerState* samplers[] = {
+            m_sampler_linear.Get(),
+            m_sampler_min_mag_point_mip_linear.Get(),
+        };
+        ctx->PSSetSamplers(0, static_cast<UINT>(std::size(samplers)), samplers);
         ctx->Draw(3, 0);
 
         // Unbind SRVs so a subsequent pass can write to one of these textures.

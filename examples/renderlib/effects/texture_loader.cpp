@@ -25,11 +25,15 @@
 #define STBI_NO_STDIO  // we open the file ourselves so wide paths work on Windows
 #include "stb_image.h"
 
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#define STB_IMAGE_RESIZE_STATIC
+#include "stb_image_resize.h"
+
 #include <Windows.h>
 
 namespace uevr::fx::detail {
 
-DecodedImage load_image_rgba8(const wchar_t* path_utf16) {
+DecodedImage load_image_rgba8(const wchar_t* path_utf16, int target_width, int target_height) {
     DecodedImage out;
     if (path_utf16 == nullptr) return out;
 
@@ -59,9 +63,16 @@ DecodedImage load_image_rgba8(const wchar_t* path_utf16) {
         return out;
     }
 
-    out.width  = w;
-    out.height = h_px;
-    out.rgba8.assign(pixels, pixels + (static_cast<size_t>(w) * h_px * 4));
+    out.width  = target_width > 0 ? target_width : w;
+    out.height = target_height > 0 ? target_height : h_px;
+    out.rgba8.resize(static_cast<size_t>(out.width) * out.height * 4);
+    if (out.width == w && out.height == h_px) {
+        out.rgba8.assign(pixels, pixels + (static_cast<size_t>(w) * h_px * 4));
+    } else if (!stbir_resize_uint8(pixels, w, h_px, 0, out.rgba8.data(),
+                                   out.width, out.height, 0, 4)) {
+        stbi_image_free(pixels);
+        return {};
+    }
     stbi_image_free(pixels);
     return out;
 }

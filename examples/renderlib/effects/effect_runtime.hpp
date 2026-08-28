@@ -34,6 +34,16 @@ inline constexpr int OUTPUT_SCENE = -1;
 // `declare_rt` are 0..N-1; INPUT_SCENE/OUTPUT_SCENE is -1.
 inline constexpr int EXTERNAL_TEX_BASE = 1000000;
 
+enum class ExternalTextureSizeMode {
+    Native,
+    Scene,
+};
+
+struct ExternalTextureDesc {
+    std::filesystem::path path;
+    ExternalTextureSizeMode size_mode = ExternalTextureSizeMode::Native;
+};
+
 // Classification of the active scene RT's colorspace, surfaced so plugins can
 // warn the user when the format is ambiguous (DXGI provides no metadata to
 // distinguish a linear `*_UNORM` RT from a gamma-encoded one). A faithful
@@ -62,6 +72,11 @@ enum class SceneRTColorSpace {
 enum class Cadence {
     EveryDispatch, // default — runs on every execute() call (every eye)
     OncePerFrame,  // runs only on the first execute() of each swapchain frame
+};
+
+enum class SceneSnapshotMode {
+    OncePerExecute,
+    BeforeEveryPass,
 };
 
 struct RTDesc {
@@ -129,7 +144,9 @@ public:
     // Loads a PNG from disk (RGBA8). Returns an external-texture id (>= EXTERNAL_TEX_BASE)
     // usable in `PassDesc::inputs`, or -1 on failure. Texture is uploaded lazily on the
     // next `execute()` once the renderer device is known.
-    int load_external_texture_png(const std::filesystem::path& path);
+    int load_external_texture_png(
+        const std::filesystem::path& path,
+        ExternalTextureSizeMode size_mode = ExternalTextureSizeMode::Native);
 
     // Hot-swap the source path for a previously-loaded external texture id (returned
     // by `load_external_texture_png`). The next `execute()` detects the path change
@@ -155,6 +172,11 @@ public:
     // ports like Bloom that sample BackBuffer at non-zero LOD. Default is 1
     // (no mip chain). Call once at init; takes effect on next execute().
     void request_scene_snapshot_mips(int n);
+
+    // ReShade refreshes its COLOR-semantic texture before every pass so a pass
+    // after a scene write reads that write. Existing plugins retain the cheaper
+    // once-per-execute snapshot unless they explicitly opt in here.
+    void set_scene_snapshot_mode(SceneSnapshotMode mode) { m_snapshot_mode = mode; }
 
     // Releases all GPU resources. Call from `on_device_reset`.
     void release_resources();
@@ -224,9 +246,10 @@ private:
     // Storage for declarations is owned here so backends can be torn down + recreated
     // without losing the user's declared graph.
     std::vector<RTDesc>             m_rt_descs;
-    std::vector<std::filesystem::path> m_ext_tex_paths;
+    std::vector<ExternalTextureDesc>   m_ext_tex_descs;
     std::vector<PassDesc>           m_passes;
     int                             m_snapshot_mips = 1;
+    SceneSnapshotMode               m_snapshot_mode = SceneSnapshotMode::OncePerExecute;
     // Per-frame dispatch bookkeeping. `m_dispatch_in_frame` increments on every
     // `execute()` call and is reset to 0 by an on_present callback that the
     // runtime registers lazily on first execute(). Used by `Cadence::OncePerFrame`

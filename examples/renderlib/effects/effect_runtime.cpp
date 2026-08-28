@@ -47,12 +47,13 @@ bool fx_diag_enabled() {
 // violation in on_pre_render_vr_framework_dx12 callback` lines.
 bool dispatch_backend_seh(EffectBackend* backend,
                           const std::vector<RTDesc>& rts,
-                          const std::vector<std::filesystem::path>& exts,
+                          const std::vector<ExternalTextureDesc>& exts,
                           const std::vector<PassDesc>& passes,
                           int snapshot_mips,
+                          SceneSnapshotMode snapshot_mode,
                           uint64_t pass_mask) {
     __try {
-        backend->execute(rts, exts, passes, snapshot_mips, pass_mask);
+        backend->execute(rts, exts, passes, snapshot_mips, snapshot_mode, pass_mask);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -225,16 +226,17 @@ int EffectRuntime::declare_rt(const RTDesc& desc) {
     return static_cast<int>(m_rt_descs.size() - 1);
 }
 
-int EffectRuntime::load_external_texture_png(const std::filesystem::path& path) {
-    m_ext_tex_paths.push_back(path);
-    return EXTERNAL_TEX_BASE + static_cast<int>(m_ext_tex_paths.size() - 1);
+int EffectRuntime::load_external_texture_png(
+    const std::filesystem::path& path, ExternalTextureSizeMode size_mode) {
+    m_ext_tex_descs.push_back({path, size_mode});
+    return EXTERNAL_TEX_BASE + static_cast<int>(m_ext_tex_descs.size() - 1);
 }
 
 void EffectRuntime::replace_external_texture_png(int id, const std::filesystem::path& path) {
     const int idx = id - EXTERNAL_TEX_BASE;
-    if (idx < 0 || static_cast<size_t>(idx) >= m_ext_tex_paths.size()) return;
-    if (m_ext_tex_paths[idx] == path) return;
-    m_ext_tex_paths[idx] = path;
+    if (idx < 0 || static_cast<size_t>(idx) >= m_ext_tex_descs.size()) return;
+    if (m_ext_tex_descs[idx].path == path) return;
+    m_ext_tex_descs[idx].path = path;
     // The backend's ExtTex slot tracks the loaded path; mismatch on next execute()
     // triggers an automatic reset+reload. No explicit invalidation signal needed.
 }
@@ -399,12 +401,12 @@ void EffectRuntime::execute(uint64_t pass_mask) {
     if (m_backend == nullptr || m_last_renderer_type != static_cast<int>(rd->renderer_type)) {
         m_backend.reset();
         if (rd->renderer_type == UEVR_RENDERER_D3D11) {
-            api->log_info("[fx] creating DX11 backend (passes=%zu, snapshot_mips=%d)",
-                          m_passes.size(), m_snapshot_mips);
+            api->log_info("[fx] creating DX11 backend (passes=%zu, snapshot_mips=%d, snapshot_mode=%d)",
+                          m_passes.size(), m_snapshot_mips, static_cast<int>(m_snapshot_mode));
             m_backend = make_backend_d3d11();
         } else if (rd->renderer_type == UEVR_RENDERER_D3D12) {
-            api->log_info("[fx] creating DX12 backend (passes=%zu, snapshot_mips=%d)",
-                          m_passes.size(), m_snapshot_mips);
+            api->log_info("[fx] creating DX12 backend (passes=%zu, snapshot_mips=%d, snapshot_mode=%d)",
+                          m_passes.size(), m_snapshot_mips, static_cast<int>(m_snapshot_mode));
             m_backend = make_backend_d3d12();
         } else {
             log_exit(2, "unsupported renderer type"); return;
@@ -416,7 +418,8 @@ void EffectRuntime::execute(uint64_t pass_mask) {
 
     log_exit(99, "dispatching backend->execute()");
 
-    if (!dispatch_backend_seh(m_backend.get(), m_rt_descs, m_ext_tex_paths, m_passes, m_snapshot_mips, pass_mask)) {
+    if (!dispatch_backend_seh(m_backend.get(), m_rt_descs, m_ext_tex_descs, m_passes,
+                              m_snapshot_mips, m_snapshot_mode, pass_mask)) {
         // Backend AV'd — almost always a stale scene-RT/cmd-list across a VR or
         // device transition. Drop the backend so it gets rebuilt fresh on the
         // next call instead of repeatedly re-entering corrupt state.

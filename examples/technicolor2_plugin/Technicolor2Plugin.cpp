@@ -170,6 +170,13 @@ public:
                 changed = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Higher means darker and more intense colors");
+            ImGui::SameLine();
+            if (ImGui::Button("Reset##tech2_color")) {
+                m_color_r = TECH2_DEFAULT_COLOR_R;
+                m_color_g = TECH2_DEFAULT_COLOR_G;
+                m_color_b = TECH2_DEFAULT_COLOR_B;
+                changed = true;
+            }
 
             changed |= ImGui::DragFloat("Brightness##tech2", &m_brightness, 0.01f, 0.5f, 1.5f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Higher means brighter image");

@@ -75,7 +75,11 @@ def build_prefix_map(
     mapping = {}
     idx = 0
     for _order, shader_name, _plugin_dir in orders:
-        if any(ex.lower() in shader_name.lower() for ex in exclude):
+        excluded_names = {
+            ex.lower() if ex.lower().endswith("shader") else f"{ex.lower()}shader"
+            for ex in exclude
+        }
+        if shader_name.lower() in excluded_names:
             continue
         prefix = f"{idx:02d}"
         mapping[shader_name] = f"{prefix}_{shader_name}"
@@ -157,7 +161,7 @@ def main():
         "--exclude",
         nargs="*",
         default=["Bloom"],
-        help="Shader name substrings to exclude (default: Bloom)",
+        help="Exact shader names to exclude, with optional Shader suffix (default: Bloom)",
     )
     parser.add_argument(
         "--copy-licenses",
