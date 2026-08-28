@@ -211,6 +211,7 @@ public:
         m_enabled = false;
         m_amount  = 1.0f;
         m_selected_filename.clear();
+        if (!m_presets.empty()) apply_preset(0);
     }
     // ----------------------------------------------------------------------
 
@@ -278,6 +279,8 @@ public:
             changed |= ImGui::Checkbox("Enabled##LUT", &m_enabled);
             changed |= ImGui::DragFloat("Amount##LUT", &m_amount, 0.01f, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blend between original (0) and LUT-graded (1)");
+            ImGui::SameLine();
+            if (ImGui::Button("Reset##LUT_amount")) { m_amount = 1.0f; changed = true; }
 
             // Preset combo + quick-pick button row.
             if (m_presets.empty()) {
@@ -289,6 +292,11 @@ public:
                 for (auto& s : m_preset_labels) labels.push_back(s.c_str());
                 if (ImGui::Combo("Preset##LUT", &sel, labels.data(), static_cast<int>(labels.size()))) {
                     apply_preset(sel);
+                    changed = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##LUT_preset")) {
+                    apply_preset(0);
                     changed = true;
                 }
                 // Button row: one button per preset, wraps via SameLine + CalcItemWidth.
@@ -311,7 +319,12 @@ public:
             }
 
             ImGui::Spacing();
-            if (ImGui::Button("Reset Amount##LUT")) { m_amount = 1.0f; changed = true; }
+            if (ImGui::Button("Reset All##LUT")) {
+                const bool enabled = m_enabled;
+                reset_to_defaults();
+                m_enabled = enabled;
+                changed = true;
+            }
             ImGui::SameLine();
             if (ImGui::Button("Rescan Presets##LUT")) {
                 rescan_presets();

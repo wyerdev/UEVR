@@ -649,6 +649,8 @@ public:
                 changed |= ImGui::RadioButton("SmallTex mip8 (current avg)##ATMdbg",&m_DebugVisualizeAdapt, 4);
                 changed |= ImGui::RadioButton("Tonemapped luma##ATMdbg",            &m_DebugVisualizeAdapt, 5);
                 changed |= ImGui::RadioButton("Calibration bars##ATMdbg",           &m_DebugVisualizeAdapt, 6);
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##ATM_debug")) { m_DebugVisualizeAdapt = 0; changed = true; }
                 ImGui::TreePop();
             }
             ImGui::Spacing();
@@ -664,6 +666,7 @@ public:
                 m_AdaptPrecision   = DEFAULT_ADAPT_PRECISION;
                 m_AdaptFocalPoint[0] = DEFAULT_FOCAL_POINT_X;
                 m_AdaptFocalPoint[1] = DEFAULT_FOCAL_POINT_Y;
+                m_DebugVisualizeAdapt = 0;
                 changed = true;
             }
             ImGui::SameLine();

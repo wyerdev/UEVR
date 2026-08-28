@@ -442,24 +442,48 @@ public:
             bool changed = false;
             changed |= ImGui::Checkbox("Enabled##AdaptiveSharpen", &m_enabled);
             changed |= ImGui::SliderFloat("Sharpening strength##AdaptiveSharpen", &m_curve_height, 0.01f, 2.0f, "%.2f");
+            ImGui::SameLine();
+            if (ImGui::Button("Reset##AdaptiveSharpen_curve_height")) { m_curve_height = AS_DEFAULT_CURVE_HEIGHT; changed = true; }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Main control of sharpening strength.");
 
             if (ImGui::TreeNode("Advanced##AdaptiveSharpen")) {
                 changed |= ImGui::SliderFloat("Curve slope##AdaptiveSharpen", &m_curveslope, 0.01f, 2.0f, "%.2f");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##AdaptiveSharpen_curve_slope")) { m_curveslope = AS_DEFAULT_CURVE_SLOPE; changed = true; }
                 changed |= ImGui::SliderFloat("Light overshoot##AdaptiveSharpen", &m_L_overshoot, 0.001f, 0.1f, "%.3f");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##AdaptiveSharpen_l_overshoot")) { m_L_overshoot = AS_DEFAULT_L_OVERSHOOT; changed = true; }
                 changed |= ImGui::SliderFloat("Light compression low##AdaptiveSharpen", &m_L_compr_low, 0.0f, 1.0f, "%.3f");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##AdaptiveSharpen_l_compr_low")) { m_L_compr_low = AS_DEFAULT_L_COMPR_LOW; changed = true; }
                 changed |= ImGui::SliderFloat("Light compression high##AdaptiveSharpen", &m_L_compr_high, 0.0f, 1.0f, "%.3f");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##AdaptiveSharpen_l_compr_high")) { m_L_compr_high = AS_DEFAULT_L_COMPR_HIGH; changed = true; }
                 changed |= ImGui::SliderFloat("Dark overshoot##AdaptiveSharpen", &m_D_overshoot, 0.001f, 0.1f, "%.3f");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##AdaptiveSharpen_d_overshoot")) { m_D_overshoot = AS_DEFAULT_D_OVERSHOOT; changed = true; }
                 changed |= ImGui::SliderFloat("Dark compression low##AdaptiveSharpen", &m_D_compr_low, 0.0f, 1.0f, "%.3f");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##AdaptiveSharpen_d_compr_low")) { m_D_compr_low = AS_DEFAULT_D_COMPR_LOW; changed = true; }
                 changed |= ImGui::SliderFloat("Dark compression high##AdaptiveSharpen", &m_D_compr_high, 0.0f, 1.0f, "%.3f");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##AdaptiveSharpen_d_compr_high")) { m_D_compr_high = AS_DEFAULT_D_COMPR_HIGH; changed = true; }
                 changed |= ImGui::SliderFloat("Scale limit##AdaptiveSharpen", &m_scale_lim, 0.01f, 1.0f, "%.3f");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##AdaptiveSharpen_scale_lim")) { m_scale_lim = AS_DEFAULT_SCALE_LIM; changed = true; }
                 changed |= ImGui::SliderFloat("Scale compression slope##AdaptiveSharpen", &m_scale_cs, 0.0f, 1.0f, "%.3f");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##AdaptiveSharpen_scale_cs")) { m_scale_cs = AS_DEFAULT_SCALE_CS; changed = true; }
                 changed |= ImGui::SliderFloat("Power mean p-value##AdaptiveSharpen", &m_pm_p, 0.01f, 1.0f, "%.2f");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##AdaptiveSharpen_pm_p")) { m_pm_p = AS_DEFAULT_PM_P; changed = true; }
                 ImGui::TreePop();
             }
 
             if (ImGui::Button("Reset All##AdaptiveSharpen")) {
+                const bool enabled = m_enabled;
                 reset_to_defaults();
+                m_enabled = enabled;
                 changed = true;
             }
             if (changed) uevr::settings::notify_changed(*this, API::get()->param());

@@ -789,98 +789,194 @@ public:
                 const char* mix_items = "Linear add\0Screen add\0Screen/Lighten/Opacity\0Lighten\0";
                 changed |= ImGui::Combo("Mix Mode##Bloom", &m_iBloomMixmode, mix_items);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("How the blurred bright layer is composited. Screen-style modes are usually safer than linear add.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_mixmode")) { m_iBloomMixmode = 2; changed = true; }
                 changed |= ImGui::DragFloat("Threshold##Bloom",  &m_fBloomThreshold,  0.001f, 0.1f, 1.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brightness cutoff for bloom. Raise this in VR-LDR or the whole image may haze over.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_threshold")) { m_fBloomThreshold = 0.8f; changed = true; }
                 changed |= ImGui::DragFloat("Amount##Bloom",     &m_fBloomAmount,     0.01f,  0.0f, 20.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bloom strength. Start very low; high values are tuned for HDR sources this pipeline does not provide.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_amount")) { m_fBloomAmount = 0.8f; changed = true; }
                 changed |= ImGui::DragFloat("Saturation##Bloom", &m_fBloomSaturation, 0.01f,  0.0f, 2.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Color saturation in the bloom layer. Lower if glow tints shadows or UI.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_saturation")) { m_fBloomSaturation = 0.8f; changed = true; }
                 changed |= ImGui::ColorEdit3("Tint##Bloom", m_fBloomTint);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Color multiplier for the bloom layer.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_tint")) {
+                    m_fBloomTint[0] = 0.7f; m_fBloomTint[1] = 0.8f; m_fBloomTint[2] = 1.0f;
+                    changed = true;
+                }
                 ImGui::TreePop();
             }
             if (ImGui::TreeNode("Lens Dirt")) {
                 changed |= ImGui::Checkbox("Enable##Lensdirt", &m_bLensdirtEnable);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overlay the shipped lens dirt texture using bloom brightness. Usually distracting in VR.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_lensdirt_enable")) { m_bLensdirtEnable = false; changed = true; }
                 const char* mix_items = "Linear add\0Screen add\0Screen/Lighten/Opacity\0Lighten\0";
                 changed |= ImGui::Combo("Mix Mode##Lensdirt", &m_iLensdirtMixmode, mix_items);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("How lens dirt is composited over the scene.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_lensdirt_mixmode")) { m_iLensdirtMixmode = 1; changed = true; }
                 changed |= ImGui::DragFloat("Intensity##Lensdirt",  &m_fLensdirtIntensity,  0.01f, 0.0f, 2.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lens dirt visibility. Keep low; fixed-screen dirt can feel uncomfortable in-headset.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_lensdirt_intensity")) { m_fLensdirtIntensity = 0.4f; changed = true; }
                 changed |= ImGui::DragFloat("Saturation##Lensdirt", &m_fLensdirtSaturation, 0.01f, 0.0f, 2.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lens dirt color intensity. Lower for a neutral smudge, higher for colored flare artifacts.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_lensdirt_saturation")) { m_fLensdirtSaturation = 2.0f; changed = true; }
                 changed |= ImGui::ColorEdit3("Tint##Lensdirt", m_fLensdirtTint);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Color multiplier for the lens dirt texture.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_lensdirt_tint")) {
+                    m_fLensdirtTint[0] = 1.0f; m_fLensdirtTint[1] = 1.0f; m_fLensdirtTint[2] = 1.0f;
+                    changed = true;
+                }
                 ImGui::TreePop();
             }
             if (ImGui::TreeNode("Anamorphic Flare")) {
                 changed |= ImGui::Checkbox("Enable##Anam", &m_bAnamFlareEnable);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Horizontal flare streaks from bright regions. Centered/screen-space effects can break on stitched stereo RTs.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_anam_enable")) { m_bAnamFlareEnable = false; changed = true; }
                 changed |= ImGui::DragFloat("Threshold##Anam", &m_fAnamFlareThreshold, 0.001f, 0.1f, 1.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brightness cutoff for anamorphic streaks. Higher limits the effect to only the brightest pixels.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_anam_threshold")) { m_fAnamFlareThreshold = 0.9f; changed = true; }
                 changed |= ImGui::DragFloat("Wideness##Anam",  &m_fAnamFlareWideness,  0.01f,  1.0f, 2.5f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Horizontal spread of the flare streak.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_anam_wideness")) { m_fAnamFlareWideness = 2.4f; changed = true; }
                 changed |= ImGui::DragFloat("Amount##Anam",    &m_fAnamFlareAmount,    0.1f,   1.0f, 20.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Anamorphic flare intensity. Keep low unless deliberately testing flare behavior.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_anam_amount")) { m_fAnamFlareAmount = 14.5f; changed = true; }
                 changed |= ImGui::DragFloat("Curve##Anam",     &m_fAnamFlareCurve,     0.01f,  1.0f, 2.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Falloff curve for the flare streak. Higher concentrates it around bright sources.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_anam_curve")) { m_fAnamFlareCurve = 1.2f; changed = true; }
                 changed |= ImGui::ColorEdit3("Color##Anam", m_fAnamFlareColor);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tint for the anamorphic flare.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_anam_color")) {
+                    m_fAnamFlareColor[0] = 0.012f; m_fAnamFlareColor[1] = 0.313f; m_fAnamFlareColor[2] = 0.588f;
+                    changed = true;
+                }
                 ImGui::TreePop();
             }
             if (ImGui::TreeNode("Lenz")) {
                 changed |= ImGui::Checkbox("Enable##Lenz", &m_bLenzEnable);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Radial lens flare component. Not recommended for normal VR play.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_lenz_enable")) { m_bLenzEnable = false; changed = true; }
                 changed |= ImGui::DragFloat("Intensity##Lenz", &m_fLenzIntensity, 0.01f, 0.2f, 3.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Strength of the Lenz flare layer.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_lenz_intensity")) { m_fLenzIntensity = 1.0f; changed = true; }
                 changed |= ImGui::DragFloat("Threshold##Lenz", &m_fLenzThreshold, 0.01f, 0.6f, 1.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brightness cutoff for Lenz flares. Higher reduces false positives in LDR scenes.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_lenz_threshold")) { m_fLenzThreshold = 0.8f; changed = true; }
                 ImGui::TreePop();
             }
             if (ImGui::TreeNode("Chapman Flare")) {
                 changed |= ImGui::Checkbox("Enable##Chap", &m_bChapFlareEnable);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Repeated ghost flares from bright regions. Usually a flatscreen lens effect, not a VR comfort feature.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_chap_enable")) { m_bChapFlareEnable = false; changed = true; }
                 changed |= ImGui::DragFloat("Threshold##Chap",  &m_fChapFlareTreshold,  0.001f, 0.7f,  0.99f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brightness cutoff for Chapman ghost flares.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_chap_threshold")) { m_fChapFlareTreshold = 0.90f; changed = true; }
                 changed |= ImGui::DragInt("Count##Chap",        &m_iChapFlareCount,     1.0f,   1,     20);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Number of ghost samples. More samples cost more and can clutter the image.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_chap_count")) { m_iChapFlareCount = 15; changed = true; }
                 changed |= ImGui::DragFloat("Dispersal##Chap",  &m_fChapFlareDispersal, 0.01f,  0.25f, 1.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Spacing between ghost flare samples.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_chap_dispersal")) { m_fChapFlareDispersal = 0.25f; changed = true; }
                 changed |= ImGui::DragFloat("Size##Chap",       &m_fChapFlareSize,      0.01f,  0.20f, 0.80f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Size of each ghost flare sample.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_chap_size")) { m_fChapFlareSize = 0.45f; changed = true; }
                 changed |= ImGui::DragFloat3("Chromatic Ab##Chap", m_fChapFlareCA, 0.001f, -0.5f, 0.5f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("RGB channel offsets for chromatic splitting. Keep near zero in VR.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_chap_ca")) {
+                    m_fChapFlareCA[0] = 0.00f; m_fChapFlareCA[1] = 0.01f; m_fChapFlareCA[2] = 0.02f;
+                    changed = true;
+                }
                 changed |= ImGui::DragFloat("Intensity##Chap",  &m_fChapFlareIntensity, 0.5f,   5.0f,  200.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overall Chapman flare intensity. Source values are aggressive for VR-LDR.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_chap_intensity")) { m_fChapFlareIntensity = 100.0f; changed = true; }
                 ImGui::TreePop();
             }
             if (ImGui::TreeNode("Godrays")) {
                 changed |= ImGui::Checkbox("Enable##Godray", &m_bGodrayEnable);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Screen-center godray approximation. This is seam-sensitive in native-stereo textures.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_godray_enable")) { m_bGodrayEnable = false; changed = true; }
                 changed |= ImGui::DragFloat("Decay##Godray",     &m_fGodrayDecay,     0.0001f, 0.5f, 0.9999f, "%.4f");
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("How quickly ray samples fade with distance.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_godray_decay")) { m_fGodrayDecay = 0.99f; changed = true; }
                 changed |= ImGui::DragFloat("Exposure##Godray",  &m_fGodrayExposure,  0.01f,   0.7f, 1.5f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brightness of the accumulated ray samples.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_godray_exposure")) { m_fGodrayExposure = 1.0f; changed = true; }
                 changed |= ImGui::DragFloat("Weight##Godray",    &m_fGodrayWeight,    0.01f,   0.8f, 1.7f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-sample contribution weight.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_godray_weight")) { m_fGodrayWeight = 1.25f; changed = true; }
                 changed |= ImGui::DragFloat("Density##Godray",   &m_fGodrayDensity,   0.01f,   0.2f, 2.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Spacing/density of ray samples along the screen-space vector.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_godray_density")) { m_fGodrayDensity = 1.0f; changed = true; }
                 changed |= ImGui::DragFloat("Threshold##Godray", &m_fGodrayThreshold, 0.01f,   0.6f, 1.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brightness cutoff before a pixel contributes to godrays.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_godray_threshold")) { m_fGodrayThreshold = 0.9f; changed = true; }
                 changed |= ImGui::DragInt("Samples##Godray",     &m_iGodraySamples,   1.0f,    8,    256);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ray sample count. Higher is smoother but more expensive.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_godray_samples")) { m_iGodraySamples = 128; changed = true; }
                 ImGui::TreePop();
             }
             if (ImGui::TreeNode("Flare (AnamSamples)")) {
                 changed |= ImGui::DragFloat("Luminance##Flare", &m_fFlareLuminance, 0.001f, 0.0f,  1.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Minimum luminance feeding the flare sample path.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_flare_luminance")) { m_fFlareLuminance = 0.095f; changed = true; }
                 changed |= ImGui::DragFloat("Blur##Flare",      &m_fFlareBlur,      1.0f,   1.0f,  10000.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blur radius for the flare sample path. Very large values can smear the frame.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_flare_blur")) { m_fFlareBlur = 200.0f; changed = true; }
                 changed |= ImGui::DragFloat("Intensity##Flare", &m_fFlareIntensity, 0.01f,  0.20f, 5.0f);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overall flare sample intensity.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_flare_intensity")) { m_fFlareIntensity = 2.07f; changed = true; }
                 changed |= ImGui::ColorEdit3("Tint##Flare", m_fFlareTint);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tint for the flare sample path.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##Bloom_flare_tint")) {
+                    m_fFlareTint[0] = 0.137f; m_fFlareTint[1] = 0.216f; m_fFlareTint[2] = 1.0f;
+                    changed = true;
+                }
                 ImGui::TreePop();
+            }
+            ImGui::Spacing();
+            if (ImGui::Button("Reset All##Bloom")) {
+                const bool enabled = m_enabled;
+                reset_to_defaults();
+                m_enabled = enabled;
+                changed = true;
             }
             if (changed) uevr::settings::notify_changed(*this, API::get()->param());
         }

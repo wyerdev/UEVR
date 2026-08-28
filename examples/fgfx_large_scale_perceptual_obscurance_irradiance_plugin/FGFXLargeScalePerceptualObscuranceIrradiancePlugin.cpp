@@ -651,6 +651,8 @@ public:
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Run the whole multi-pass FGFX effect. This is heavier than simple color shaders.");
             changed |= ImGui::Checkbox("Effect Enabled##LSPOIrr", &m_effect_enabled);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Source shader bypass inside the final pass. Useful for comparing runtime cost and debug outputs while keeping resources active.");
+            ImGui::SameLine();
+            if (ImGui::Button("Reset##LSPOIrr_effect_enabled")) { m_effect_enabled = DEFAULT_EFFECT_ENABLED; changed = true; }
 
             if (ImGui::TreeNodeEx("Effect Settings##LSPOIrr", ImGuiTreeNodeFlags_DefaultOpen)) {
                 changed |= slider_with_reset("Effect Intensity##LSPOIrr", &m_effect_intensity, 0.01f, 0.0f, 1.0f, "%.2f", DEFAULT_EFFECT_INTENSITY, "Reset##LSPOIrr_effect_intensity",
@@ -693,6 +695,8 @@ public:
                 };
                 changed |= ImGui::Combo("Debug Type##LSPOIrr", &m_debug_type, items, IM_ARRAYSIZE(items));
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Visualize internal blur, gain, threshold, and recovery stages. Use None for normal play.");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##LSPOIrr_debug_type")) { m_debug_type = DEFAULT_DEBUG_TYPE; changed = true; }
                 ImGui::TreePop();
             }
 

@@ -419,11 +419,14 @@ public:
             if (ImGui::TreeNode("Debug##EyeAdaption")) {
                 changed |= ImGui::RadioButton("Off##EyeAdaption_dbg", &m_DebugMode, 0);
                 changed |= ImGui::RadioButton("Show averaged luminance##EyeAdaption_dbg", &m_DebugMode, 1);
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##EyeAdaption_debug")) { m_DebugMode = 0; changed = true; }
                 ImGui::TreePop();
             }
 
             if (ImGui::Button("Reset All##EyeAdaption")) {
                 restore_original_defaults();
+                m_DebugMode = 0;
                 changed = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Restore brussell EyeAdaption.fx default values.");
